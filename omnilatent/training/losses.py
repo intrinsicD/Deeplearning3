@@ -57,9 +57,13 @@ class ReconstructionLoss(nn.Module):
 
         l1 = F.l1_loss(pred_mel, target_mel)
 
+        # Pad to next power of 2 for cuFFT compatibility
+        n = pred_mel.shape[-1]
+        fft_size = 1 << (n - 1).bit_length()  # next power of 2
+
         # Simple spectral convergence on magnitude
-        pred_spec = torch.abs(torch.fft.rfft(pred_mel, dim=-1))
-        tgt_spec = torch.abs(torch.fft.rfft(target_mel, dim=-1))
+        pred_spec = torch.abs(torch.fft.rfft(pred_mel, n=fft_size, dim=-1))
+        tgt_spec = torch.abs(torch.fft.rfft(target_mel, n=fft_size, dim=-1))
         spectral = torch.norm(tgt_spec - pred_spec) / (torch.norm(tgt_spec) + 1e-8)
 
         return l1 + 0.5 * spectral
@@ -74,8 +78,12 @@ class ReconstructionLoss(nn.Module):
         l1 = F.l1_loss(pred, target)
 
         # Simple frequency-domain loss (DCT-like via 2D FFT)
-        pred_freq = torch.fft.rfft2(pred)
-        tgt_freq = torch.fft.rfft2(target)
+        # Pad spatial dims to next power of 2 for cuFFT compatibility
+        h, w = pred.shape[-2], pred.shape[-1]
+        fft_h = 1 << (h - 1).bit_length()
+        fft_w = 1 << (w - 1).bit_length()
+        pred_freq = torch.fft.rfft2(pred, s=(fft_h, fft_w))
+        tgt_freq = torch.fft.rfft2(target, s=(fft_h, fft_w))
         freq_loss = F.l1_loss(pred_freq.abs(), tgt_freq.abs())
 
         return l1 + 0.1 * freq_loss
