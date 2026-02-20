@@ -364,6 +364,10 @@ class VideoWatchingDataset(Dataset):
         if self.mel_transform is None:
             return None
 
+        # Skip empty audio tracks
+        if audio.numel() == 0:
+            return None
+
         c = self.config
         sr = info.get("audio_fps", 44100)
 
