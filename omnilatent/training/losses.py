@@ -26,10 +26,17 @@ class ReconstructionLoss(nn.Module):
     ) -> torch.Tensor:
         """Cross-entropy over vocabulary.
 
-        logits:  (B, T, vocab_size)
-        targets: (B, T) long
+        logits:  (B, T_pred, vocab_size)
+        targets: (B, T_tgt) long
+
+        Handles mismatched sequence lengths (common in cross-modal
+        decoding) by truncating to the shorter length.
         """
-        B, T, V = logits.shape
+        B, T_pred, V = logits.shape
+        T_tgt = targets.shape[1]
+        T = min(T_pred, T_tgt)
+        logits = logits[:, :T].contiguous()
+        targets = targets[:, :T].contiguous()
         return F.cross_entropy(
             logits.reshape(B * T, V),
             targets.reshape(B * T),

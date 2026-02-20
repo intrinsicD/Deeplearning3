@@ -218,6 +218,126 @@ config = OmniLatentConfig()
 config = OmniLatentConfig(hidden_dim=1024, num_layers=16, num_heads=16)
 ```
 
+## Learning from Video (Curriculum Training)
+
+The most powerful way to train OmniLatent: learn from raw video files. A single video naturally contains **three modalities aligned in time** (visual frames, audio track, optional transcript), providing free cross-modal supervision with no manual labelling.
+
+### What it learns from each video
+
+| Extracted pair | What the model learns |
+|---|---|
+| Video frames + audio | What sounds go with what visuals |
+| Past frames + future frames | Temporal prediction, causality |
+| Single frame + audio | Scene-sound association |
+| Video + transcript | Visual-language grounding |
+| Audio + transcript | Speech understanding |
+
+### Prepare your videos
+
+Put video files (`.mp4`, `.avi`, `.mkv`, `.webm`, etc.) in a directory. Optionally add transcript files alongside each video:
+
+```
+videos/
+  lecture01.mp4
+  lecture01.txt          # plain text transcript (optional)
+  nature_doc.mp4
+  nature_doc.srt         # SRT subtitles (optional)
+  music_video.webm       # no transcript needed
+  subfolder/
+    clip.mp4
+```
+
+### Run curriculum training
+
+```bash
+python curriculum_train.py --video-dir /path/to/videos
+```
+
+The trainer runs 5 phases automatically:
+
+| Phase | Steps | Tasks | Purpose |
+|---|---|---|---|
+| 1. Warmup | 10% | video recon, audio recon | Learn to encode/decode each modality |
+| 2. Cross-modal | 25% | + video↔audio | Learn audio-visual correspondence |
+| 3. Temporal | 25% | + temporal prediction | Learn to predict future from past |
+| 4. Grounding | 15% | + video→text, audio→text | Learn language grounding (needs transcripts) |
+| 5. Joint | 25% | all tasks together | Unify all capabilities |
+
+### CLI options
+
+```bash
+python curriculum_train.py --help
+
+# Quick test run
+python curriculum_train.py --video-dir ./videos --total-steps 500
+
+# Custom model size
+python curriculum_train.py --video-dir ./videos --dim 512 --layers 8 --heads 8
+
+# Custom phase durations
+python curriculum_train.py --video-dir ./videos \
+    --warmup-frac 0.05 --crossmodal-frac 0.30 --temporal-frac 0.30
+
+# Resume from checkpoint
+python curriculum_train.py --video-dir ./videos --resume checkpoints/checkpoint_step50000.pt
+
+# Test with synthetic data (no videos needed)
+python curriculum_train.py --synthetic --total-steps 200
+```
+
+### Use in code
+
+```python
+from omnilatent import OmniLatentConfig, OmniLatentModel
+from omnilatent.training.video_dataset import VideoWatchingDataset, collate_video_watching
+from curriculum_train import CurriculumTrainer
+from torch.utils.data import DataLoader
+
+config = OmniLatentConfig()
+model = OmniLatentModel(config)
+
+dataset = VideoWatchingDataset(
+    video_dir="/path/to/videos",
+    config=config,
+    clip_duration=2.0,   # seconds per clip
+    clip_stride=1.0,     # overlap between clips
+)
+
+dataloader = DataLoader(
+    dataset,
+    batch_size=4,
+    shuffle=True,
+    collate_fn=collate_video_watching,
+    num_workers=2,
+)
+
+trainer = CurriculumTrainer(
+    model=model,
+    config=config,
+    dataloader=dataloader,
+    total_steps=100_000,
+    save_dir="checkpoints",
+)
+trainer.train()
+```
+
+### Custom tokenizer
+
+The video pipeline includes a simple byte-level tokenizer for transcripts. For better text quality, plug in your own:
+
+```python
+import sentencepiece as spm
+sp = spm.SentencePieceProcessor("tokenizer.model")
+
+dataset = VideoWatchingDataset(
+    video_dir="./videos",
+    config=config,
+    tokenizer_fn=lambda text, max_len: torch.tensor(
+        sp.encode(text)[:max_len], dtype=torch.long
+    ),
+)
+```
+
 ## Tests
 
 ```bash
@@ -225,12 +345,14 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-34 tests covering:
+45 tests covering:
 - Model construction and all 16 modality pair forward passes
 - Latent Neural Hook lifecycle, composition, and gradient flow
 - Gradient flow verification (no dead branches, no NaN/Inf)
 - Training stability (loss decreases over steps)
 - Gradient checkpointing equivalence
+- Video watching pipeline (transcript parsing, tokenization, collation)
+- Curriculum trainer (phase transitions, synthetic data integration)
 
 ## Running the demo
 
