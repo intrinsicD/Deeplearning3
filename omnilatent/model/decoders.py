@@ -74,29 +74,27 @@ class ImageDecoder(nn.Module):
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
         self.config = config
-        P = config.image_patch_size
-        C = config.image_channels
         D = config.hidden_dim
+        self.grid_size = config.image_size // config.image_patch_size
         self.norm = RMSNorm(D)
-        self.head = nn.Linear(D, C * P * P, bias=True)
-        self.grid_size = config.image_size // P
+        
+        # 4x upsampling (2^4 = 16) to reach the 16x16 patch size smoothly
+        self.upconv_stack = nn.Sequential(
+            nn.ConvTranspose2d(D, D // 2, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(),
+            nn.ConvTranspose2d(D // 2, D // 4, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(),
+            nn.ConvTranspose2d(D // 4, D // 8, kernel_size=4, stride=2, padding=1),
+            nn.SiLU(),
+            nn.ConvTranspose2d(D // 8, config.image_channels, kernel_size=4, stride=2, padding=1),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, N_patches, D) → images: (B, C, H, W).
-
-        N_patches must equal grid_size^2.
-        """
-        x = self.head(self.norm(x))   # (B, N, C*P*P)
-        x = rearrange(
-            x,
-            "b (gh gw) (c ph pw) -> b c (gh ph) (gw pw)",
-            gh=self.grid_size,
-            gw=self.grid_size,
-            ph=self.config.image_patch_size,
-            pw=self.config.image_patch_size,
-            c=self.config.image_channels,
-        )
-        return x
+        x = self.norm(x)
+        # Reshape 1D sequence to 2D spatial grid: (B, 196, D) -> (B, D, 14, 14)
+        x = rearrange(x, "b (gh gw) d -> b d gh gw", gh=self.grid_size, gw=self.grid_size)
+        # Apply deconvolutions to smooth out the image
+        return self.upconv_stack(x)
 
 
 # ---------------------------------------------------------------------------
