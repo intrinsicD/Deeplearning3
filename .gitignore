@@ -8,3 +8,5 @@ build/
 *.pt
 *.pth
 *.ckpt
+checkpoints/
+eval_output/
