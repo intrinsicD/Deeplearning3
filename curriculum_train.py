@@ -399,7 +399,7 @@ def main() -> None:
     print(f"Device:      {'cuda' if torch.cuda.is_available() else 'cpu'}")
     if torch.cuda.is_available():
         print(f"GPU:         {torch.cuda.get_device_name()}")
-        mem = torch.cuda.get_device_properties(0).total_mem / 1024**3
+        mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"VRAM:        {mem:.1f} GB")
 
     model = OmniLatentModel(config)
