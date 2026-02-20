@@ -245,8 +245,13 @@ def eval_reconstruction(model: OmniLatentModel, config: OmniLatentConfig, device
             print(f"  {mod:>6s}: token accuracy = {acc:.4f}")
         else:
             # For continuous modalities: MSE and cosine similarity
+            # Decoder may output a different size than the input,
+            # so truncate both to the shorter length before comparing.
             flat_inp = inp.flatten(1)
             flat_out = output.flatten(1)
+            min_len = min(flat_inp.shape[1], flat_out.shape[1])
+            flat_inp = flat_inp[:, :min_len]
+            flat_out = flat_out[:, :min_len]
             mse = F.mse_loss(flat_out, flat_inp).item()
             cos = F.cosine_similarity(flat_out, flat_inp, dim=-1).mean().item()
             results[mod] = {"mse": mse, "cosine_sim": cos}
