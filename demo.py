@@ -70,18 +70,22 @@ def main() -> None:
     # -------------------------------------------------------------------------
     print("=== Cross-Modal Translation ===")
     with torch.no_grad():
-        # Image → Text
-        result = model("image", image, "text")
+        # Image → Text (teacher-forced with text_ids as target)
+        result = model("image", image, "text", text_ids)
         logits = result["output"]
         tokens = logits.argmax(dim=-1)
         print(f"  image → text: logits {tuple(logits.shape)}, token ids {tokens[0, :8].tolist()}...")
 
-        # Text → Image
+        # Image → Text (autoregressive generation)
+        generated = model.generate("image", image, max_len=16)
+        print(f"  image → text (generate): {tuple(generated.shape)}, ids {generated[0, :8].tolist()}...")
+
+        # Text → Image (learned target queries)
         result = model("text", text_ids, "image")
         img_out = result["output"]
         print(f"  text → image: output {tuple(img_out.shape)}")
 
-        # Audio → Video
+        # Audio → Video (learned target queries)
         result = model("audio", audio_mel, "video")
         vid_out = result["output"]
         print(f"  audio → video: output {tuple(vid_out.shape)}")
@@ -115,9 +119,9 @@ def main() -> None:
         g = style_hook.gate_value(l).item()
         print(f"    Layer {l} gate: {g:.4f}")
 
-    # Run forward pass WITH hooks
+    # Run forward pass WITH hooks (teacher-forced)
     with torch.no_grad():
-        result_hooked = model("image", image, "text")
+        result_hooked = model("image", image, "text", text_ids)
         print(f"  Forward with hook: output {tuple(result_hooked['output'].shape)}")
 
     # Remove hook

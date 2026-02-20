@@ -1,27 +1,32 @@
-"""OmniLatent: all-to-all multimodal model.
+"""OmniLatent: all-to-all multimodal model with Prefix-LM architecture.
 
 This is the top-level model.  It owns:
   * Modality encoders  (text, audio, image, video)
   * A shared Unified Transformer backbone
   * Modality decoders  (text, audio, image, video)
+  * A TargetQueryGenerator for non-text output modalities
   * A HookManager for Latent Neural Hooks
   * Modality indicator embeddings
 
-Any input modality can produce any output modality ("all-to-all") by:
-  1. Encoding the source signal into latent tokens.
-  2. Prepending a *source modality token* and a *target modality token*.
-  3. Passing through the shared backbone.
-  4. Decoding with the appropriate target decoder.
+Architecture (Prefix-LM with Learned Target Queries):
+  1. Source modality is encoded into prefix tokens (bidirectional).
+  2. Target tokens are appended:
+     - For text: teacher-forced token embeddings (causal masking).
+     - For image/audio/video: learned target queries (bidirectional).
+  3. Attention mask enforces: source cannot see target; target sees
+     source + itself (causally for text, bidirectionally for others).
+  4. Target region of backbone output is decoded by the appropriate decoder.
+
+This replaces the previous F.interpolate hack for cross-modal sequence
+length adaptation.
 """
 
 from __future__ import annotations
 
-from typing import Literal, Sequence
+from typing import Sequence
 
 import torch
 import torch.nn as nn
-
-import torch.nn.functional as F
 
 from omnilatent.config import OmniLatentConfig
 from omnilatent.model.backbone import UnifiedTransformer
@@ -42,8 +47,49 @@ from omnilatent.model.hooks import HookManager, LatentNeuralHook
 from omnilatent.utils import MODALITY_ID, Modality
 
 
+class TargetQueryGenerator(nn.Module):
+    """Generates learned target queries for non-text output modalities.
+
+    For image/video/audio targets, the model uses fixed-size learned
+    query parameters (similar to DETR object queries or Perceiver
+    latent arrays).  These attend to source tokens through the backbone
+    and are then decoded to the target modality.
+    """
+
+    def __init__(self, config: OmniLatentConfig) -> None:
+        super().__init__()
+        self.config = config
+        D = config.hidden_dim
+
+        self.image_queries = nn.Parameter(
+            torch.randn(1, config.image_num_patches, D) * 0.02
+        )
+
+        num_vid_queries = (
+            (config.video_max_frames // config.video_temporal_patch)
+            * config.video_spatial_patches
+        )
+        self.video_queries = nn.Parameter(
+            torch.randn(1, num_vid_queries, D) * 0.02
+        )
+
+        num_aud_queries = config.audio_max_frames // config.audio_patch_frames
+        self.audio_queries = nn.Parameter(
+            torch.randn(1, num_aud_queries, D) * 0.02
+        )
+
+    def forward(self, modality: str, batch_size: int) -> torch.Tensor:
+        if modality == "image":
+            return self.image_queries.expand(batch_size, -1, -1)
+        elif modality == "video":
+            return self.video_queries.expand(batch_size, -1, -1)
+        elif modality == "audio":
+            return self.audio_queries.expand(batch_size, -1, -1)
+        raise ValueError(f"No target queries for modality: {modality}")
+
+
 class OmniLatentModel(nn.Module):
-    """All-to-all multimodal model with Latent Neural Hook extensibility."""
+    """All-to-all multimodal model with Prefix-LM architecture."""
 
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
@@ -74,6 +120,9 @@ class OmniLatentModel(nn.Module):
             "image": ImageDecoder(config),
             "video": VideoDecoder(config),
         })
+
+        # --- Target query generator for non-text modalities ---
+        self.target_query_gen = TargetQueryGenerator(config)
 
         # --- Hook manager ---
         self.hook_manager = HookManager()
@@ -119,33 +168,45 @@ class OmniLatentModel(nn.Module):
         return list(self.hook_manager.hooks.keys())
 
     # ------------------------------------------------------------------
-    # Sequence length adaptation for cross-modal decoding
+    # Prefix-LM attention mask
     # ------------------------------------------------------------------
-    def _expected_decoder_tokens(self, modality: Modality) -> int | None:
-        """Return the expected number of tokens for a decoder, or None if
-        the decoder accepts variable-length input."""
-        if modality == "image":
-            return self.config.image_num_patches
-        if modality == "video":
-            nt = self.config.video_max_frames // self.config.video_temporal_patch
-            return nt * self.config.video_spatial_patches
-        return None  # text and audio accept variable length
-
-    def _adapt_seq_len(
-        self, x: torch.Tensor, target_len: int
+    def _create_attention_mask(
+        self,
+        src_len: int,
+        tgt_len: int,
+        target_modality: str,
+        device: torch.device,
     ) -> torch.Tensor:
-        """Adapt token sequence length via 1-D interpolation.
+        """Create Prefix-LM attention mask.
 
-        x: (B, N, D) → (B, target_len, D).
-        Uses linear interpolation in the sequence dimension, which
-        preserves gradient flow.
+        Layout: [source_tokens (src_len), target_tokens (tgt_len)]
+
+        PyTorch SDPA convention: True = CAN attend, False = masked.
+
+        Rules:
+          - Source → Source: True (bidirectional)
+          - Source → Target: False (source can't see the answer)
+          - Target → Source: True (target reads source)
+          - Target → Target:
+              text: causal (lower triangle = True)
+              other: True (bidirectional)
         """
-        if x.shape[1] == target_len:
-            return x
-        # Treat as (B, D, N) for F.interpolate, then transpose back
-        x_t = x.transpose(1, 2)  # (B, D, N)
-        x_t = F.interpolate(x_t, size=target_len, mode="linear", align_corners=False)
-        return x_t.transpose(1, 2)  # (B, target_len, D)
+        tot = src_len + tgt_len
+        # Start with everything attending
+        mask = torch.ones(tot, tot, dtype=torch.bool, device=device)
+
+        # Source cannot attend to target tokens
+        mask[:src_len, src_len:] = False
+
+        # For text: causal mask within target region
+        if target_modality == "text":
+            causal = torch.tril(
+                torch.ones(tgt_len, tgt_len, dtype=torch.bool, device=device)
+            )
+            mask[src_len:, src_len:] = causal
+
+        # (1, 1, tot, tot) for broadcasting over batch and heads
+        return mask.unsqueeze(0).unsqueeze(0)
 
     # ------------------------------------------------------------------
     # Encoding
@@ -180,52 +241,130 @@ class OmniLatentModel(nn.Module):
             source_modality: which modality the input is.
             source_data: raw input tensor (shape depends on modality).
             target_modality: which modality to produce.
-            target_data: ground truth for the target modality (for loss
-                computation during training).  None during inference.
+            target_data: ground truth for the target modality.  For text
+                targets this enables teacher-forced decoding.  For non-text
+                targets it's passed through for loss computation only.
 
         Returns a dict with:
-            "latent":  (B, N, D) backbone output
+            "latent":  (B, total_seq, D) backbone output
             "output":  decoder output (shape depends on target modality)
             "target":  target_data passed through for loss computation
         """
         B = source_data.shape[0]
+        device = source_data.device
 
-        # 1. Encode source
+        # 1. Encode source (includes modality indicator token)
         src_tokens = self.encode(source_modality, source_data)
+        src_len = src_tokens.shape[1]
 
-        # 2. Prepend target modality token
-        tgt_tok = self.target_embed(
-            torch.tensor(MODALITY_ID[target_modality], device=source_data.device)
+        # 2. Generate target queries
+        if target_modality == "text":
+            if target_data is not None:
+                # Teacher forcing: BOS + target[:-1] (shifted right)
+                bos = torch.full(
+                    (B, 1), self.config.text_bos_token,
+                    dtype=torch.long, device=device,
+                )
+                tgt_input = torch.cat([bos, target_data[:, :-1]], dim=1)
+                tgt_queries = self.encoders["text"](tgt_input)
+            else:
+                # Inference: just BOS (use generate() for full decoding)
+                bos = torch.full(
+                    (B, 1), self.config.text_bos_token,
+                    dtype=torch.long, device=device,
+                )
+                tgt_queries = self.encoders["text"](bos)
+        else:
+            tgt_queries = self.target_query_gen(target_modality, B)
+
+        # 3. Prepend target modality token to queries
+        tgt_mod_tok = self.target_embed(
+            torch.tensor(MODALITY_ID[target_modality], device=device)
         ).unsqueeze(0).unsqueeze(0).expand(B, 1, -1)
-        tokens = torch.cat([tgt_tok, src_tokens], dim=1)
+        tgt_with_mod = torch.cat([tgt_mod_tok, tgt_queries], dim=1)
+        tgt_len = tgt_with_mod.shape[1]
 
-        # 3. Set up hooks
+        # 4. Concatenate source prefix + target suffix
+        tokens = torch.cat([src_tokens, tgt_with_mod], dim=1)
+
+        # 5. Create Prefix-LM attention mask
+        attn_mask = self._create_attention_mask(
+            src_len, tgt_len, target_modality, device,
+        )
+
+        # 6. Set up hooks
         if self.hook_manager.has_hooks():
             self.hook_manager.begin_forward(B)
 
-        # 4. Backbone
+        # 7. Backbone
         latent = self.backbone(
             tokens,
+            attn_mask=attn_mask,
             hook_manager=self.hook_manager if self.hook_manager.has_hooks() else None,
         )
 
-        # 5. Strip the leading modality/target tokens for decoding
-        # tokens layout: [target_mod_tok, source_mod_tok, content_tokens...]
-        content_latent = latent[:, 2:]  # skip target + source modality tokens
+        # 8. Extract target region (skip target modality token)
+        tgt_latent = latent[:, src_len + 1:]  # skip tgt_mod_tok
 
-        # 6. Adapt sequence length for spatial decoders (image, video)
-        expected = self._expected_decoder_tokens(target_modality)
-        if expected is not None:
-            content_latent = self._adapt_seq_len(content_latent, expected)
-
-        # 7. Decode to target modality
-        output = self.decoders[target_modality](content_latent)
+        # 9. Decode to target modality
+        output = self.decoders[target_modality](tgt_latent)
 
         return {
             "latent": latent,
             "output": output,
             "target": target_data,
         }
+
+    # ------------------------------------------------------------------
+    # Autoregressive text generation
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def generate(
+        self,
+        source_modality: Modality,
+        source_data: torch.Tensor,
+        max_len: int = 50,
+    ) -> torch.Tensor:
+        """Autoregressive text generation from any source modality.
+
+        Returns: (B, max_len) long tensor of generated token IDs.
+        """
+        B = source_data.shape[0]
+        device = source_data.device
+
+        # Encode source once
+        src_tokens = self.encode(source_modality, source_data)
+        src_len = src_tokens.shape[1]
+
+        # Start with BOS
+        generated_ids = torch.full(
+            (B, 1), self.config.text_bos_token,
+            dtype=torch.long, device=device,
+        )
+
+        for _ in range(max_len):
+            # Embed current generated tokens
+            tgt_queries = self.encoders["text"](generated_ids)
+
+            # Target modality token
+            tgt_mod_tok = self.target_embed(
+                torch.tensor(MODALITY_ID["text"], device=device)
+            ).unsqueeze(0).unsqueeze(0).expand(B, 1, -1)
+            tgt_with_mod = torch.cat([tgt_mod_tok, tgt_queries], dim=1)
+            tgt_len = tgt_with_mod.shape[1]
+
+            tokens = torch.cat([src_tokens, tgt_with_mod], dim=1)
+            attn_mask = self._create_attention_mask(
+                src_len, tgt_len, "text", device,
+            )
+
+            latent = self.backbone(tokens, attn_mask=attn_mask)
+            # Get logits for the last target position
+            logits = self.decoders["text"](latent[:, -1:])  # (B, 1, V)
+            next_token = logits.argmax(dim=-1)  # (B, 1)
+            generated_ids = torch.cat([generated_ids, next_token], dim=1)
+
+        return generated_ids[:, 1:]  # strip BOS
 
     # ------------------------------------------------------------------
     # Convenience: self-reconstruction (encode-decode same modality)
@@ -246,68 +385,31 @@ class OmniLatentModel(nn.Module):
         inputs: dict[Modality, torch.Tensor],
         target_modalities: Sequence[Modality] | None = None,
     ) -> dict[str, dict[str, torch.Tensor]]:
-        """Process multiple modalities and optionally decode to multiple targets.
+        """Process multiple input modalities and decode to multiple targets.
 
-        Encodes all provided modalities, concatenates their tokens, passes
-        through the backbone once, then decodes to each target modality.
-
-        This is more efficient than calling forward() multiple times because
-        the backbone is shared.
-
-        Args:
-            inputs: dict mapping modality name to raw tensor.
-            target_modalities: which modalities to decode to.
-                Defaults to all input modalities (reconstruction).
-
-        Returns a dict keyed by target modality name, each containing
-        the decoder output.
+        For each target, selects the matching source modality if available,
+        otherwise uses the first available source.  Runs a separate backbone
+        pass per target (required because different targets need different
+        attention masks and query configurations).
         """
         if target_modalities is None:
             target_modalities = list(inputs.keys())
 
-        # Encode all input modalities
-        all_tokens = []
-        token_ranges: dict[str, tuple[int, int]] = {}
-        offset = 0
-        for mod, data in inputs.items():
-            enc = self.encode(mod, data)
-            start = offset
-            offset += enc.shape[1]
-            token_ranges[mod] = (start, offset)
-            all_tokens.append(enc)
-
-        combined = torch.cat(all_tokens, dim=1)
-        B = combined.shape[0]
-
-        # Set up hooks
-        if self.hook_manager.has_hooks():
-            self.hook_manager.begin_forward(B)
-
-        # Backbone
-        latent = self.backbone(
-            combined,
-            hook_manager=self.hook_manager if self.hook_manager.has_hooks() else None,
-        )
-
-        # Decode each target
         results: dict[str, dict[str, torch.Tensor]] = {}
         for tgt_mod in target_modalities:
-            # Use latent tokens corresponding to the source modality if
-            # available, otherwise use the full latent sequence
-            if tgt_mod in token_ranges:
-                start, end = token_ranges[tgt_mod]
-                # +1 to skip modality indicator token
-                tgt_latent = latent[:, start + 1 : end]
+            # Pick source: prefer same modality, else first available
+            if tgt_mod in inputs:
+                src_mod = tgt_mod
             else:
-                # Cross-modal generation: use all content tokens
-                tgt_latent = latent[:, 1:]  # skip first modality token
+                src_mod = next(iter(inputs))
 
-            # Adapt sequence length for spatial decoders
-            expected = self._expected_decoder_tokens(tgt_mod)
-            if expected is not None:
-                tgt_latent = self._adapt_seq_len(tgt_latent, expected)
-
-            output = self.decoders[tgt_mod](tgt_latent)
-            results[tgt_mod] = {"output": output, "latent": tgt_latent}
+            result = self.forward(
+                src_mod, inputs[src_mod], tgt_mod,
+                target_data=inputs.get(tgt_mod),
+            )
+            results[tgt_mod] = {
+                "output": result["output"],
+                "latent": result["latent"],
+            }
 
         return results

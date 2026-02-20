@@ -419,225 +419,48 @@ class VideoWatchingDataset(Dataset):
             return self.tokenizer_fn(text, c.text_max_len)
         return _simple_tokenize(text, c.text_max_len, c.vocab_size)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
-        path, start_sec, transcript = self.index[idx]
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        """Return all available modalities for this clip as a dict.
 
-        # Load clip
+        The trainer picks (source, target) modality pairs dynamically,
+        so no data is wasted on dropped task groups.  This matches the
+        format of SyntheticMultiModalDataset.
+        """
+        path, start_sec, transcript = self.index[idx]
         video_raw, audio_raw, info = self._load_clip(path, start_sec)
 
-        # Process modalities
-        video_tensor = None
-        audio_tensor = None
-        image_tensor = None
-        text_tensor = None
+        sample: dict[str, torch.Tensor] = {}
 
         if video_raw is not None and video_raw.shape[0] > 0:
-            video_tensor = self._process_video_frames(video_raw)
-            image_tensor = self._process_frame_as_image(video_raw)
+            sample["video"] = self._process_video_frames(video_raw)
+            sample["image"] = self._process_frame_as_image(video_raw)
 
         if audio_raw is not None:
             audio_tensor = self._process_audio(audio_raw, info)
+            if audio_tensor is not None:
+                sample["audio"] = audio_tensor
 
         if transcript is not None:
-            text_tensor = self._tokenize(transcript)
+            sample["text"] = self._tokenize(transcript)
 
-        # Determine available tasks for this sample
-        available_tasks = []
-        for task in self.tasks:
-            if task == "video_recon" and video_tensor is not None:
-                available_tasks.append(task)
-            elif task == "audio_recon" and audio_tensor is not None:
-                available_tasks.append(task)
-            elif task == "video_to_audio" and video_tensor is not None and audio_tensor is not None:
-                available_tasks.append(task)
-            elif task == "audio_to_video" and audio_tensor is not None and video_tensor is not None:
-                available_tasks.append(task)
-            elif task == "temporal_predict" and video_tensor is not None:
-                available_tasks.append(task)
-            elif task == "frame_to_audio" and image_tensor is not None and audio_tensor is not None:
-                available_tasks.append(task)
-            elif task == "video_to_text" and video_tensor is not None and text_tensor is not None:
-                available_tasks.append(task)
-            elif task == "audio_to_text" and audio_tensor is not None and text_tensor is not None:
-                available_tasks.append(task)
+        # Fallback: if nothing was extracted, return a dummy audio tensor
+        if not sample:
+            sample["audio"] = torch.zeros(self.config.audio_n_mels, 16)
 
-        if not available_tasks:
-            # Fallback: return whatever we have as reconstruction
-            return self._fallback_sample(video_tensor, audio_tensor, image_tensor)
-
-        task = random.choice(available_tasks)
-        return self._build_sample(
-            task, video_tensor, audio_tensor, image_tensor, text_tensor
-        )
-
-    def _build_sample(
-        self,
-        task: str,
-        video: torch.Tensor | None,
-        audio: torch.Tensor | None,
-        image: torch.Tensor | None,
-        text: torch.Tensor | None,
-    ) -> dict[str, torch.Tensor | str]:
-        """Build a training sample for a specific task.
-
-        Returns a dict with "source_modality", "target_modality",
-        "source", "target", and "task" keys.
-        """
-        if task == "video_recon":
-            return {
-                "source_modality": "video",
-                "target_modality": "video",
-                "source": video,
-                "target": video,
-                "task": task,
-            }
-        elif task == "audio_recon":
-            return {
-                "source_modality": "audio",
-                "target_modality": "audio",
-                "source": audio,
-                "target": audio,
-                "task": task,
-            }
-        elif task == "video_to_audio":
-            return {
-                "source_modality": "video",
-                "target_modality": "audio",
-                "source": video,
-                "target": audio,
-                "task": task,
-            }
-        elif task == "audio_to_video":
-            return {
-                "source_modality": "audio",
-                "target_modality": "video",
-                "source": audio,
-                "target": video,
-                "task": task,
-            }
-        elif task == "temporal_predict":
-            # Split video in half: first half → predict second half
-            c = self.config
-            t_mid = c.video_max_frames // 2
-            past = video[:, :t_mid].contiguous()
-            future = video[:, t_mid:].contiguous()
-            # Pad past to full video_max_frames for the encoder
-            past_padded = F.pad(past, (0, 0, 0, 0, 0, t_mid))
-            return {
-                "source_modality": "video",
-                "target_modality": "video",
-                "source": past_padded,
-                "target": video,  # full video as target
-                "task": task,
-            }
-        elif task == "frame_to_audio":
-            return {
-                "source_modality": "image",
-                "target_modality": "audio",
-                "source": image,
-                "target": audio,
-                "task": task,
-            }
-        elif task == "video_to_text":
-            return {
-                "source_modality": "video",
-                "target_modality": "text",
-                "source": video,
-                "target": text,
-                "task": task,
-            }
-        elif task == "audio_to_text":
-            return {
-                "source_modality": "audio",
-                "target_modality": "text",
-                "source": audio,
-                "target": text,
-                "task": task,
-            }
-        else:
-            raise ValueError(f"Unknown task: {task}")
-
-    def _fallback_sample(
-        self,
-        video: torch.Tensor | None,
-        audio: torch.Tensor | None,
-        image: torch.Tensor | None,
-    ) -> dict[str, torch.Tensor | str]:
-        """Return a self-reconstruction sample for whatever modality is
-        available."""
-        if video is not None:
-            return {
-                "source_modality": "video",
-                "target_modality": "video",
-                "source": video,
-                "target": video,
-                "task": "video_recon",
-            }
-        if audio is not None:
-            return {
-                "source_modality": "audio",
-                "target_modality": "audio",
-                "source": audio,
-                "target": audio,
-                "task": "audio_recon",
-            }
-        if image is not None:
-            return {
-                "source_modality": "image",
-                "target_modality": "image",
-                "source": image,
-                "target": image,
-                "task": "image_recon",
-            }
-        # Nothing available — return dummy
-        c = self.config
-        dummy = torch.zeros(c.audio_n_mels, 16)
-        return {
-            "source_modality": "audio",
-            "target_modality": "audio",
-            "source": dummy,
-            "target": dummy,
-            "task": "fallback",
-        }
+        return sample
 
 
 # -------------------------------------------------------------------------
 # Collation for task-based samples
 # -------------------------------------------------------------------------
 def collate_video_watching(
-    batch: list[dict[str, torch.Tensor | str]],
-) -> list[dict[str, torch.Tensor | str]]:
+    batch: list[dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
     """Collate for VideoWatchingDataset.
 
-    Because each sample may have different source/target modality shapes,
-    we group samples by (source_modality, target_modality) and batch
-    each group separately.  Returns a list of batched groups.
-
-    For simplicity with the trainer, we pick the largest group in each
-    collation call and return just that as a single batch dict.
+    Delegates to the standard multi-modal collation from data.py.
+    Each sample is a dict of modality_name → tensor, and the collator
+    pads text/audio and stacks image/video.
     """
-    from collections import defaultdict
-
-    groups: dict[tuple[str, str], list] = defaultdict(list)
-    for sample in batch:
-        key = (sample["source_modality"], sample["target_modality"])
-        groups[key].append(sample)
-
-    # Pick the largest group
-    best_key = max(groups, key=lambda k: len(groups[k]))
-    group = groups[best_key]
-
-    src_mod = group[0]["source_modality"]
-    tgt_mod = group[0]["target_modality"]
-
-    # Stack tensors
-    sources = torch.stack([s["source"] for s in group])
-    targets = torch.stack([s["target"] for s in group])
-
-    return {
-        "source_modality": src_mod,
-        "target_modality": tgt_mod,
-        "source": sources,
-        "target": targets,
-        "task": group[0]["task"],
-    }
+    from omnilatent.training.data import collate_multimodal
+    return collate_multimodal(batch)

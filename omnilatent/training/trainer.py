@@ -123,6 +123,15 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", dtype=self.amp_dtype, enabled=self.config.mixed_precision):
+            # Encode all available modalities for contrastive loss
+            latents = None
+            if len(available) >= 2 and self.config.contrastive_weight > 0:
+                latents = {}
+                for mod in available:
+                    enc = self.model.encode(mod, batch[mod])
+                    # Mean-pool content tokens (skip modality indicator at pos 0)
+                    latents[mod] = enc[:, 1:].mean(dim=1)
+
             result = self.model(
                 source_modality=src_mod,
                 source_data=batch[src_mod],
@@ -133,13 +142,6 @@ class Trainer:
             # Compute loss
             predictions = {tgt_mod: result["output"]}
             targets = {tgt_mod: batch[tgt_mod]}
-
-            # For contrastive loss: pool latent for each available modality
-            latents = None
-            if len(available) >= 2 and self.config.contrastive_weight > 0:
-                latents = {}
-                # Use the latent from the current pass
-                latents[src_mod] = result["latent"][:, 0]  # CLS-like first token
 
             loss_dict = self.criterion(predictions, targets, latents)
 

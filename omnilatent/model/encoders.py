@@ -5,6 +5,9 @@ latent tokens (B, N, D) that the backbone transformer can process.
 
 Design for 8 GB: encoders are deliberately lightweight (conv stacks /
 patch embeddings), with the heavy lifting done by the shared backbone.
+
+All spatial/temporal encoders include learned absolute positional embeddings,
+since the backbone uses RoPE only for 1-D sequence position.
 """
 
 from __future__ import annotations
@@ -57,7 +60,8 @@ class AudioEncoder(nn.Module):
     """Converts a mel spectrogram (B, n_mels, T_frames) into latent tokens.
 
     Uses a stack of 1-D convolutions that progressively compress the time
-    axis while expanding channels to hidden_dim.
+    axis while expanding channels to hidden_dim.  Includes learned
+    positional embeddings to encode temporal position.
     """
 
     def __init__(self, config: OmniLatentConfig) -> None:
@@ -75,12 +79,15 @@ class AudioEncoder(nn.Module):
             nn.SiLU(),
         )
         self.norm = RMSNorm(D)
+        # Positional embeddings: max tokens = audio_max_frames // audio_patch_frames
+        max_tokens = config.audio_max_frames // config.audio_patch_frames
+        self.pos_embed = nn.Parameter(torch.randn(1, max_tokens, D) * 0.02)
 
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
         """mel: (B, n_mels, T_frames) → (B, N_tokens, D)."""
         x = self.conv_stack(mel)        # (B, D, T')
         x = x.transpose(1, 2)           # (B, T', D)
-        return self.norm(x)
+        return self.norm(x + self.pos_embed[:, :x.shape[1]])
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +103,16 @@ class ImageEncoder(nn.Module):
             C, D, kernel_size=P, stride=P, bias=True
         )
         self.norm = RMSNorm(D)
+        # Learned 2D positional embedding (flattened)
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, config.image_num_patches, D) * 0.02
+        )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """images: (B, C, H, W) → (B, N_patches, D)."""
         x = self.patch_embed(images)             # (B, D, H', W')
         x = rearrange(x, "b d h w -> b (h w) d")
-        return self.norm(x)
+        return self.norm(x + self.pos_embed)
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +122,8 @@ class VideoEncoder(nn.Module):
     """Converts a video tensor into latent tokens.
 
     Uses a 3-D convolution to create spatio-temporal patches, then
-    flattens into a token sequence.  For a 16-frame 112x112 video with
-    temporal_patch=4, spatial_patch=16:
-        temporal tokens  = 16/4 = 4
-        spatial tokens   = (112/16)^2 = 49
-        total tokens     = 4 * 49 = 196  (very manageable!)
+    flattens into a token sequence.  Includes learned spatio-temporal
+    positional embeddings.
     """
 
     def __init__(self, config: OmniLatentConfig) -> None:
@@ -129,9 +137,15 @@ class VideoEncoder(nn.Module):
             bias=True,
         )
         self.norm = RMSNorm(D)
+        # Learned positional embedding
+        num_patches = (
+            (config.video_max_frames // config.video_temporal_patch)
+            * config.video_spatial_patches
+        )
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, D) * 0.02)
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
         """video: (B, C, T_frames, H, W) → (B, N_tokens, D)."""
         x = self.patch_embed(video)  # (B, D, T', H', W')
         x = rearrange(x, "b d t h w -> b (t h w) d")
-        return self.norm(x)
+        return self.norm(x + self.pos_embed[:, :x.shape[1]])

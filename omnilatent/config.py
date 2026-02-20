@@ -33,6 +33,8 @@ class OmniLatentConfig:
     # --- Text ---
     vocab_size: int = 32_000
     text_max_len: int = 512
+    text_pad_token: int = 0
+    text_bos_token: int = 1
 
     # --- Audio ---
     audio_n_mels: int = 128        # mel spectrogram bins

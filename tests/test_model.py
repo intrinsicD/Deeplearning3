@@ -119,7 +119,8 @@ class TestForwardPass:
         model: OmniLatentModel,
         sample_data: dict[str, torch.Tensor],
     ) -> None:
-        result = model("image", sample_data["image"], "text")
+        # With teacher forcing (provides text target)
+        result = model("image", sample_data["image"], "text", sample_data["text"])
         assert result["output"].shape[0] == sample_data["image"].shape[0]
         assert result["output"].shape[2] == model.config.vocab_size
 
@@ -129,7 +130,7 @@ class TestForwardPass:
         sample_data: dict[str, torch.Tensor],
     ) -> None:
         result = model("text", sample_data["text"], "image")
-        # Text decoder for image: each text token gets decoded as an image patch
+        # Target queries produce fixed-size image output
         assert result["output"].shape[0] == sample_data["text"].shape[0]
 
     def test_all_modality_pairs(
@@ -140,7 +141,11 @@ class TestForwardPass:
         """Verify all 16 modality combinations produce valid output."""
         for src in ALL_MODALITIES:
             for tgt in ALL_MODALITIES:
-                result = model(src, sample_data[src], tgt)
+                # Pass target_data for teacher forcing (text targets need it)
+                result = model(
+                    src, sample_data[src], tgt,
+                    target_data=sample_data.get(tgt),
+                )
                 assert result["output"] is not None
                 assert result["output"].shape[0] == 2  # batch size
                 assert not torch.isnan(result["output"]).any(), (

@@ -3,7 +3,7 @@
 Since we can't rely on actual video files in CI, these tests cover:
   * Transcript parsing (SRT, plain text)
   * Simple tokenizer
-  * Collation logic
+  * Collation logic (now uses standard multi-modal collation)
   * CurriculumTrainer with synthetic data
   * Integration: curriculum training runs for a few steps
 """
@@ -90,58 +90,35 @@ class TestSimpleTokenizer:
 
 
 class TestCollation:
-    def test_collate_same_modality(self) -> None:
+    def test_collate_multimodal_format(self) -> None:
+        """Collation works with the standard multi-modal dict format."""
         batch = [
             {
-                "source_modality": "video",
-                "target_modality": "audio",
-                "source": torch.randn(3, 4, 32, 32),
-                "target": torch.randn(32, 64),
-                "task": "video_to_audio",
+                "video": torch.randn(3, 4, 32, 32),
+                "audio": torch.randn(32, 64),
+                "image": torch.randn(3, 32, 32),
             },
             {
-                "source_modality": "video",
-                "target_modality": "audio",
-                "source": torch.randn(3, 4, 32, 32),
-                "target": torch.randn(32, 64),
-                "task": "video_to_audio",
+                "video": torch.randn(3, 4, 32, 32),
+                "audio": torch.randn(32, 64),
+                "image": torch.randn(3, 32, 32),
             },
         ]
         result = collate_video_watching(batch)
-        assert result["source_modality"] == "video"
-        assert result["target_modality"] == "audio"
-        assert result["source"].shape[0] == 2
-        assert result["target"].shape[0] == 2
+        assert "video" in result
+        assert "audio" in result
+        assert "image" in result
+        assert result["video"].shape[0] == 2
+        assert result["audio"].shape[0] == 2
 
-    def test_collate_mixed_modalities(self) -> None:
-        """When batch has mixed tasks, picks the largest group."""
+    def test_collate_with_variable_audio(self) -> None:
+        """Audio with different lengths gets padded."""
         batch = [
-            {
-                "source_modality": "video",
-                "target_modality": "video",
-                "source": torch.randn(3, 4, 32, 32),
-                "target": torch.randn(3, 4, 32, 32),
-                "task": "video_recon",
-            },
-            {
-                "source_modality": "video",
-                "target_modality": "video",
-                "source": torch.randn(3, 4, 32, 32),
-                "target": torch.randn(3, 4, 32, 32),
-                "task": "video_recon",
-            },
-            {
-                "source_modality": "audio",
-                "target_modality": "audio",
-                "source": torch.randn(32, 64),
-                "target": torch.randn(32, 64),
-                "task": "audio_recon",
-            },
+            {"audio": torch.randn(32, 32)},
+            {"audio": torch.randn(32, 64)},
         ]
         result = collate_video_watching(batch)
-        # Should pick the video_recon group (size 2 > 1)
-        assert result["source_modality"] == "video"
-        assert result["source"].shape[0] == 2
+        assert result["audio"].shape == (2, 32, 64)  # padded to max
 
 
 class TestCurriculumTrainer:
@@ -220,7 +197,6 @@ class TestCurriculumTrainer:
     def test_loss_decreases_curriculum(self, config: OmniLatentConfig) -> None:
         """Loss should decrease when overfitting on a fixed batch."""
         import torch.nn.functional as TF
-        from curriculum_train import CurriculumTrainer, Phase
 
         model = OmniLatentModel(config)
         model.train()

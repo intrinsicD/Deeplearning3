@@ -121,7 +121,7 @@ class TestGradientFlow:
     ) -> None:
         """Gradients flow in cross-modal (image→text) pass."""
         model.train()
-        result = model("image", sample_data["image"], "text")
+        result = model("image", sample_data["image"], "text", sample_data["text"])
         logits = result["output"]
         B, T, V = logits.shape
         targets = torch.randint(0, V, (B, T))

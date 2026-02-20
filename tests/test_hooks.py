@@ -67,17 +67,19 @@ class TestHookCreation:
         gate_val = hook.gate_value(0).item()
         assert gate_val < 0.05  # sigmoid(-4) ≈ 0.018
 
-    def test_influence_starts_zero(self, config: OmniLatentConfig) -> None:
+    def test_gate_scales_hook_tokens(self, config: OmniLatentConfig) -> None:
+        """Hook tokens scaled by gate should be near-zero at init."""
         hook = LatentNeuralHook(
             name="test",
             num_tokens=4,
             dim=config.hidden_dim,
             target_layers=[0],
+            gate_bias_init=-4.0,
         )
         tokens = hook.get_hook_tokens(batch_size=2)
-        influence = hook.compute_influence(0, tokens)
-        # Should be near-zero at init (zero-init projection + small gate)
-        assert influence.abs().max().item() < 0.1
+        gated = tokens * hook.gate_value(0)
+        # sigmoid(-4) ≈ 0.018, so gated tokens should be very small
+        assert gated.abs().max().item() < 0.01
 
 
 class TestHookManager:

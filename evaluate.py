@@ -245,7 +245,6 @@ def eval_reconstruction(model: OmniLatentModel, config: OmniLatentConfig, device
             print(f"  {mod:>6s}: token accuracy = {acc:.4f}")
         else:
             # For continuous modalities: MSE and cosine similarity
-            # Flatten for comparison
             flat_inp = inp.flatten(1)
             flat_out = output.flatten(1)
             mse = F.mse_loss(flat_out, flat_inp).item()
@@ -275,7 +274,8 @@ def eval_cross_modal(model: OmniLatentModel, config: OmniLatentConfig, device: t
     ]
 
     for src, tgt in pairs:
-        result = model(src, data[src], tgt)
+        # Pass target_data for teacher forcing (text targets need it)
+        result = model(src, data[src], tgt, data.get(tgt))
         output = result["output"]
 
         # Check output is valid (no NaN/Inf, reasonable magnitude)
@@ -306,12 +306,12 @@ def eval_latent_space(model: OmniLatentModel, config: OmniLatentConfig, device: 
     print("\n=== Latent Space Analysis ===")
     data = generate_test_data(config, device)
 
-    # Get latent representations for each modality (self-reconstruction)
+    # Get source-encoded latent representations for each modality
     latents = {}
     for mod in ALL_MODALITIES:
-        result = model.reconstruct(mod, data[mod])
-        # Mean-pool the latent sequence to get a single vector per sample
-        lat = result["latent"][:, 2:].mean(dim=1)  # skip modality tokens
+        enc = model.encode(mod, data[mod])
+        # Mean-pool content tokens (skip modality indicator at position 0)
+        lat = enc[:, 1:].mean(dim=1)
         latents[mod] = F.normalize(lat, dim=-1)
 
     # Compute cross-modal cosine similarities
@@ -353,22 +353,30 @@ def eval_file(
     print(f"  Input shape: {list(data.shape)}")
 
     # Cross-modal translation
-    result = model(source_mod, data, target_mod)
-    output = result["output"]
-    print(f"  Output shape: {list(output.shape)}")
-    print(f"  Output stats: mean={output.mean().item():.4f}, std={output.std().item():.4f}")
+    if target_mod == "text":
+        # Use autoregressive generation for text output
+        generated = model.generate(source_mod, data, max_len=64)
+        print(f"  Generated token IDs: {generated[0, :20].tolist()}")
+    else:
+        result = model(source_mod, data, target_mod)
+        output = result["output"]
+        print(f"  Output shape: {list(output.shape)}")
+        print(f"  Output stats: mean={output.mean().item():.4f}, std={output.std().item():.4f}")
 
-    # Save output
-    os.makedirs(output_dir, exist_ok=True)
-    stem = Path(input_file).stem
-    out_path = os.path.join(output_dir, f"{stem}_{source_mod}_to_{target_mod}")
-    SAVERS[target_mod](output.cpu(), out_path)
+        # Save output
+        os.makedirs(output_dir, exist_ok=True)
+        stem = Path(input_file).stem
+        out_path = os.path.join(output_dir, f"{stem}_{source_mod}_to_{target_mod}")
+        SAVERS[target_mod](output.cpu(), out_path)
 
-    # Also do self-reconstruction of the input
-    recon = model.reconstruct(source_mod, data)
-    recon_out = recon["output"]
-    recon_path = os.path.join(output_dir, f"{stem}_recon_{source_mod}")
-    SAVERS[source_mod](recon_out.cpu(), recon_path)
+    # Also do self-reconstruction of the input (for non-text modalities)
+    if source_mod != "text":
+        recon = model.reconstruct(source_mod, data)
+        recon_out = recon["output"]
+        os.makedirs(output_dir, exist_ok=True)
+        stem = Path(input_file).stem
+        recon_path = os.path.join(output_dir, f"{stem}_recon_{source_mod}")
+        SAVERS[source_mod](recon_out.cpu(), recon_path)
 
 
 # -------------------------------------------------------------------------

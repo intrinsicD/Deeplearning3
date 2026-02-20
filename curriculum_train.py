@@ -205,8 +205,18 @@ class CurriculumTrainer:
             )
 
             predictions = {tgt_mod: result["output"]}
-            targets = {tgt_mod: target}
-            loss_dict = self.criterion(predictions, targets)
+            targets_dict = {tgt_mod: target}
+
+            # Contrastive loss: encode both modalities
+            latents = None
+            if src_mod != tgt_mod and self.config.contrastive_weight > 0:
+                latents = {}
+                src_enc = self.model.encode(src_mod, source)
+                tgt_enc = self.model.encode(tgt_mod, target)
+                latents[src_mod] = src_enc[:, 1:].mean(dim=1)
+                latents[tgt_mod] = tgt_enc[:, 1:].mean(dim=1)
+
+            loss_dict = self.criterion(predictions, targets_dict, latents)
 
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
@@ -233,6 +243,14 @@ class CurriculumTrainer:
         with torch.amp.autocast(
             "cuda", dtype=self.amp_dtype, enabled=self.config.mixed_precision
         ):
+            # Encode all available modalities for contrastive loss
+            latents = None
+            if len(available) >= 2 and self.config.contrastive_weight > 0:
+                latents = {}
+                for mod in available:
+                    enc = self.model.encode(mod, batch[mod])
+                    latents[mod] = enc[:, 1:].mean(dim=1)
+
             result = self.model(
                 source_modality=src_mod,
                 source_data=batch[src_mod],
@@ -241,7 +259,7 @@ class CurriculumTrainer:
             )
             predictions = {tgt_mod: result["output"]}
             targets = {tgt_mod: batch[tgt_mod]}
-            loss_dict = self.criterion(predictions, targets)
+            loss_dict = self.criterion(predictions, targets, latents)
 
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)

@@ -46,27 +46,20 @@ class ReconstructionLoss(nn.Module):
     def audio_loss(
         self, pred_mel: torch.Tensor, target_mel: torch.Tensor
     ) -> torch.Tensor:
-        """L1 loss on mel spectrogram + multi-scale spectral loss.
+        """L1 + MSE loss on mel spectrogram.
 
         Both: (B, n_mels, T)
+
+        Uses straightforward reconstruction losses rather than spectral
+        convergence (FFT on a mel spectrogram is a double frequency
+        transform that doesn't add value).
         """
         # Trim to matching length
         min_t = min(pred_mel.shape[-1], target_mel.shape[-1])
         pred_mel = pred_mel[..., :min_t]
         target_mel = target_mel[..., :min_t]
 
-        l1 = F.l1_loss(pred_mel, target_mel)
-
-        # Pad to next power of 2 for cuFFT compatibility
-        n = pred_mel.shape[-1]
-        fft_size = 1 << (n - 1).bit_length()  # next power of 2
-
-        # Simple spectral convergence on magnitude
-        pred_spec = torch.abs(torch.fft.rfft(pred_mel, n=fft_size, dim=-1))
-        tgt_spec = torch.abs(torch.fft.rfft(target_mel, n=fft_size, dim=-1))
-        spectral = torch.norm(tgt_spec - pred_spec) / (torch.norm(tgt_spec) + 1e-8)
-
-        return l1 + 0.5 * spectral
+        return F.l1_loss(pred_mel, target_mel) + F.mse_loss(pred_mel, target_mel)
 
     def image_loss(
         self, pred: torch.Tensor, target: torch.Tensor

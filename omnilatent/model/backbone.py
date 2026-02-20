@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 
 from omnilatent.config import OmniLatentConfig
@@ -78,6 +79,15 @@ class UnifiedTransformer(nn.Module):
             if hook_manager is not None:
                 x = hook_manager.pre_layer(layer_idx, x)
 
+            # Dynamically pad the attention mask if hooks changed seq length
+            layer_mask = attn_mask
+            if layer_mask is not None and layer_mask.shape[-1] != x.shape[1]:
+                n_hook = x.shape[1] - layer_mask.shape[-1]
+                # Hook tokens get full attention access (True = can attend)
+                layer_mask = F.pad(
+                    layer_mask, (0, n_hook, 0, n_hook), value=True
+                )
+
             # --- Transformer layer (with optional gradient checkpointing) ---
             if self.config.gradient_checkpointing and self.training:
                 x = cp.checkpoint(
@@ -85,11 +95,11 @@ class UnifiedTransformer(nn.Module):
                     x,
                     self.rope_freqs,
                     rope_offset,
-                    attn_mask,
+                    layer_mask,
                     use_reentrant=False,
                 )
             else:
-                x = layer(x, self.rope_freqs, rope_offset, attn_mask)
+                x = layer(x, self.rope_freqs, rope_offset, layer_mask)
 
             # --- Latent Neural Hook extraction (after layer) ---
             if hook_manager is not None:
