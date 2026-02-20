@@ -264,6 +264,7 @@ class CurriculumTrainer:
         torch.save(
             {
                 "step": self.global_step,
+                "config": self.config,
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "scaler": self.scaler.state_dict(),
