@@ -131,12 +131,17 @@ def build_dataloader(
     """Build a DataLoader with proper collation."""
     if dataset is None:
         dataset = SyntheticMultiModalDataset(config)
+
+    # --- ADDED: Calculate optimal workers based on CPU ---
+    import os
+    optimal_workers = min(8, os.cpu_count() or 1)
+
     return DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=collate_multimodal,
-        num_workers=0,  # safe default; increase for real data
+        num_workers=optimal_workers,
         pin_memory=torch.cuda.is_available(),
         drop_last=True,
         **kwargs,

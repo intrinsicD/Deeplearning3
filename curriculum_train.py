@@ -38,6 +38,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+# --- ADDED: Hardware Optimizations ---
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+# -------------------------------------
+
 from omnilatent.config import OmniLatentConfig
 from omnilatent.model.omnilatent import OmniLatentModel
 from omnilatent.training.losses import MultiModalLoss
@@ -422,6 +428,12 @@ def main() -> None:
         print(f"VRAM:        {mem:.1f} GB")
 
     model = OmniLatentModel(config)
+
+    # --- ADDED: Free JIT Compilation Speedup ---
+    print("Compiling model with torch.compile...")
+    model = torch.compile(model)
+    # -------------------------------------------
+
     print(f"Parameters:  {count_parameters(model):,} ({param_size_mb(model):.1f} MB)")
     print(f"Hidden dim:  {config.hidden_dim}")
     print(f"Layers:      {config.num_layers}")
@@ -445,7 +457,7 @@ def main() -> None:
             batch_size=args.batch_size,
             shuffle=True,
             collate_fn=collate_video_watching,
-            num_workers=2,
+            num_workers=8,
             pin_memory=torch.cuda.is_available(),
             drop_last=True,
         )

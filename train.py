@@ -15,6 +15,12 @@ import sys
 
 import torch
 
+# --- ADDED: Hardware Optimizations ---
+torch.backends.cudnn.benchmark = True           # Speeds up audio/video convolutions
+torch.backends.cuda.matmul.allow_tf32 = True    # Speeds up matrix multiplications (Ampere+)
+torch.backends.cudnn.allow_tf32 = True          # Speeds up cuDNN operations (Ampere+)
+# -------------------------------------
+
 from omnilatent.config import OmniLatentConfig
 from omnilatent.model.omnilatent import OmniLatentModel
 from omnilatent.training.data import SyntheticMultiModalDataset, build_dataloader
@@ -70,6 +76,12 @@ def main() -> None:
     print(f"Grad ckpt:   {config.gradient_checkpointing}")
 
     model = OmniLatentModel(config)
+
+    # --- ADDED: Free JIT Compilation Speedup ---
+    print("Compiling model with torch.compile... (this takes a minute on startup)")
+    model = torch.compile(model)
+    # -------------------------------------------
+
     n_params = count_parameters(model)
     print(f"Parameters:  {n_params:,} ({param_size_mb(model):.1f} MB in FP32)")
     print("=" * 60)
