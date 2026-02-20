@@ -187,9 +187,18 @@ def infer_config_from_state_dict(state_dict: dict) -> OmniLatentConfig:
     return config
 
 
+def _strip_compiled_prefix(state_dict: dict) -> dict:
+    """Strip '_orig_mod.' prefix added by torch.compile."""
+    prefix = "_orig_mod."
+    if any(k.startswith(prefix) for k in state_dict):
+        return {k.removeprefix(prefix): v for k, v in state_dict.items()}
+    return state_dict
+
+
 def load_checkpoint(ckpt_path: str, device: torch.device) -> tuple[OmniLatentModel, OmniLatentConfig]:
     """Load model from checkpoint."""
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt["model"] = _strip_compiled_prefix(ckpt["model"])
 
     # Try to recover config from checkpoint, otherwise infer from weights
     if "config" in ckpt:
