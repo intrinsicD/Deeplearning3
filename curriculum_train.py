@@ -299,7 +299,9 @@ class CurriculumTrainer:
 
     def load_checkpoint(self, path: str | Path) -> None:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model"])
+        # torch.compile wraps the model; load into the unwrapped module if present
+        inner = getattr(self.model, "_orig_mod", self.model)
+        inner.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scaler.load_state_dict(ckpt["scaler"])
         self.global_step = ckpt["step"]
