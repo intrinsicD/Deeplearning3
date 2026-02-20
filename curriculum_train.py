@@ -289,7 +289,7 @@ class CurriculumTrainer:
             {
                 "step": self.global_step,
                 "config": self.config,
-                "model": self.model.state_dict(),
+                "model": {k.removeprefix("_orig_mod."): v for k, v in self.model.state_dict().items()},
                 "optimizer": self.optimizer.state_dict(),
                 "scaler": self.scaler.state_dict(),
             },
