@@ -172,12 +172,18 @@ class TransformerBlock(nn.Module):
         num_heads: int,
         mlp_dim: int,
         dropout: float = 0.0,
+        layer_scale_init: float = 0.1,
     ) -> None:
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = Attention(dim, num_heads, dropout)
         self.norm2 = RMSNorm(dim)
         self.mlp = SwiGLU(dim, mlp_dim, dropout)
+        # LayerScale (Touvron et al., 2021 — CaiT / DeiT-III):
+        # learnable per-channel scaling on residual branches, initialized
+        # small so early layers don't dominate the residual stream.
+        self.ls1 = nn.Parameter(torch.ones(dim) * layer_scale_init)
+        self.ls2 = nn.Parameter(torch.ones(dim) * layer_scale_init)
 
     def forward(
         self,
@@ -186,6 +192,6 @@ class TransformerBlock(nn.Module):
         rope_offset: int = 0,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), rope_freqs, rope_offset, attn_mask)
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.ls1 * self.attn(self.norm1(x), rope_freqs, rope_offset, attn_mask)
+        x = x + self.ls2 * self.mlp(self.norm2(x))
         return x
