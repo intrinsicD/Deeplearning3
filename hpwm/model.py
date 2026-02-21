@@ -255,10 +255,22 @@ class HPWM(nn.Module):
         B, T, C, H, W = frames.shape
         chunk_size = self.config.dino_chunk_size
 
+        # DINOv2 uses 14x14 patches; input must be divisible by 14.
+        # Resize to nearest compatible size (e.g. 128 -> 126 = 14*9).
+        dino_h = (H // 14) * 14
+        dino_w = (W // 14) * 14
+        need_resize = (dino_h != H) or (dino_w != W)
+
         all_features = []
         for start in range(0, T, chunk_size):
             end = min(start + chunk_size, T)
             chunk = frames[:, start:end].reshape(-1, C, H, W)
+
+            if need_resize:
+                chunk = F.interpolate(
+                    chunk, size=(dino_h, dino_w),
+                    mode="bilinear", align_corners=False,
+                )
 
             if self.grad_checkpointing and self.training:
                 feats = grad_checkpoint(self.dino, chunk, use_reentrant=False)
