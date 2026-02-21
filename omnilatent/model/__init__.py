@@ -1,5 +1,6 @@
 from omnilatent.model.omnilatent import OmniLatentModel
 from omnilatent.model.hooks import LatentNeuralHook
+from omnilatent.model.reasoning import LatentReasoningModule
 from omnilatent.model.temporal import (
     TemporalSequenceTransformer,
     RecurrentMemory,
@@ -8,6 +9,7 @@ from omnilatent.model.temporal import (
 __all__ = [
     "OmniLatentModel",
     "LatentNeuralHook",
+    "LatentReasoningModule",
     "TemporalSequenceTransformer",
     "RecurrentMemory",
 ]

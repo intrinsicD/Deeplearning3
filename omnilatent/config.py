@@ -55,6 +55,14 @@ class OmniLatentConfig:
     video_max_frames: int = 16     # max 16 frames during training
     video_channels: int = 3
 
+    # --- Latent Reasoning (Chain of Continuous Thought) ---
+    reasoning_enabled: bool = False          # off by default; enable for reasoning tasks
+    reasoning_num_thoughts: int = 16         # learnable thought tokens
+    reasoning_num_layers: int = 4            # dedicated reasoning transformer layers
+    reasoning_num_heads: int = 8             # attention heads in reasoning layers
+    reasoning_gate_bias_init: float = -4.0   # sigmoid(-4)≈0.018 → starts nearly silent
+    reasoning_bottleneck_weight: float = 0.1 # weight for auxiliary bottleneck loss
+
     # --- Latent Neural Hooks ---
     hook_gate_init: float = 0.0    # sigmoid(0)=0.5; use negative for near-zero start
     hook_gate_bias_init: float = -4.0  # sigmoid(-4)≈0.018 → starts nearly silent

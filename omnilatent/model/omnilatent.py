@@ -44,6 +44,7 @@ from omnilatent.model.encoders import (
     VideoEncoder,
 )
 from omnilatent.model.hooks import HookManager, LatentNeuralHook
+from omnilatent.model.reasoning import LatentReasoningModule
 from omnilatent.utils import MODALITY_ID, Modality
 
 
@@ -126,6 +127,11 @@ class OmniLatentModel(nn.Module):
 
         # --- Hook manager ---
         self.hook_manager = HookManager()
+
+        # --- Latent Reasoning (Chain of Continuous Thought) ---
+        self.reasoning: LatentReasoningModule | None = None
+        if config.reasoning_enabled:
+            self.reasoning = LatentReasoningModule(config)
 
         # Tie text encoder and decoder embeddings for parameter efficiency
         self.decoders["text"].head.weight = self.encoders["text"].tok_embed.weight
@@ -249,13 +255,27 @@ class OmniLatentModel(nn.Module):
             "latent":  (B, total_seq, D) backbone output
             "output":  decoder output (shape depends on target modality)
             "target":  target_data passed through for loss computation
+            "reasoning_bottleneck": (B, D) bottleneck prediction (if reasoning enabled)
+            "source_summary": (B, D) mean-pooled source latent (if reasoning enabled)
         """
         B = source_data.shape[0]
         device = source_data.device
 
         # 1. Encode source (includes modality indicator token)
         src_tokens = self.encode(source_modality, source_data)
+
+        # 1b. Latent Reasoning — generate thought tokens from source
+        thought_tokens = None
+        bottleneck_pred = None
+        source_summary = None
+        if self.reasoning is not None:
+            thought_tokens, bottleneck_pred = self.reasoning(src_tokens)
+            # Source summary for bottleneck loss (detach source side)
+            source_summary = src_tokens[:, 1:].mean(dim=1)  # skip modality indicator
+
         src_len = src_tokens.shape[1]
+        # Include thought tokens in prefix length
+        reasoning_len = thought_tokens.shape[1] if thought_tokens is not None else 0
 
         # 2. Generate target queries
         if target_modality == "text":
@@ -284,12 +304,20 @@ class OmniLatentModel(nn.Module):
         tgt_with_mod = torch.cat([tgt_mod_tok, tgt_queries], dim=1)
         tgt_len = tgt_with_mod.shape[1]
 
-        # 4. Concatenate source prefix + target suffix
-        tokens = torch.cat([src_tokens, tgt_with_mod], dim=1)
+        # 4. Concatenate: [source, (thoughts), target]
+        # Thought tokens become part of the prefix — target attends to them
+        prefix_parts = [src_tokens]
+        if thought_tokens is not None:
+            prefix_parts.append(thought_tokens)
+        prefix = torch.cat(prefix_parts, dim=1)
+        prefix_len = prefix.shape[1]
+
+        tokens = torch.cat([prefix, tgt_with_mod], dim=1)
 
         # 5. Create Prefix-LM attention mask
+        # prefix_len = src_len + reasoning_len (thoughts are part of prefix)
         attn_mask = self._create_attention_mask(
-            src_len, tgt_len, target_modality, device,
+            prefix_len, tgt_len, target_modality, device,
         )
 
         # 6. Set up hooks
@@ -303,17 +331,24 @@ class OmniLatentModel(nn.Module):
             hook_manager=self.hook_manager if self.hook_manager.has_hooks() else None,
         )
 
-        # 8. Extract target region (skip target modality token)
-        tgt_latent = latent[:, src_len + 1:]  # skip tgt_mod_tok
+        # 8. Extract target region (skip prefix + target modality token)
+        tgt_latent = latent[:, prefix_len + 1:]  # skip tgt_mod_tok
 
         # 9. Decode to target modality
         output = self.decoders[target_modality](tgt_latent)
 
-        return {
+        result = {
             "latent": latent,
             "output": output,
             "target": target_data,
         }
+
+        # Include reasoning outputs for auxiliary loss computation
+        if bottleneck_pred is not None:
+            result["reasoning_bottleneck"] = bottleneck_pred
+            result["source_summary"] = source_summary
+
+        return result
 
     # ------------------------------------------------------------------
     # Autoregressive text generation
@@ -334,7 +369,14 @@ class OmniLatentModel(nn.Module):
 
         # Encode source once
         src_tokens = self.encode(source_modality, source_data)
-        src_len = src_tokens.shape[1]
+
+        # Run reasoning once (thoughts are part of the prefix)
+        prefix_parts = [src_tokens]
+        if self.reasoning is not None:
+            thought_tokens, _ = self.reasoning(src_tokens)
+            prefix_parts.append(thought_tokens)
+        prefix = torch.cat(prefix_parts, dim=1)
+        prefix_len = prefix.shape[1]
 
         # Start with BOS
         generated_ids = torch.full(
@@ -353,9 +395,9 @@ class OmniLatentModel(nn.Module):
             tgt_with_mod = torch.cat([tgt_mod_tok, tgt_queries], dim=1)
             tgt_len = tgt_with_mod.shape[1]
 
-            tokens = torch.cat([src_tokens, tgt_with_mod], dim=1)
+            tokens = torch.cat([prefix, tgt_with_mod], dim=1)
             attn_mask = self._create_attention_mask(
-                src_len, tgt_len, "text", device,
+                prefix_len, tgt_len, "text", device,
             )
 
             latent = self.backbone(tokens, attn_mask=attn_mask)
