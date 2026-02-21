@@ -230,7 +230,7 @@ class MoDSurpriseRouter(nn.Module):
 
         # Scatter heavy outputs back into light output
         routed = light_out.clone()
-        routed.scatter_(1, topk_idx.unsqueeze(-1).expand(-1, -1, D), heavy_out)
+        routed.scatter_(1, topk_idx.unsqueeze(-1).expand(-1, -1, D), heavy_out.to(routed.dtype))
 
         return routed, routing_mask
 
