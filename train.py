@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--heads", type=int, default=12, help="Number of attention heads")
     p.add_argument("--steps", type=int, default=100_000, help="Max training steps")
     p.add_argument("--batch-size", type=int, default=4, help="Batch size")
-    p.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    p.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     p.add_argument("--no-amp", action="store_true", help="Disable mixed precision")
     p.add_argument("--no-checkpoint", action="store_true", help="Disable gradient checkpointing")
     p.add_argument("--seed", type=int, default=42)

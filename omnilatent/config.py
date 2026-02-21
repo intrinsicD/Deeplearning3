@@ -74,13 +74,13 @@ class OmniLatentConfig:
     memory_gate_bias_init: float = -4.0 # start nearly silent like hooks
 
     # --- Training ---
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4        # reduced from 3e-4 to stabilize training
     weight_decay: float = 0.05
-    warmup_steps: int = 500
+    warmup_steps: int = 2000           # increased from 500 for multi-modal loss landscape
     max_steps: int = 100_000
     batch_size: int = 4
     mixed_precision: bool = True
-    grad_clip: float = 1.0
+    grad_clip: float = 0.5             # reduced from 1.0 to tame gradient explosion
     seed: int = 42
 
     # --- Loss ---
@@ -90,7 +90,7 @@ class OmniLatentConfig:
         "image": 1.0,
         "video": 1.0,
     })
-    contrastive_weight: float = 0.1
+    contrastive_weight: float = 0.0     # disabled: causes modality collapse on unpaired/synthetic data
     contrastive_temperature: float = 0.07
 
     # Derived (computed in __post_init__)
