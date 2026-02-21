@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from omnilatent.config import OmniLatentConfig
+from omnilatent.model.reasoning import ReasoningBottleneckLoss
 from omnilatent.utils import ALL_MODALITIES
 
 
@@ -377,6 +378,12 @@ class MultiModalLoss(nn.Module):
         self.contrastive_loss = ContrastiveLoss(config.contrastive_temperature)
         self.contrastive_weight = config.contrastive_weight
 
+        # Reasoning bottleneck loss
+        self.reasoning_enabled = config.reasoning_enabled
+        self.reasoning_bottleneck_weight = config.reasoning_bottleneck_weight
+        if self.reasoning_enabled:
+            self.reasoning_loss = ReasoningBottleneckLoss()
+
         # Learnable log-variance per modality (uncertainty weighting)
         self.log_vars = nn.ParameterDict({
             mod: nn.Parameter(torch.zeros(1))
@@ -388,6 +395,8 @@ class MultiModalLoss(nn.Module):
         predictions: dict[str, torch.Tensor],
         targets: dict[str, torch.Tensor],
         latents: dict[str, torch.Tensor] | None = None,
+        reasoning_bottleneck: torch.Tensor | None = None,
+        source_summary: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Compute total loss.
 
@@ -395,6 +404,8 @@ class MultiModalLoss(nn.Module):
             predictions: modality_name → decoder output
             targets: modality_name → ground truth
             latents: modality_name → mean-pooled latent (for contrastive)
+            reasoning_bottleneck: (B, D) bottleneck prediction from reasoning module
+            source_summary: (B, D) mean-pooled source latent for bottleneck target
 
         Returns dict with "total", per-modality losses, and "contrastive".
         """
@@ -430,6 +441,16 @@ class MultiModalLoss(nn.Module):
                 contrastive_total = contrastive_total / n_pairs
             losses["contrastive"] = contrastive_total
             total = total + self.contrastive_weight * contrastive_total
+
+        # Reasoning bottleneck loss
+        if (
+            self.reasoning_enabled
+            and reasoning_bottleneck is not None
+            and source_summary is not None
+        ):
+            r_loss = self.reasoning_loss(reasoning_bottleneck, source_summary)
+            losses["reasoning_bottleneck"] = r_loss
+            total = total + self.reasoning_bottleneck_weight * r_loss
 
         losses["total"] = total
         return losses

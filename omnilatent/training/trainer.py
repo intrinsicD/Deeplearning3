@@ -139,11 +139,17 @@ class Trainer:
                 target_data=batch[tgt_mod],
             )
 
-            # Compute loss
+            # Compute loss (include reasoning outputs if present)
             predictions = {tgt_mod: result["output"]}
             targets = {tgt_mod: batch[tgt_mod]}
 
-            loss_dict = self.criterion(predictions, targets, latents)
+            loss_dict = self.criterion(
+                predictions,
+                targets,
+                latents,
+                reasoning_bottleneck=result.get("reasoning_bottleneck"),
+                source_summary=result.get("source_summary"),
+            )
 
         # Backward
         self.scaler.scale(loss_dict["total"]).backward()
