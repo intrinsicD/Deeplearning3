@@ -59,6 +59,20 @@ class OmniLatentConfig:
     hook_gate_init: float = 0.0    # sigmoid(0)=0.5; use negative for near-zero start
     hook_gate_bias_init: float = -4.0  # sigmoid(-4)≈0.018 → starts nearly silent
 
+    # --- Temporal Context ---
+    # Approach 1: Multi-scale temporal sampling
+    temporal_distance_buckets: int = 4  # <10s, 10s-60s, 1m-5m, >5m
+
+    # Approach 2: Hierarchical clip-then-sequence transformer
+    temporal_seq_layers: int = 4        # layers in temporal sequence transformer
+    temporal_seq_heads: int = 8         # attention heads
+    temporal_seq_max_clips: int = 60    # max clips in a sequence (~1 minute)
+    temporal_seq_dropout: float = 0.1
+
+    # Approach 3: Recurrent memory tokens
+    memory_num_tokens: int = 8          # memory tokens persisted across clips
+    memory_gate_bias_init: float = -4.0 # start nearly silent like hooks
+
     # --- Training ---
     learning_rate: float = 3e-4
     weight_decay: float = 0.05

@@ -6,6 +6,11 @@ Supports:
   * Uncertainty-weighted multi-task loss (Kendall et al., 2018) -- learns
     the optimal weighting between modality losses automatically
   * Contrastive cross-modal alignment loss (InfoNCE)
+  * Temporal context losses:
+    - Next-clip prediction loss (MSE + cosine in latent space)
+    - Temporal order classification (binary cross-entropy)
+    - Temporal distance classification (cross-entropy over buckets)
+    - Scene boundary detection (binary cross-entropy)
 """
 
 from __future__ import annotations
@@ -151,6 +156,210 @@ class ContrastiveLoss(nn.Module):
         loss_ab = F.cross_entropy(logits, labels)
         loss_ba = F.cross_entropy(logits.T, labels)
         return (loss_ab + loss_ba) / 2
+
+
+# =========================================================================
+# Temporal Context Losses
+# =========================================================================
+
+class TemporalOrderLoss(nn.Module):
+    """Binary classification: did clip A come before clip B?
+
+    Used with Approach 1 (multi-scale temporal sampling) to teach the
+    model about temporal ordering without any model changes.
+    """
+
+    def forward(
+        self, z_anchor: torch.Tensor, z_context: torch.Tensor, labels: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute temporal order loss.
+
+        Args:
+            z_anchor: (B, D) anchor clip latent.
+            z_context: (B, D) context clip latent.
+            labels: (B,) long — 1 if anchor before context, 0 otherwise.
+
+        Returns scalar loss.
+        """
+        # Concatenate and project to logit
+        combined = torch.cat([z_anchor, z_context, z_anchor - z_context], dim=-1)
+        # Use a simple bilinear-like scoring: dot product of difference
+        logits = (z_anchor * z_context).sum(dim=-1)  # (B,)
+        return F.binary_cross_entropy_with_logits(
+            logits, labels.float()
+        )
+
+
+class TemporalDistanceLoss(nn.Module):
+    """Classify temporal distance between two clips into buckets.
+
+    Buckets: <10s, 10-60s, 1-5min, >5min (4 classes by default).
+    """
+
+    def __init__(self, num_buckets: int = 4, hidden_dim: int = 768) -> None:
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_buckets),
+        )
+
+    def forward(
+        self, z_anchor: torch.Tensor, z_context: torch.Tensor, labels: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute temporal distance classification loss.
+
+        Args:
+            z_anchor: (B, D) anchor clip latent.
+            z_context: (B, D) context clip latent.
+            labels: (B,) long — bucket index.
+
+        Returns scalar loss.
+        """
+        combined = torch.cat([z_anchor, z_context, z_anchor - z_context], dim=-1)
+        logits = self.classifier(combined)  # (B, num_buckets)
+        return F.cross_entropy(logits, labels)
+
+
+class NextClipPredictionLoss(nn.Module):
+    """Loss for next-clip prediction in latent space.
+
+    Combines MSE (magnitude) with cosine similarity (direction) for
+    robust latent-space prediction.
+
+    Used with Approach 2 (hierarchical temporal transformer).
+    """
+
+    def __init__(self, cosine_weight: float = 0.5) -> None:
+        super().__init__()
+        self.cosine_weight = cosine_weight
+
+    def forward(
+        self,
+        predicted: torch.Tensor,
+        target: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute next-clip prediction loss.
+
+        Args:
+            predicted: (B, N, D) predicted next-clip latents.
+            target: (B, N, D) actual next-clip latents.
+            mask: (B, N) bool — True for valid positions.
+
+        Returns scalar loss.
+        """
+        mse = F.mse_loss(predicted, target, reduction="none")  # (B, N, D)
+        mse = mse.mean(dim=-1)  # (B, N)
+
+        # Cosine similarity loss (1 - cos_sim)
+        cos_sim = F.cosine_similarity(predicted, target, dim=-1)  # (B, N)
+        cos_loss = 1.0 - cos_sim
+
+        combined = mse + self.cosine_weight * cos_loss  # (B, N)
+
+        if mask is not None:
+            combined = combined * mask.float()
+            return combined.sum() / mask.float().sum().clamp(min=1.0)
+
+        return combined.mean()
+
+
+class SceneBoundaryLoss(nn.Module):
+    """Binary cross-entropy for scene boundary detection.
+
+    Used with Approach 2: the temporal transformer predicts whether
+    each clip position is a scene boundary.
+    """
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute scene boundary detection loss.
+
+        Args:
+            logits: (B, N, 1) or (B, N) scene boundary logits.
+            labels: (B, N) float — 1.0 for scene boundary, 0.0 otherwise.
+            mask: (B, N) bool — True for valid positions.
+
+        Returns scalar loss.
+        """
+        if logits.dim() == 3:
+            logits = logits.squeeze(-1)
+
+        loss = F.binary_cross_entropy_with_logits(
+            logits, labels, reduction="none"
+        )  # (B, N)
+
+        if mask is not None:
+            loss = loss * mask.float()
+            return loss.sum() / mask.float().sum().clamp(min=1.0)
+
+        return loss.mean()
+
+
+class TemporalContextLoss(nn.Module):
+    """Combined loss for all temporal context tasks.
+
+    Handles losses for:
+      - Approach 1: temporal_order, temporal_distance, distant_predict
+      - Approach 2: next_clip_prediction, scene_boundary
+      - Approach 3: memory-augmented reconstruction (uses standard recon loss)
+
+    Each component is weighted and the total is returned.
+    """
+
+    def __init__(self, config: OmniLatentConfig) -> None:
+        super().__init__()
+        self.order_loss = TemporalOrderLoss()
+        self.distance_loss = TemporalDistanceLoss(
+            num_buckets=config.temporal_distance_buckets,
+            hidden_dim=config.hidden_dim,
+        )
+        self.next_clip_loss = NextClipPredictionLoss()
+        self.scene_boundary_loss = SceneBoundaryLoss()
+
+        # Learnable weights for each temporal task
+        self.log_vars = nn.ParameterDict({
+            "temporal_order": nn.Parameter(torch.zeros(1)),
+            "temporal_distance": nn.Parameter(torch.zeros(1)),
+            "next_clip": nn.Parameter(torch.zeros(1)),
+            "scene_boundary": nn.Parameter(torch.zeros(1)),
+        })
+
+    def forward(
+        self,
+        losses_dict: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Combine temporal losses with uncertainty weighting.
+
+        Args:
+            losses_dict: dict mapping task names to raw loss tensors.
+                Recognized keys: temporal_order, temporal_distance,
+                next_clip, scene_boundary, distant_predict.
+
+        Returns dict with individual losses and "temporal_total".
+        """
+        result: dict[str, torch.Tensor] = {}
+        device = next(iter(losses_dict.values())).device
+        total = torch.tensor(0.0, device=device)
+
+        for name, raw_loss in losses_dict.items():
+            result[name] = raw_loss
+            if name in self.log_vars:
+                log_var = self.log_vars[name]
+                weighted = torch.exp(-log_var) * raw_loss + log_var
+                result[f"{name}_weighted"] = weighted
+                total = total + weighted
+            else:
+                # Direct addition for tasks without learned weights
+                total = total + raw_loss
+
+        result["temporal_total"] = total
+        return result
 
 
 class MultiModalLoss(nn.Module):
