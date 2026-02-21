@@ -341,7 +341,8 @@ def compare_mamba_vs_transformer(
     config_mamba.use_mamba = True
     model_mamba = HPWM(config_mamba).to(device)
     ckpt = torch.load(mamba_checkpoint, map_location=device, weights_only=False)
-    model_mamba.load_state_dict(ckpt["model_state_dict"])
+    model_sd = {k: v for k, v in ckpt["model_state_dict"].items() if not k.startswith("dino._model.")}
+    model_mamba.load_state_dict(model_sd, strict=False)
     model_mamba.eval()
 
     # Load Transformer baseline (or create one)
@@ -350,7 +351,8 @@ def compare_mamba_vs_transformer(
     model_tf = HPWM(config_tf).to(device)
     if transformer_checkpoint:
         ckpt = torch.load(transformer_checkpoint, map_location=device, weights_only=False)
-        model_tf.load_state_dict(ckpt["model_state_dict"])
+        model_sd = {k: v for k, v in ckpt["model_state_dict"].items() if not k.startswith("dino._model.")}
+        model_tf.load_state_dict(model_sd, strict=False)
     model_tf.eval()
 
     # Create concatenated clip dataset for different lengths

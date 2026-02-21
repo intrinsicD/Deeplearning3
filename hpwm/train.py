@@ -307,10 +307,17 @@ class Trainer:
         self, is_best: bool = False, is_final: bool = False,
     ):
         """Save model checkpoint."""
+        # Filter out frozen DINO backbone weights — they're pretrained and
+        # don't need to be checkpointed.  This also avoids a key mismatch on
+        # resume because DINOBackbone uses lazy loading (_model starts as None).
+        model_sd = {
+            k: v for k, v in self.model.state_dict().items()
+            if not k.startswith("dino._model.")
+        }
         ckpt = {
             "global_step": self.global_step,
             "epoch": self.epoch,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": model_sd,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
@@ -335,7 +342,13 @@ class Trainer:
         print(f"Loading checkpoint from {path}...")
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
-        self.model.load_state_dict(ckpt["model_state_dict"])
+        # Filter out any frozen DINO backbone weights that may have been
+        # saved by older checkpoints before the save-side filter was added.
+        model_sd = {
+            k: v for k, v in ckpt["model_state_dict"].items()
+            if not k.startswith("dino._model.")
+        }
+        self.model.load_state_dict(model_sd, strict=False)
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         self.scaler.load_state_dict(ckpt["scaler_state_dict"])
