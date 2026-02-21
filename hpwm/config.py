@@ -20,7 +20,7 @@ class HPWMConfig:
     # ── DINO backbone ────────────────────────────────────
     dino_model: str = "dinov2_vits14"
     d_dino: int = 384            # ViT-S hidden dim
-    n_patches: int = 81          # 9x9 for 128px / 14px patches
+    n_patches: int = 81          # 9x9 for 126px (128 resized) / 14px patches
     patch_grid: int = 9          # sqrt(n_patches)
     dino_frozen: bool = True     # Phase -1: fully frozen
 
