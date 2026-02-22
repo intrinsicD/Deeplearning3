@@ -241,15 +241,25 @@ class MoDSurpriseRouter(nn.Module):
         routing decisions vary across spatial positions instead of
         collapsing to the same fixed subset.
 
+        Uses temperature scaling: as FWM improves, raw surprise values
+        converge and tiny differences get amplified by softmax into peaked
+        distributions.  Normalising by std keeps the distribution spread
+        meaningful regardless of FWM accuracy.
+
         Args:
             surprise: [B, N_patches] raw surprise scores
 
         Returns:
             entropy_loss: scalar (negate entropy → minimise to maximise entropy)
         """
+        # Temperature-scale surprise so softmax stays well-conditioned
+        # even as FWM loss shrinks and raw surprise values converge.
+        std = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        scaled = surprise / std
+
         # Soft routing probabilities (differentiable, unlike hard top-K)
-        probs = F.softmax(surprise, dim=-1)  # [B, N_patches]
-        log_probs = F.log_softmax(surprise, dim=-1)
+        probs = F.softmax(scaled, dim=-1)  # [B, N_patches]
+        log_probs = F.log_softmax(scaled, dim=-1)
         # Per-sample entropy, averaged over batch
         entropy = -(probs * log_probs).sum(dim=-1).mean()
         # Normalise by max possible entropy so the loss scale is ~1

@@ -343,6 +343,7 @@ class HPWM(nn.Module):
         all_slots = []
         all_attn_weights = []
         prev_slots = None
+        slot_consistency_loss = torch.tensor(0.0, device=frames.device)
 
         for t in range(T):
             features_t = routed_features[:, t]  # [B, N_patches, D]
@@ -350,7 +351,21 @@ class HPWM(nn.Module):
             slot_out = self.slot_encoder(features_t, prev_slots)
             all_slots.append(slot_out["slots"])
             all_attn_weights.append(slot_out["attn_weights"])
+
+            # Slot temporal consistency: penalise attention maps that
+            # change drastically between consecutive frames.
+            if t > 0:
+                prev_attn = all_attn_weights[-2]  # [B, N_slots, N_patches]
+                curr_attn = slot_out["attn_weights"]
+                # Negative cosine similarity → minimise to maximise similarity
+                sim = F.cosine_similarity(
+                    prev_attn.flatten(1), curr_attn.flatten(1), dim=1,
+                )  # [B]
+                slot_consistency_loss = slot_consistency_loss + (1.0 - sim.mean())
+
             prev_slots = slot_out["slots"].detach()  # detach for memory
+
+        slot_consistency_loss = slot_consistency_loss / max(1, T - 1)
 
         slot_features = torch.stack(all_slots, dim=1)  # [B, T, N_slots, D_slot]
         attn_weights = torch.stack(all_attn_weights, dim=1)  # [B, T, N_slots, N_patches]
@@ -414,11 +429,19 @@ class HPWM(nn.Module):
         )
 
         # ── Aggregate losses ─────────────────────────────
-        # During VQ-VAE warmup, suppress prediction loss so the codebook
-        # stabilises before the prediction head starts chasing it.
+        # Two-phase prediction warmup:
+        #   Phase 1 (0 → vqvae_warmup_steps): prediction off, VQ-VAE codebook stabilises
+        #   Phase 2 (vqvae_warmup_steps → +pred_warmup_steps): cosine ramp 0 → full weight
+        # This avoids the sudden jump that caused total loss to diverge.
         step = self._train_step.item()
+        pred_ramp_end = config.vqvae_warmup_steps + config.pred_warmup_steps
         if step < config.vqvae_warmup_steps:
-            pred_weight = config.loss_weight_prediction * (step / config.vqvae_warmup_steps)
+            pred_weight = 0.0
+        elif step < pred_ramp_end:
+            ramp_progress = (step - config.vqvae_warmup_steps) / config.pred_warmup_steps
+            pred_weight = config.loss_weight_prediction * 0.5 * (
+                1.0 - math.cos(math.pi * ramp_progress)
+            )
         else:
             pred_weight = config.loss_weight_prediction
 
@@ -428,6 +451,7 @@ class HPWM(nn.Module):
             + config.loss_weight_fwm * fwm_loss
             + config.loss_weight_commitment * commitment_loss
             + config.loss_weight_routing_entropy * entropy_loss
+            + config.loss_weight_slot_consistency * slot_consistency_loss
         )
 
         return {
@@ -437,6 +461,7 @@ class HPWM(nn.Module):
             "fwm_loss": fwm_loss.detach(),
             "commitment_loss": commitment_loss.detach(),
             "entropy_loss": entropy_loss.detach(),
+            "slot_consistency_loss": slot_consistency_loss.detach(),
             "pred_logits": pred_logits.detach(),
             "target_indices": target_indices.detach(),
             "surprise_maps": surprise_maps.detach(),
