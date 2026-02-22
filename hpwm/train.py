@@ -160,7 +160,7 @@ class Trainer:
                 for key in [
                     "prediction_loss", "vqvae_recon_loss",
                     "fwm_loss", "commitment_loss", "entropy_loss",
-                    "slot_consistency_loss",
+                    "slot_consistency_loss", "slot_specialization_loss",
                 ]:
                     val = outputs[key].item()
                     accum_metrics[key] = accum_metrics.get(key, 0) + val / config.grad_accum_steps

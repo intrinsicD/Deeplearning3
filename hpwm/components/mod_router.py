@@ -200,6 +200,9 @@ class MoDSurpriseRouter(nn.Module):
         """Route patches based on surprise scores.
 
         Uses gather/scatter for static tensor shapes.
+        During training, adds Gumbel noise to surprise so top-K selection
+        explores different patches across batches/steps, preventing the
+        same fixed subset from always being routed to the heavy path.
 
         Args:
             features: [B, N_patches, D]
@@ -212,8 +215,16 @@ class MoDSurpriseRouter(nn.Module):
         B, N, D = features.shape
         K = self.current_k
 
-        # Get top-K indices by surprise score
-        _, topk_idx = surprise.topk(K, dim=-1)  # [B, K]
+        # During training: add Gumbel noise for routing exploration.
+        # Scale noise relative to surprise spread so it's meaningful.
+        routing_scores = surprise
+        if self.training:
+            noise = -torch.empty_like(surprise).exponential_().log()  # Gumbel(0,1)
+            noise_scale = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6) * 0.5
+            routing_scores = surprise + noise * noise_scale
+
+        # Get top-K indices by (noisy) surprise score
+        _, topk_idx = routing_scores.topk(K, dim=-1)  # [B, K]
 
         # Build binary mask
         routing_mask = torch.zeros(B, N, device=features.device)
@@ -234,37 +245,43 @@ class MoDSurpriseRouter(nn.Module):
 
         return routed, routing_mask
 
-    def compute_entropy_loss(self, surprise: torch.Tensor) -> torch.Tensor:
-        """Differentiable entropy loss on the soft routing distribution.
+    def compute_load_balancing_loss(
+        self, routing_mask: torch.Tensor, surprise: torch.Tensor,
+    ) -> torch.Tensor:
+        """Load-balancing loss on the hard routing mask.
 
-        Maximises entropy of the softmax(surprise) distribution so that
-        routing decisions vary across spatial positions instead of
-        collapsing to the same fixed subset.
+        Penalises spatial concentration by pushing per-patch routing
+        frequency toward uniform.  Unlike the old soft entropy loss,
+        this directly targets the hard top-K selection that Signal 1
+        measures.
 
-        Uses temperature scaling: as FWM improves, raw surprise values
-        converge and tiny differences get amplified by softmax into peaked
-        distributions.  Normalising by std keeps the distribution spread
-        meaningful regardless of FWM accuracy.
+        Uses the Switch-Transformer formulation: CV^2 of per-patch
+        routing frequency across the batch, combined with a
+        differentiable surrogate through the soft surprise distribution.
 
         Args:
+            routing_mask: [B, N_patches] binary mask from top-K
             surprise: [B, N_patches] raw surprise scores
 
         Returns:
-            entropy_loss: scalar (negate entropy → minimise to maximise entropy)
+            loss: scalar, always >= 0
         """
-        # Temperature-scale surprise so softmax stays well-conditioned
-        # even as FWM loss shrinks and raw surprise values converge.
-        std = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6)
-        scaled = surprise / std
+        N = routing_mask.shape[-1]
 
-        # Soft routing probabilities (differentiable, unlike hard top-K)
-        probs = F.softmax(scaled, dim=-1)  # [B, N_patches]
-        log_probs = F.log_softmax(scaled, dim=-1)
-        # Per-sample entropy, averaged over batch
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
-        # Normalise by max possible entropy so the loss scale is ~1
-        max_entropy = math.log(surprise.shape[-1])
-        return -(entropy / max_entropy)  # negative: minimise → maximise entropy
+        # f_i = fraction of tokens routed to patch position i
+        f = routing_mask.float().mean(dim=0)  # [N_patches]
+
+        # p_i = mean soft routing probability per position (differentiable)
+        probs = F.softmax(surprise, dim=-1)  # [B, N_patches]
+        p = probs.mean(dim=0)  # [N_patches]
+
+        # Switch-Transformer auxiliary loss: N * sum(f_i * p_i)
+        # Minimised when f and p are both uniform (= 1/N each).
+        # Value at uniform: N * N * (1/N * 1/N) = 1.0
+        # Value when concentrated: >> 1.0
+        loss = N * (f * p).sum()
+
+        return loss
 
     def forward(
         self,
@@ -297,15 +314,15 @@ class MoDSurpriseRouter(nn.Module):
 
         routed, routing_mask = self.route_patches(features_current, surprise)
 
-        # Differentiable entropy loss (encourages diverse routing)
-        entropy_loss = self.compute_entropy_loss(surprise)
+        # Load-balancing loss (encourages diverse routing across patches)
+        balance_loss = self.compute_load_balancing_loss(routing_mask, surprise)
 
         return {
             "routed_features": routed,
             "surprise": surprise,
             "routing_mask": routing_mask,
             "fwm_loss": fwm_loss,
-            "entropy_loss": entropy_loss,
+            "entropy_loss": balance_loss,  # keep key name for backward compat
         }
 
     def step(self):

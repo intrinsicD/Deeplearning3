@@ -78,12 +78,13 @@ class HPWMConfig:
     max_grad_norm: float = 1.0
 
     # ── Loss weights ─────────────────────────────────────
-    loss_weight_prediction: float = 1.0   # next-frame token prediction
-    loss_weight_vqvae: float = 0.5        # VQ-VAE reconstruction
-    loss_weight_fwm: float = 0.1          # FWM next-frame feature prediction
-    loss_weight_commitment: float = 0.25  # VQ commitment loss
-    loss_weight_routing_entropy: float = 0.5  # penalise low routing entropy (was 0.1)
-    loss_weight_slot_consistency: float = 0.3  # slot binding temporal consistency
+    loss_weight_prediction: float = 1.0    # next-frame token prediction
+    loss_weight_vqvae: float = 0.5         # VQ-VAE reconstruction
+    loss_weight_fwm: float = 0.1           # FWM next-frame feature prediction
+    loss_weight_commitment: float = 0.25   # VQ commitment loss
+    loss_weight_routing_entropy: float = 0.01  # load-balancing loss (always >= 0)
+    loss_weight_slot_consistency: float = 0.2  # per-slot temporal smoothness
+    loss_weight_slot_specialization: float = 0.1  # slot attention sharpness
 
     # ── VQ-VAE warmup (freeze codebook drift) ──────────
     vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
