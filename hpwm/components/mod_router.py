@@ -220,7 +220,7 @@ class MoDSurpriseRouter(nn.Module):
         routing_scores = surprise
         if self.training:
             noise = -torch.empty_like(surprise).exponential_().log()  # Gumbel(0,1)
-            noise_scale = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6) * 0.5
+            noise_scale = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6) * 1.0
             routing_scores = surprise + noise * noise_scale
 
         # Get top-K indices by (noisy) surprise score

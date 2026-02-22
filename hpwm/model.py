@@ -134,10 +134,10 @@ class PredictionHead(nn.Module):
         """
         B = multiscale_output.shape[0]
 
-        # Use the last latent token (most temporally recent) rather than
-        # mean-pooling, which destroys the temporal structure the Mamba
-        # and multi-scale attention stages worked to build.
-        pooled = multiscale_output[:, -1]  # [B, D_input]
+        # Mean-pool over all latent tokens to aggregate temporal context.
+        # Last-token-only discards the temporal structure Mamba and
+        # multi-scale attention built; mean-pooling preserves it.
+        pooled = multiscale_output.mean(dim=1)  # [B, D_input]
         h = self.proj(pooled)  # [B, hidden_dim]
 
         # Unfold to spatial grid
