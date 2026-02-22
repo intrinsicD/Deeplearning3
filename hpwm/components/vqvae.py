@@ -156,6 +156,35 @@ class VectorQuantizer(nn.Module):
 
         return quantized, indices, total_commitment
 
+    def codebook_utilization(self) -> dict[str, float]:
+        """Compute per-codebook utilization metrics.
+
+        Returns dict with:
+            active_ratio: fraction of codes used (averaged over codebooks)
+            perplexity: exp(entropy) of code usage (averaged)
+        """
+        with torch.no_grad():
+            total_active = 0.0
+            total_perplexity = 0.0
+            for i in range(self.n_codebooks):
+                counts = self.ema_count[i]
+                total = counts.sum()
+                if total < 1e-8:
+                    continue
+                probs = counts / total
+                active = (counts > 1.0).float().mean().item()
+                # Shannon entropy → perplexity
+                log_probs = torch.log(probs + 1e-8)
+                entropy = -(probs * log_probs).sum()
+                perplexity = entropy.exp().item()
+                total_active += active
+                total_perplexity += perplexity
+            n = max(1, self.n_codebooks)
+            return {
+                "active_ratio": total_active / n,
+                "perplexity": total_perplexity / n,
+            }
+
     def indices_to_embeddings(self, indices: torch.Tensor) -> torch.Tensor:
         """Convert codebook indices back to embeddings.
 

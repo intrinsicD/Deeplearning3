@@ -159,7 +159,7 @@ class Trainer:
                 accum_loss += outputs["loss"].item() / config.grad_accum_steps
                 for key in [
                     "prediction_loss", "vqvae_recon_loss",
-                    "fwm_loss", "commitment_loss",
+                    "fwm_loss", "commitment_loss", "entropy_loss",
                 ]:
                     val = outputs[key].item()
                     accum_metrics[key] = accum_metrics.get(key, 0) + val / config.grad_accum_steps
@@ -185,6 +185,8 @@ class Trainer:
 
                     # Step MoD K-ratio annealing
                     self.model.mod_router.step()
+                    # Step VQ-VAE warmup counter
+                    self.model._train_step += 1
 
                     self.global_step += 1
 
@@ -266,6 +268,12 @@ class Trainer:
         for length, acc in sig3.items():
             print(f"  {length}: {acc:.4f}")
 
+        # VQ-VAE codebook utilization
+        cb_metrics = self.model.vqvae.quantizer.codebook_utilization()
+        print(f"\nVQ-VAE Codebook Utilization:")
+        print(f"  Active ratio: {cb_metrics['active_ratio']:.4f}")
+        print(f"  Perplexity: {cb_metrics['perplexity']:.1f} / {self.config.vqvae_vocab_size}")
+
         # Validation loss
         val_loss = results.get("val_loss", float("inf"))
         print(f"\nValidation loss: {val_loss:.4f}")
@@ -281,6 +289,8 @@ class Trainer:
             for k, v in sig3.items():
                 self.tb_writer.add_scalar(f"signal_3/{k}", v, self.global_step)
             self.tb_writer.add_scalar("val/loss", val_loss, self.global_step)
+            self.tb_writer.add_scalar("vqvae/active_ratio", cb_metrics["active_ratio"], self.global_step)
+            self.tb_writer.add_scalar("vqvae/perplexity", cb_metrics["perplexity"], self.global_step)
 
         # Track best
         if val_loss < self.best_loss:

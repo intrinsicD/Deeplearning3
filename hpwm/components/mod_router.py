@@ -234,6 +234,28 @@ class MoDSurpriseRouter(nn.Module):
 
         return routed, routing_mask
 
+    def compute_entropy_loss(self, surprise: torch.Tensor) -> torch.Tensor:
+        """Differentiable entropy loss on the soft routing distribution.
+
+        Maximises entropy of the softmax(surprise) distribution so that
+        routing decisions vary across spatial positions instead of
+        collapsing to the same fixed subset.
+
+        Args:
+            surprise: [B, N_patches] raw surprise scores
+
+        Returns:
+            entropy_loss: scalar (negate entropy → minimise to maximise entropy)
+        """
+        # Soft routing probabilities (differentiable, unlike hard top-K)
+        probs = F.softmax(surprise, dim=-1)  # [B, N_patches]
+        log_probs = F.log_softmax(surprise, dim=-1)
+        # Per-sample entropy, averaged over batch
+        entropy = -(probs * log_probs).sum(dim=-1).mean()
+        # Normalise by max possible entropy so the loss scale is ~1
+        max_entropy = math.log(surprise.shape[-1])
+        return -(entropy / max_entropy)  # negative: minimise → maximise entropy
+
     def forward(
         self,
         features_current: torch.Tensor,
@@ -265,11 +287,15 @@ class MoDSurpriseRouter(nn.Module):
 
         routed, routing_mask = self.route_patches(features_current, surprise)
 
+        # Differentiable entropy loss (encourages diverse routing)
+        entropy_loss = self.compute_entropy_loss(surprise)
+
         return {
             "routed_features": routed,
             "surprise": surprise,
             "routing_mask": routing_mask,
             "fwm_loss": fwm_loss,
+            "entropy_loss": entropy_loss,
         }
 
     def step(self):
