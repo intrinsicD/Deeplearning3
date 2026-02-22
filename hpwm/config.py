@@ -27,7 +27,7 @@ class HPWMConfig:
     # ── MoD / FWM (Component 1) ──────────────────────────
     k_ratio_init: float = 1.0    # start fully uniform
     k_ratio_final: float = 0.3   # anneal: 30% to heavy blocks
-    k_ratio_warmup_steps: int = 5000
+    k_ratio_warmup_steps: int = 15000
     fwm_channels: int = 384      # FWM conv channels (matches d_dino)
     fwm_layers: int = 3          # 3-layer ConvNet
     n_heavy_layers: int = 2      # small Transformer for heavy path
@@ -82,6 +82,10 @@ class HPWMConfig:
     loss_weight_vqvae: float = 0.5        # VQ-VAE reconstruction
     loss_weight_fwm: float = 0.1          # FWM next-frame feature prediction
     loss_weight_commitment: float = 0.25  # VQ commitment loss
+    loss_weight_routing_entropy: float = 0.1  # penalise low routing entropy
+
+    # ── VQ-VAE warmup (freeze codebook drift) ──────────
+    vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
 
     # ── Evaluation & logging ─────────────────────────────
     eval_every: int = 500

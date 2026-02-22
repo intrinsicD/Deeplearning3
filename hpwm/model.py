@@ -134,8 +134,10 @@ class PredictionHead(nn.Module):
         """
         B = multiscale_output.shape[0]
 
-        # Pool over latent tokens
-        pooled = multiscale_output.mean(dim=1)  # [B, D_input]
+        # Use the last latent token (most temporally recent) rather than
+        # mean-pooling, which destroys the temporal structure the Mamba
+        # and multi-scale attention stages worked to build.
+        pooled = multiscale_output[:, -1]  # [B, D_input]
         h = self.proj(pooled)  # [B, hidden_dim]
 
         # Unfold to spatial grid
@@ -162,6 +164,7 @@ class HPWM(nn.Module):
     def __init__(self, config: HPWMConfig):
         super().__init__()
         self.config = config
+        self.register_buffer("_train_step", torch.tensor(0, dtype=torch.long))
         d_slot_total = config.n_slots * config.d_slot
 
         # Component 0: DINO backbone (frozen)
@@ -310,6 +313,7 @@ class HPWM(nn.Module):
         all_surprise = []
         all_routing_masks = []
         total_fwm_loss = torch.tensor(0.0, device=frames.device)
+        total_entropy_loss = torch.tensor(0.0, device=frames.device)
 
         for t in range(T):
             features_t = dino_features[:, t]  # [B, N_patches, D]
@@ -327,11 +331,13 @@ class HPWM(nn.Module):
             all_surprise.append(mod_out["surprise"])
             all_routing_masks.append(mod_out["routing_mask"])
             total_fwm_loss = total_fwm_loss + mod_out["fwm_loss"]
+            total_entropy_loss = total_entropy_loss + mod_out["entropy_loss"]
 
         routed_features = torch.stack(all_routed, dim=1)       # [B, T, N_patches, D]
         surprise_maps = torch.stack(all_surprise, dim=1)       # [B, T, N_patches]
         routing_masks = torch.stack(all_routing_masks, dim=1)  # [B, T, N_patches]
         fwm_loss = total_fwm_loss / max(1, T - 1)
+        entropy_loss = total_entropy_loss / T
 
         # ── Step 3: Slot encoding (frame-by-frame with temporal continuity) ──
         all_slots = []
@@ -408,11 +414,20 @@ class HPWM(nn.Module):
         )
 
         # ── Aggregate losses ─────────────────────────────
+        # During VQ-VAE warmup, suppress prediction loss so the codebook
+        # stabilises before the prediction head starts chasing it.
+        step = self._train_step.item()
+        if step < config.vqvae_warmup_steps:
+            pred_weight = config.loss_weight_prediction * (step / config.vqvae_warmup_steps)
+        else:
+            pred_weight = config.loss_weight_prediction
+
         total_loss = (
-            config.loss_weight_prediction * prediction_loss
+            pred_weight * prediction_loss
             + config.loss_weight_vqvae * vqvae_recon_loss
             + config.loss_weight_fwm * fwm_loss
             + config.loss_weight_commitment * commitment_loss
+            + config.loss_weight_routing_entropy * entropy_loss
         )
 
         return {
@@ -421,6 +436,7 @@ class HPWM(nn.Module):
             "vqvae_recon_loss": vqvae_recon_loss.detach(),
             "fwm_loss": fwm_loss.detach(),
             "commitment_loss": commitment_loss.detach(),
+            "entropy_loss": entropy_loss.detach(),
             "pred_logits": pred_logits.detach(),
             "target_indices": target_indices.detach(),
             "surprise_maps": surprise_maps.detach(),

@@ -102,6 +102,13 @@ class SyntheticMovingShapes(Dataset):
                 frame[c] = bg_color[c]
 
             for obj_idx, shape in enumerate(shapes):
+                # Random velocity perturbation each frame (Brownian-ish motion)
+                shape["vx"] += rng.normal(0, 0.3)
+                shape["vy"] += rng.normal(0, 0.3)
+                # Clamp velocity to prevent runaway
+                shape["vx"] = np.clip(shape["vx"], -3.0, 3.0)
+                shape["vy"] = np.clip(shape["vy"], -3.0, 3.0)
+
                 # Update position with bouncing
                 shape["x"] += shape["vx"]
                 shape["y"] += shape["vy"]
