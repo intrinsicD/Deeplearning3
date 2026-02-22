@@ -82,10 +82,12 @@ class HPWMConfig:
     loss_weight_vqvae: float = 0.5        # VQ-VAE reconstruction
     loss_weight_fwm: float = 0.1          # FWM next-frame feature prediction
     loss_weight_commitment: float = 0.25  # VQ commitment loss
-    loss_weight_routing_entropy: float = 0.1  # penalise low routing entropy
+    loss_weight_routing_entropy: float = 0.5  # penalise low routing entropy (was 0.1)
+    loss_weight_slot_consistency: float = 0.3  # slot binding temporal consistency
 
     # ── VQ-VAE warmup (freeze codebook drift) ──────────
     vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
+    pred_warmup_steps: int = 3000         # cosine ramp from 0 → full prediction weight
 
     # ── Evaluation & logging ─────────────────────────────
     eval_every: int = 500
