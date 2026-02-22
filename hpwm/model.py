@@ -352,23 +352,38 @@ class HPWM(nn.Module):
             all_slots.append(slot_out["slots"])
             all_attn_weights.append(slot_out["attn_weights"])
 
-            # Slot temporal consistency: penalise attention maps that
-            # change drastically between consecutive frames.
+            # Per-slot temporal smoothness: each slot's attention vector
+            # should be similar to the previous frame's.  Computed per-slot
+            # (dim=2 over N_patches) so the degenerate "constant map"
+            # solution doesn't trivially minimise the loss — the slot
+            # specialization term below prevents that.
             if t > 0:
                 prev_attn = all_attn_weights[-2]  # [B, N_slots, N_patches]
                 curr_attn = slot_out["attn_weights"]
-                # Negative cosine similarity → minimise to maximise similarity
-                sim = F.cosine_similarity(
-                    prev_attn.flatten(1), curr_attn.flatten(1), dim=1,
-                )  # [B]
-                slot_consistency_loss = slot_consistency_loss + (1.0 - sim.mean())
+                per_slot_sim = F.cosine_similarity(
+                    prev_attn, curr_attn, dim=2,
+                )  # [B, N_slots]
+                slot_consistency_loss = slot_consistency_loss + (1.0 - per_slot_sim).mean()
 
             prev_slots = slot_out["slots"].detach()  # detach for memory
 
         slot_consistency_loss = slot_consistency_loss / max(1, T - 1)
 
+        # Slot specialization: each slot should attend to a focused
+        # subset of patches, not spread uniformly.  Low entropy per slot
+        # = focused.  We penalise high entropy so slots are forced to
+        # specialise, preventing the degenerate constant-attention solution.
+        all_attn = torch.stack(all_attn_weights, dim=1)  # [B, T, N_slots, N_patches]
+        # Normalise attention weights to be a valid distribution per slot
+        slot_attn_dist = all_attn / (all_attn.sum(dim=-1, keepdim=True) + 1e-8)
+        slot_entropy = -(slot_attn_dist * (slot_attn_dist + 1e-8).log()).sum(dim=-1)
+        # [B, T, N_slots] — entropy per slot per frame
+        max_slot_entropy = math.log(config.n_patches)
+        # Normalise and average; this is >= 0 and we want to minimise it
+        slot_specialization_loss = (slot_entropy / max_slot_entropy).mean()
+
         slot_features = torch.stack(all_slots, dim=1)  # [B, T, N_slots, D_slot]
-        attn_weights = torch.stack(all_attn_weights, dim=1)  # [B, T, N_slots, N_patches]
+        attn_weights = all_attn  # [B, T, N_slots, N_patches]
 
         # Flatten slots for temporal processing
         slot_flat = rearrange(
@@ -452,6 +467,7 @@ class HPWM(nn.Module):
             + config.loss_weight_commitment * commitment_loss
             + config.loss_weight_routing_entropy * entropy_loss
             + config.loss_weight_slot_consistency * slot_consistency_loss
+            + config.loss_weight_slot_specialization * slot_specialization_loss
         )
 
         return {
@@ -462,6 +478,7 @@ class HPWM(nn.Module):
             "commitment_loss": commitment_loss.detach(),
             "entropy_loss": entropy_loss.detach(),
             "slot_consistency_loss": slot_consistency_loss.detach(),
+            "slot_specialization_loss": slot_specialization_loss.detach(),
             "pred_logits": pred_logits.detach(),
             "target_indices": target_indices.detach(),
             "surprise_maps": surprise_maps.detach(),
