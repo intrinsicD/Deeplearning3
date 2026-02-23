@@ -44,6 +44,7 @@ from omnilatent.model.encoders import (
     VideoEncoder,
 )
 from omnilatent.model.hooks import HookManager, LatentNeuralHook
+from omnilatent.model.masking import build_prefix_lm_mask
 from omnilatent.model.reasoning import LatentReasoningModule
 from omnilatent.utils import MODALITY_ID, Modality
 
@@ -174,7 +175,7 @@ class OmniLatentModel(nn.Module):
         return list(self.hook_manager.hooks.keys())
 
     # ------------------------------------------------------------------
-    # Prefix-LM attention mask
+    # Prefix-LM attention mask (delegates to centralized masking module)
     # ------------------------------------------------------------------
     def _create_attention_mask(
         self,
@@ -185,34 +186,9 @@ class OmniLatentModel(nn.Module):
     ) -> torch.Tensor:
         """Create Prefix-LM attention mask.
 
-        Layout: [source_tokens (src_len), target_tokens (tgt_len)]
-
-        PyTorch SDPA convention: True = CAN attend, False = masked.
-
-        Rules:
-          - Source → Source: True (bidirectional)
-          - Source → Target: False (source can't see the answer)
-          - Target → Source: True (target reads source)
-          - Target → Target:
-              text: causal (lower triangle = True)
-              other: True (bidirectional)
+        Delegates to masking.build_prefix_lm_mask for centralized semantics.
         """
-        tot = src_len + tgt_len
-        # Start with everything attending
-        mask = torch.ones(tot, tot, dtype=torch.bool, device=device)
-
-        # Source cannot attend to target tokens
-        mask[:src_len, src_len:] = False
-
-        # For text: causal mask within target region
-        if target_modality == "text":
-            causal = torch.tril(
-                torch.ones(tgt_len, tgt_len, dtype=torch.bool, device=device)
-            )
-            mask[src_len:, src_len:] = causal
-
-        # (1, 1, tot, tot) for broadcasting over batch and heads
-        return mask.unsqueeze(0).unsqueeze(0)
+        return build_prefix_lm_mask(src_len, tgt_len, target_modality, device)
 
     # ------------------------------------------------------------------
     # Encoding
@@ -329,6 +305,7 @@ class OmniLatentModel(nn.Module):
             tokens,
             attn_mask=attn_mask,
             hook_manager=self.hook_manager if self.hook_manager.has_hooks() else None,
+            prefix_len=prefix_len,
         )
 
         # 8. Extract target region (skip prefix + target modality token)

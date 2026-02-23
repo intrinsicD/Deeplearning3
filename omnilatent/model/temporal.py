@@ -381,8 +381,7 @@ class RecurrentMemory(nn.Module):
     ) -> torch.Tensor:
         """Expand an attention mask to account for prepended memory tokens.
 
-        Memory tokens get full bidirectional attention (all positions can
-        attend to and from memory tokens).
+        Delegates to centralized masking module.
 
         Args:
             attn_mask: (1, 1, N, N) or (B, 1, N, N) existing mask.
@@ -390,9 +389,5 @@ class RecurrentMemory(nn.Module):
 
         Returns: expanded mask (*, M+N, M+N).
         """
-        if mem_len == 0:
-            return attn_mask
-
-        # Memory tokens are fully visible to all positions
-        # and can attend to all positions
-        return F.pad(attn_mask, (mem_len, 0, mem_len, 0), value=True)
+        from omnilatent.model.masking import expand_mask_for_memory
+        return expand_mask_for_memory(attn_mask, mem_len)

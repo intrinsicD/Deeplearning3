@@ -5,18 +5,18 @@ Key features:
   * Gradient accumulation (optional)
   * Cosine learning rate schedule with warm-up
   * Gradient clipping
-  * Multi-modal round-robin training: each step picks a random
-    (source, target) modality pair and trains on it
-  * Proper loss scaling to avoid underflow in FP16
+  * Multi-modal round-robin training via TaskSampler
+  * Structured metrics collection via MetricsAggregator
+  * Deterministic seeding for reproducibility
 """
 
 from __future__ import annotations
 
-import itertools
+import json
 import math
-import random
 import time
-from typing import Sequence
+from pathlib import Path
+from typing import Any, Sequence
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,9 @@ from torch.utils.data import DataLoader
 from omnilatent.config import OmniLatentConfig
 from omnilatent.model.omnilatent import OmniLatentModel
 from omnilatent.training.losses import MultiModalLoss
-from omnilatent.utils import ALL_MODALITIES, Modality
+from omnilatent.training.metrics import MetricsAggregator, StepMetrics
+from omnilatent.training.sampler import TaskSampler
+from omnilatent.utils import ALL_MODALITIES, Modality, set_seed, count_parameters
 
 
 def cosine_schedule(
@@ -46,8 +48,8 @@ class Trainer:
     """Single-GPU trainer for OmniLatent.
 
     Trains the model by randomly sampling (source_modality, target_modality)
-    pairs each step.  This gives uniform coverage of all modality
-    combinations over time.
+    pairs each step via a TaskSampler.  This gives uniform coverage of all
+    modality combinations over time.
 
     For self-reconstruction steps, the source and target are the same
     modality.  For cross-modal steps, they differ (requires paired data).
@@ -59,11 +61,16 @@ class Trainer:
         config: OmniLatentConfig,
         dataloader: DataLoader,
         val_dataloader: DataLoader | None = None,
+        seed: int = 42,
     ) -> None:
         self.model = model
         self.config = config
         self.dataloader = dataloader
         self.val_dataloader = val_dataloader
+
+        # Deterministic seeding
+        self.seed = seed
+        set_seed(seed)
 
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -85,12 +92,49 @@ class Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.mixed_precision and self.device.type == "cuda")
         self.amp_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
 
-        # Build all modality pairs for round-robin
-        self._modality_pairs = list(
-            itertools.product(ALL_MODALITIES, ALL_MODALITIES)
+        # Task sampler (replaces raw itertools.product)
+        self.task_sampler = TaskSampler(
+            modalities=ALL_MODALITIES,
+            self_recon_weight=0.5,
         )
 
+        # Metrics aggregator
+        self.metrics = MetricsAggregator()
+
         self.global_step = 0
+
+    def _get_run_info(self) -> dict[str, Any]:
+        """Collect run metadata for logging."""
+        info: dict[str, Any] = {
+            "seed": self.seed,
+            "device": str(self.device),
+            "config": {
+                k: v for k, v in self.config.__dict__.items()
+                if not k.startswith("_")
+            },
+            "model_params_total": count_parameters(self.model),
+        }
+        # Parameter breakdown by component
+        param_breakdown: dict[str, int] = {}
+        for name, module in self.model.named_children():
+            param_breakdown[name] = sum(
+                p.numel() for p in module.parameters()
+            )
+        info["model_params_breakdown"] = param_breakdown
+
+        # Git hash if available
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                info["git_hash"] = result.stdout.strip()
+        except Exception:
+            pass
+
+        return info
 
     def _update_lr(self) -> float:
         lr = cosine_schedule(
@@ -106,7 +150,7 @@ class Trainer:
     def _train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
         """One training step.
 
-        Randomly picks a (source, target) pair from the available
+        Uses TaskSampler to pick a (source, target) pair from available
         modalities in this batch.
         """
         # Move batch to device
@@ -116,9 +160,8 @@ class Trainer:
         if len(available) == 0:
             return {"total": 0.0}
 
-        # Pick random source and target from available modalities
-        src_mod = random.choice(available)
-        tgt_mod = random.choice(available)
+        # Use task sampler for modality pair selection
+        src_mod, tgt_mod = self.task_sampler.sample(available)
 
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -156,18 +199,43 @@ class Trainer:
 
         # Gradient clipping (unscale first for correct norm)
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(
+        grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.config.grad_clip
-        )
+        ).item()
 
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return {k: v.item() for k, v in loss_dict.items()}
+        loss_values = {k: v.item() for k, v in loss_dict.items()}
 
-    def train(self, log_interval: int = 50) -> None:
+        # Log step metrics
+        lr = self.optimizer.param_groups[0]["lr"]
+        step_metrics = StepMetrics(
+            loss_total=loss_values.get("total", 0.0),
+            loss_per_modality={
+                k: v for k, v in loss_values.items() if k != "total"
+            },
+            grad_norm=grad_norm,
+            source_modality=src_mod,
+            target_modality=tgt_mod,
+            learning_rate=lr,
+        )
+        self.metrics.log_step(step_metrics)
+
+        return loss_values
+
+    def train(self, log_interval: int = 50, save_dir: str | None = None) -> None:
         """Main training loop."""
         self.model.train()
+
+        # Save run info
+        if save_dir is not None:
+            save_path = Path(save_dir)
+            save_path.mkdir(parents=True, exist_ok=True)
+            run_info = self._get_run_info()
+            with open(save_path / "run_info.json", "w") as f:
+                json.dump(run_info, f, indent=2, default=str)
+
         data_iter = iter(self.dataloader)
         running_loss = 0.0
         t0 = time.time()
@@ -190,10 +258,12 @@ class Trainer:
                 avg_loss = running_loss / log_interval
                 elapsed = time.time() - t0
                 steps_per_sec = log_interval / elapsed
+                avg_grad = self.metrics.avg_grad_norm()
                 print(
                     f"step {step + 1:>6d} | "
                     f"loss {avg_loss:.4f} | "
                     f"lr {lr:.2e} | "
+                    f"grad {avg_grad:.2f} | "
                     f"{steps_per_sec:.1f} steps/s"
                 )
                 running_loss = 0.0
@@ -207,7 +277,10 @@ class Trainer:
                 val_loss = self.validate()
                 print(f"  → val_loss {val_loss:.4f}")
 
-        print("Training complete.")
+        # Print final metrics summary
+        summary = self.metrics.summary()
+        print(f"\nTraining complete. Final avg loss: {summary['avg_loss']:.4f}")
+        print(f"Task distribution: {summary['task_distribution']}")
 
     @torch.no_grad()
     def validate(self, max_batches: int = 20) -> float:

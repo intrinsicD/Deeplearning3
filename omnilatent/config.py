@@ -101,6 +101,9 @@ class OmniLatentConfig:
     contrastive_weight: float = 0.0     # disabled: causes modality collapse on unpaired/synthetic data
     contrastive_temperature: float = 0.07
 
+    # --- Debug ---
+    debug_shapes: bool = False         # enable runtime shape assertions at module boundaries
+
     # Derived (computed in __post_init__)
     mlp_dim: int = 0
     image_num_patches: int = 0
@@ -111,3 +114,25 @@ class OmniLatentConfig:
         self.image_num_patches = (self.image_size // self.image_patch_size) ** 2
         vs = self.video_size // self.video_patch_size
         self.video_spatial_patches = vs * vs
+
+        # Validate config consistency
+        if self.image_size % self.image_patch_size != 0:
+            raise ValueError(
+                f"image_size ({self.image_size}) must be divisible by "
+                f"image_patch_size ({self.image_patch_size})"
+            )
+        if self.video_size % self.video_patch_size != 0:
+            raise ValueError(
+                f"video_size ({self.video_size}) must be divisible by "
+                f"video_patch_size ({self.video_patch_size})"
+            )
+        if self.video_max_frames % self.video_temporal_patch != 0:
+            raise ValueError(
+                f"video_max_frames ({self.video_max_frames}) must be divisible by "
+                f"video_temporal_patch ({self.video_temporal_patch})"
+            )
+        if self.hidden_dim % self.num_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({self.hidden_dim}) must be divisible by "
+                f"num_heads ({self.num_heads})"
+            )

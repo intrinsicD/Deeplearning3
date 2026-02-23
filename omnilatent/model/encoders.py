@@ -73,10 +73,24 @@ class AudioEncoder(nn.Module):
     axis while expanding channels to hidden_dim.  A residual refinement
     layer at full width prevents information loss from the strided
     downsampling stages.  Includes learned positional embeddings.
+
+    The conv stack has a total stride of 4 (2×2), which must match
+    audio_patch_frames.  Changing audio_patch_frames without updating
+    the conv strides will break shape consistency.
     """
+
+    # Total downsampling factor of the conv stack (stride 2 × stride 2)
+    ENCODER_STRIDE: int = 4
 
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
+        if config.audio_patch_frames != self.ENCODER_STRIDE:
+            raise ValueError(
+                f"audio_patch_frames={config.audio_patch_frames} does not match "
+                f"AudioEncoder conv stride={self.ENCODER_STRIDE}. "
+                f"Either set audio_patch_frames={self.ENCODER_STRIDE} or update "
+                f"the conv stack strides in AudioEncoder."
+            )
         D = config.hidden_dim
         # Stage 1: (B, n_mels, T) → (B, D//4, T//2)
         self.conv1 = nn.Conv1d(config.audio_n_mels, D // 4, kernel_size=5, stride=2, padding=2)

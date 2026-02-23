@@ -217,49 +217,56 @@ class _ClipIndex:
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
-        """Get video duration in seconds.
+        """Get video duration by finding the largest readable timestamp.
 
-        Strategy:
-        1. Read a tiny clip and check info dict for total duration / frame count.
-        2. Fall back to probing at ascending offsets to bracket the duration.
+        Uses coarse probing to find bounds, then binary search between
+        the last successful and first failed read for precision.
         """
-        try:
-            _, _, info = read_video(
-                str(path), start_pts=0, end_pts=0.01, pts_unit="sec"
-            )
-            fps = info.get("video_fps", 30)
+        def _can_read_at(t: float) -> bool:
+            """Return True if we can read frames at time t."""
+            try:
+                v, _, _ = read_video(
+                    str(path),
+                    start_pts=t,
+                    end_pts=t + 0.01,
+                    pts_unit="sec",
+                )
+                return v is not None and v.shape[0] > 0
+            except Exception:
+                return False
 
-            # Some backends populate total number of video frames
-            if "video_total_frames" in info and info["video_total_frames"] > 0:
-                return info["video_total_frames"] / fps
-
-            # Fallback: probe at ascending offsets to find the largest
-            # offset that still returns frames.
-            last_success = 0.0
-            for probe_time in [1, 10, 60, 600, 3600]:
-                try:
-                    v, _, _ = read_video(
-                        str(path),
-                        start_pts=probe_time,
-                        end_pts=probe_time + 0.01,
-                        pts_unit="sec",
-                    )
-                    if v.shape[0] > 0:
-                        last_success = probe_time
-                    else:
-                        # Video shorter than this probe — duration is between
-                        # last_success and probe_time.  Use last_success as a
-                        # conservative lower bound.
-                        break
-                except Exception:
-                    break
-
-            # Return the last known-good offset; the video is *at least*
-            # this long (it may be slightly longer, but this is a safe
-            # lower bound for clip indexing).
-            return max(last_success, 0.01)
-        except Exception:
+        # Verify the video is readable at all
+        if not _can_read_at(0.0):
             return None
+
+        # Coarse probe: find the smallest probe_time that fails
+        probe_times = [1, 10, 60, 600, 3600]
+        last_success = 0.0
+        first_fail = None
+
+        for t in probe_times:
+            if _can_read_at(float(t)):
+                last_success = float(t)
+            else:
+                first_fail = float(t)
+                break
+
+        if first_fail is None:
+            # Video is at least 3600s; cap at that
+            return 3600.0
+
+        # Binary search between last_success and first_fail
+        lo, hi = last_success, first_fail
+        for _ in range(10):  # ~0.1% precision
+            if hi - lo < 0.5:
+                break
+            mid = (lo + hi) / 2.0
+            if _can_read_at(mid):
+                lo = mid
+            else:
+                hi = mid
+
+        return lo
 
     def __len__(self) -> int:
         return len(self.entries)
