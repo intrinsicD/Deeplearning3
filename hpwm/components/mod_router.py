@@ -215,13 +215,19 @@ class MoDSurpriseRouter(nn.Module):
         B, N, D = features.shape
         K = self.current_k
 
+        # Z-score normalize surprise so small per-patch differences are
+        # amplified into meaningful routing decisions.  Without this, the
+        # FWM may predict all patches with similar accuracy (especially on
+        # synthetic data), leaving surprise nearly uniform and top-K
+        # degenerate to a fixed spatial pattern.
+        s_mean = surprise.mean(dim=-1, keepdim=True)
+        s_std = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        routing_scores = (surprise - s_mean) / s_std
+
         # During training: add Gumbel noise for routing exploration.
-        # Scale noise relative to surprise spread so it's meaningful.
-        routing_scores = surprise
         if self.training:
-            noise = -torch.empty_like(surprise).exponential_().log()  # Gumbel(0,1)
-            noise_scale = surprise.std(dim=-1, keepdim=True).clamp(min=1e-6) * 1.0
-            routing_scores = surprise + noise * noise_scale
+            noise = -torch.empty_like(routing_scores).exponential_().log()  # Gumbel(0,1)
+            routing_scores = routing_scores + noise
 
         # Get top-K indices by (noisy) surprise score
         _, topk_idx = routing_scores.topk(K, dim=-1)  # [B, K]

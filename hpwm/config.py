@@ -38,7 +38,7 @@ class HPWMConfig:
     d_slot: int = 128            # full spec: 768
     slot_iters: int = 3          # iterative refinement steps
     slot_mlp_hidden: int = 256   # slot MLP hidden dim
-    tome_threshold: float = 0.9  # Token Merging cosine sim threshold
+    tome_threshold: float = 0.7  # Token Merging cosine sim threshold
 
     # ── Temporal state (Component 4) ─────────────────────
     n_temporal_tiers: int = 1    # full spec: 2 or 3
@@ -79,13 +79,13 @@ class HPWMConfig:
     max_grad_norm: float = 1.0
 
     # ── Loss weights ─────────────────────────────────────
-    loss_weight_prediction: float = 1.0    # next-frame token prediction
+    loss_weight_prediction: float = 0.15    # next-frame token prediction (reduced to prevent gradient dominance)
     loss_weight_vqvae: float = 0.5         # VQ-VAE reconstruction
     loss_weight_fwm: float = 0.1           # FWM next-frame feature prediction
     loss_weight_commitment: float = 0.25   # VQ commitment loss
-    loss_weight_routing_entropy: float = 0.05  # load-balancing loss (always >= 0)
+    loss_weight_routing_entropy: float = 0.3   # load-balancing loss (increased to break router collapse)
     loss_weight_slot_consistency: float = 0.5  # per-slot temporal smoothness
-    loss_weight_slot_specialization: float = 0.1  # slot attention sharpness
+    loss_weight_slot_specialization: float = 0.5  # slot attention sharpness (increased to force spatial specialization)
 
     # ── VQ-VAE warmup (freeze codebook drift) ──────────
     vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
