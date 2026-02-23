@@ -48,20 +48,22 @@ from torch.utils.data import Dataset
 
 from omnilatent.config import OmniLatentConfig
 
-# Optional imports — degrade gracefully
+# Optional imports — degrade gracefully.
+# Catch Exception (not just ImportError) because these libraries can fail
+# with RuntimeError, OSError, or AttributeError depending on build config.
 try:
     import torchaudio
     from torchaudio.transforms import MelSpectrogram, Resample
 
     _HAS_TORCHAUDIO = True
-except ImportError:
+except Exception:
     _HAS_TORCHAUDIO = False
 
 try:
     from torchvision.io import read_video
 
     _HAS_TORCHVISION_IO = True
-except ImportError:
+except Exception:
     _HAS_TORCHVISION_IO = False
 
 
@@ -215,19 +217,26 @@ class _ClipIndex:
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
-        """Get video duration in seconds.  Falls back to loading a tiny
-        portion if metadata probing fails."""
+        """Get video duration in seconds.
+
+        Strategy:
+        1. Read a tiny clip and check info dict for total duration / frame count.
+        2. Fall back to probing at ascending offsets to bracket the duration.
+        """
         try:
-            # read_video with a 0-length window returns metadata
             _, _, info = read_video(
                 str(path), start_pts=0, end_pts=0.01, pts_unit="sec"
             )
             fps = info.get("video_fps", 30)
-            # Estimate from file — not perfect but avoids loading the whole file
-            # Better: use ffprobe.  For now, load 0.01s and check if it works,
-            # then estimate from file size heuristic or try a larger read.
-            # We'll use a pragmatic approach: try reading at a far offset.
-            for probe_time in [3600, 600, 60, 10, 1]:
+
+            # Some backends populate total number of video frames
+            if "video_total_frames" in info and info["video_total_frames"] > 0:
+                return info["video_total_frames"] / fps
+
+            # Fallback: probe at ascending offsets to find the largest
+            # offset that still returns frames.
+            last_success = 0.0
+            for probe_time in [1, 10, 60, 600, 3600]:
                 try:
                     v, _, _ = read_video(
                         str(path),
@@ -236,12 +245,19 @@ class _ClipIndex:
                         pts_unit="sec",
                     )
                     if v.shape[0] > 0:
-                        continue  # video is at least this long
+                        last_success = probe_time
                     else:
-                        return float(probe_time)
+                        # Video shorter than this probe — duration is between
+                        # last_success and probe_time.  Use last_success as a
+                        # conservative lower bound.
+                        break
                 except Exception:
-                    return float(probe_time)
-            return 3600.0  # assume 1hr max
+                    break
+
+            # Return the last known-good offset; the video is *at least*
+            # this long (it may be slightly longer, but this is a safe
+            # lower bound for clip indexing).
+            return max(last_success, 0.01)
         except Exception:
             return None
 

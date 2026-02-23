@@ -68,32 +68,45 @@ class ImageDecoder(nn.Module):
     """Projects latent patch tokens back to pixel space.
 
     Each token is projected to a flat patch of pixels, then reshaped
-    into the full image.
+    into the full image.  The number of 2x upsampling stages is derived
+    from ``image_patch_size`` so it works for any power-of-2 patch size.
     """
 
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
         self.config = config
         D = config.hidden_dim
-        self.grid_size = config.image_size // config.image_patch_size
+        P = config.image_patch_size
+        self.grid_size = config.image_size // P
         self.norm = RMSNorm(D)
-        
-        # 4x upsampling (2^4 = 16) to reach the 16x16 patch size smoothly
-        self.upconv_stack = nn.Sequential(
-            nn.ConvTranspose2d(D, D // 2, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(),
-            nn.ConvTranspose2d(D // 2, D // 4, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(),
-            nn.ConvTranspose2d(D // 4, D // 8, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(),
-            nn.ConvTranspose2d(D // 8, config.image_channels, kernel_size=4, stride=2, padding=1),
-        )
+
+        # Number of 2x upsampling stages = log2(patch_size)
+        n_upsample = int(math.log2(P))
+        if 2 ** n_upsample != P:
+            raise ValueError(
+                f"image_patch_size must be a power of 2, got {P}"
+            )
+
+        # Build transposed-conv stack: each stage does 2x spatial upsampling
+        # and halves channels until the final stage outputs image_channels.
+        layers: list[nn.Module] = []
+        ch_in = D
+        for i in range(n_upsample):
+            is_last = i == n_upsample - 1
+            ch_out = config.image_channels if is_last else max(ch_in // 2, config.image_channels)
+            layers.append(
+                nn.ConvTranspose2d(ch_in, ch_out, kernel_size=4, stride=2, padding=1)
+            )
+            if not is_last:
+                layers.append(nn.SiLU())
+            ch_in = ch_out
+        self.upconv_stack = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm(x)
-        # Reshape 1D sequence to 2D spatial grid: (B, 196, D) -> (B, D, 14, 14)
+        # Reshape 1D sequence to 2D spatial grid: (B, N, D) -> (B, D, G, G)
         x = rearrange(x, "b (gh gw) d -> b d gh gw", gh=self.grid_size, gw=self.grid_size)
-        # Apply deconvolutions to smooth out the image
+        # Apply deconvolutions to reconstruct the image
         return self.upconv_stack(x)
 
 

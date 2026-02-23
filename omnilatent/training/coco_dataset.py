@@ -34,13 +34,13 @@ from omnilatent.config import OmniLatentConfig
 try:
     from PIL import Image
     _HAS_PIL = True
-except ImportError:
+except Exception:
     _HAS_PIL = False
 
 try:
     from torchvision import transforms as T
     _HAS_TORCHVISION = True
-except ImportError:
+except Exception:
     _HAS_TORCHVISION = False
 
 
