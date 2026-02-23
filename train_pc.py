@@ -11,6 +11,8 @@ Usage:
     python train_pc.py --steps 1000             # short run
     python train_pc.py --inference-steps 50     # more inference iterations
     python train_pc.py --blend 0.5              # hybrid PC + backprop
+    python train_pc.py --blend-anneal           # curriculum: backprop -> PC
+    python train_pc.py --analytical             # memory-efficient inference
     python train_pc.py --dim 256 --layers 4     # smaller model
 """
 
@@ -59,6 +61,18 @@ def parse_args() -> argparse.Namespace:
         "--supervised-weight", type=float, default=1.0,
         help="Weight for supervised reconstruction loss",
     )
+    p.add_argument(
+        "--blend-anneal", action="store_true",
+        help="Curriculum: anneal from backprop -> PC over training",
+    )
+    p.add_argument(
+        "--blend-anneal-steps", type=int, default=20_000,
+        help="Steps over which to anneal blend (requires --blend-anneal)",
+    )
+    p.add_argument(
+        "--analytical", action="store_true",
+        help="Use analytical inference (O(1) memory, residual Jacobian approx)",
+    )
 
     # Training
     p.add_argument("--steps", type=int, default=100_000, help="Max steps")
@@ -69,6 +83,8 @@ def parse_args() -> argparse.Namespace:
                     help="Disable gradient checkpointing")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-interval", type=int, default=50)
+    p.add_argument("--save-dir", type=str, default="checkpoints/pc",
+                    help="Checkpoint save directory")
     p.add_argument("--data-length", type=int, default=10_000,
                     help="Synthetic dataset size")
 
@@ -98,11 +114,15 @@ def main() -> None:
         inference_lr=args.inference_lr,
         learning_lr=args.lr,
         backprop_blend=args.blend,
+        backprop_blend_anneal=args.blend_anneal,
+        backprop_blend_anneal_steps=args.blend_anneal_steps,
+        use_analytical_inference=args.analytical,
         supervised_weight=args.supervised_weight,
         max_steps=args.steps,
         batch_size=args.batch_size,
         mixed_precision=not args.no_amp,
         seed=args.seed,
+        save_dir=args.save_dir,
     )
 
     print("=" * 60)
@@ -122,7 +142,13 @@ def main() -> None:
     print(f"Inference LR:    {pc_config.inference_lr}")
     print(f"Learning LR:     {pc_config.learning_lr}")
     print(f"Backprop blend:  {pc_config.backprop_blend}")
+    if pc_config.backprop_blend_anneal:
+        print(f"  Annealing:     {pc_config.backprop_blend_start:.1f} -> "
+              f"{pc_config.backprop_blend_end:.1f} over "
+              f"{pc_config.backprop_blend_anneal_steps} steps")
+    print(f"Analytical inf:  {pc_config.use_analytical_inference}")
     print(f"Supervised wt:   {pc_config.supervised_weight}")
+    print(f"Save dir:        {pc_config.save_dir}")
 
     model = OmniLatentModel(model_config)
 
@@ -141,7 +167,7 @@ def main() -> None:
         dataloader=dataloader,
         seed=args.seed,
     )
-    trainer.train(log_interval=args.log_interval)
+    trainer.train(log_interval=args.log_interval, save_dir=args.save_dir)
 
 
 if __name__ == "__main__":

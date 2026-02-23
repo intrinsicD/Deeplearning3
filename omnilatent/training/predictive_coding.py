@@ -64,6 +64,7 @@ class PCConfig:
     # Inference phase
     inference_steps: int = 20           # T_infer: iterations to converge latents
     inference_lr: float = 0.1           # eta_infer: step size for latent updates
+    inference_lr_decay: float = 0.95    # multiply eta_infer by this each step
 
     # Learning phase
     learning_lr: float = 1e-3           # eta_learn: step size for weight updates
@@ -77,6 +78,16 @@ class PCConfig:
     # 0.0 = pure PC, 1.0 = pure backprop
     backprop_blend: float = 0.0
 
+    # Hybrid annealing: curriculum from backprop -> PC over training
+    backprop_blend_anneal: bool = False
+    backprop_blend_start: float = 1.0   # start pure backprop
+    backprop_blend_end: float = 0.0     # end pure PC
+    backprop_blend_anneal_steps: int = 20_000
+
+    # Memory optimization: use analytical gradients for value node updates
+    # instead of autograd (residual Jacobian approximation: J^T ≈ I)
+    use_analytical_inference: bool = False
+
     # Training
     max_steps: int = 100_000
     warmup_steps: int = 2000
@@ -89,6 +100,15 @@ class PCConfig:
     # Annealing: increase inference steps over training
     inference_steps_warmup: int = 5     # start with fewer inference steps
     inference_steps_anneal_end: int = 10_000  # reach full T_infer by this step
+
+    # Precision parameter constraints
+    precision_lr_ratio: float = 0.1     # precision LR = learning_lr * this
+    precision_min: float = 0.01
+    precision_max: float = 100.0
+
+    # Checkpoint saving
+    save_every: int = 5000
+    save_dir: str = "checkpoints/pc"
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +139,34 @@ class PCLayer(nn.Module):
     @property
     def precision(self) -> torch.Tensor:
         return torch.exp(self.log_precision).clamp(min=0.01, max=100.0)
+
+    def analytical_value_gradient(
+        self,
+        error_above: torch.Tensor,
+        error_below: torch.Tensor | None,
+        precision_above: torch.Tensor,
+        precision_below: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Compute analytical gradient for value node updates.
+
+        From Whittington & Bogacz (2017), the value node update rule:
+            dx(l)/dt = -precision(l-1) * ε(l-1) + precision(l) * ε(l)
+
+        where ε(l) = value(l+1) - f_l(value(l)) is the prediction error.
+
+        The second term is propagated through the Jacobian df(l)/dx(l+1).
+        We use the residual approximation: since TransformerBlock computes
+        x + ls * f(x) (with LayerScale init ~0.1), the Jacobian J ≈ I,
+        making J^T @ ε ≈ ε.  This avoids storing autograd graphs.
+        """
+        # Top-down: this layer's prediction error weighted by precision above
+        grad = precision_above * error_above
+
+        if error_below is not None and precision_below is not None:
+            # Bottom-up: error from layer below (residual Jacobian approx)
+            grad = grad - precision_below * error_below
+
+        return grad
 
     def predict(
         self,
@@ -185,9 +233,15 @@ class PredictiveCodingNetwork(nn.Module):
         # Learnable precision for the supervised output error
         self.output_log_precision = nn.Parameter(torch.zeros(1))
 
+        # Cached reconstruction loss (avoid repeated instantiation)
+        self._recon_loss_fn = ReconstructionLoss()
+
     @property
     def output_precision(self) -> torch.Tensor:
-        return torch.exp(self.output_log_precision).clamp(min=0.01, max=100.0)
+        cfg = self.pc_config
+        return torch.exp(self.output_log_precision).clamp(
+            min=cfg.precision_min, max=cfg.precision_max
+        )
 
     @property
     def num_layers(self) -> int:
@@ -203,6 +257,34 @@ class PredictiveCodingNetwork(nn.Module):
             cfg.inference_steps_warmup
             + progress * (cfg.inference_steps - cfg.inference_steps_warmup)
         ))
+
+    def _get_backprop_blend(self, global_step: int) -> float:
+        """Return effective backprop_blend, possibly annealed over training.
+
+        When ``backprop_blend_anneal`` is True, linearly interpolates from
+        ``backprop_blend_start`` (default 1.0 = pure backprop) to
+        ``backprop_blend_end`` (default 0.0 = pure PC) over
+        ``backprop_blend_anneal_steps`` training steps.  This implements a
+        curriculum strategy where the network first learns useful
+        representations via backprop and then transitions to PC.
+        """
+        cfg = self.pc_config
+        if not cfg.backprop_blend_anneal:
+            return cfg.backprop_blend
+
+        if global_step >= cfg.backprop_blend_anneal_steps:
+            return cfg.backprop_blend_end
+
+        progress = global_step / max(cfg.backprop_blend_anneal_steps, 1)
+        return cfg.backprop_blend_start + progress * (
+            cfg.backprop_blend_end - cfg.backprop_blend_start
+        )
+
+    def _recon_loss(
+        self, modality: Modality, prediction: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute reconstruction loss using cached loss function."""
+        return self._recon_loss_fn(modality, prediction, target)
 
     def _compute_energy(
         self,
@@ -234,9 +316,21 @@ class PredictiveCodingNetwork(nn.Module):
     ) -> tuple[list[torch.Tensor], dict[str, float]]:
         """Inference phase: iteratively refine value nodes to minimize energy.
 
-        Warm-starts from the feedforward pass, then uses gradient descent
-        on the free energy w.r.t. value nodes.  Uses torch.autograd.grad()
-        to compute value-node gradients without affecting weight gradients.
+        Warm-starts from the feedforward pass, then updates value nodes to
+        minimize free energy.  Two modes:
+
+        **Autograd mode** (default): uses ``torch.autograd.grad()`` targeted
+        at value nodes.  Exact gradients, no retained graph -- O(L) memory
+        per iteration.
+
+        **Analytical mode** (``use_analytical_inference=True``): computes
+        value-node gradients analytically using the residual Jacobian
+        approximation (J^T ≈ I).  O(1) extra memory per iteration, faster,
+        but approximate.  Valid when TransformerBlock is ``x + ls * f(x)``
+        with small LayerScale ``ls``.
+
+        Both modes support within-inference LR decay (``inference_lr_decay``)
+        to help convergence as value nodes approach equilibrium.
 
         Args:
             x_input: (B, N, D) input tokens (from encoder + target queries)
@@ -249,8 +343,10 @@ class PredictiveCodingNetwork(nn.Module):
             value_nodes: list of L+1 tensors (B, N, D) -- converged latents
             info: dict with energy trajectory and convergence stats
         """
-        T = num_steps or self.pc_config.inference_steps
-        eta = self.pc_config.inference_lr
+        cfg = self.pc_config
+        T = num_steps or cfg.inference_steps
+        eta = cfg.inference_lr
+        decay = cfg.inference_lr_decay
 
         # Initialize value nodes from feedforward pass (warm start)
         value_nodes: list[torch.Tensor] = []
@@ -261,14 +357,34 @@ class PredictiveCodingNetwork(nn.Module):
                 x = pc_layer.predict(x, rope_freqs, rope_offset, attn_mask)
             value_nodes.append(x)  # output of final layer
 
+        if cfg.use_analytical_inference:
+            return self._inference_analytical(
+                value_nodes, rope_freqs, rope_offset, attn_mask, T, eta, decay,
+            )
+        return self._inference_autograd(
+            value_nodes, rope_freqs, rope_offset, attn_mask, T, eta, decay,
+        )
+
+    def _inference_autograd(
+        self,
+        value_nodes: list[torch.Tensor],
+        rope_freqs: torch.Tensor | None,
+        rope_offset: int,
+        attn_mask: torch.Tensor | None,
+        T: int,
+        eta: float,
+        decay: float,
+    ) -> tuple[list[torch.Tensor], dict[str, float]]:
+        """Autograd-based inference: exact gradients via torch.autograd.grad."""
         # Value node 0 is clamped (encoder output), the rest are free
-        # Make interior nodes require grad for optimization
         for i in range(1, len(value_nodes)):
             value_nodes[i] = value_nodes[i].detach().requires_grad_(True)
 
         energies: list[float] = []
 
-        for _t in range(T):
+        for t in range(T):
+            current_eta = eta * (decay ** t)
+
             # Compute total free energy
             total_energy = self._compute_energy(
                 value_nodes, rope_freqs, rope_offset, attn_mask
@@ -277,16 +393,14 @@ class PredictiveCodingNetwork(nn.Module):
             # Optional value-node decay (L2 regularization on activations)
             if self.pc_config.error_decay > 0:
                 for i in range(1, len(value_nodes)):
-                    decay = self.pc_config.error_decay * (
+                    reg = self.pc_config.error_decay * (
                         value_nodes[i] ** 2
                     ).sum(dim=-1).mean()
-                    total_energy = total_energy + decay
+                    total_energy = total_energy + reg
 
             energies.append(total_energy.item())
 
             # Compute gradients w.r.t. value nodes ONLY (not weights)
-            # This is the key difference from backprop: we use autograd.grad
-            # targeted at value nodes, leaving weights untouched
             free_nodes = [v for v in value_nodes[1:] if v.requires_grad]
             if not free_nodes:
                 break
@@ -304,11 +418,98 @@ class PredictiveCodingNetwork(nn.Module):
                 for i in range(1, len(value_nodes)):
                     if value_nodes[i].requires_grad:
                         value_nodes[i] = (
-                            value_nodes[i] - eta * grads[grad_idx]
+                            value_nodes[i] - current_eta * grads[grad_idx]
                         ).detach().requires_grad_(True)
                         grad_idx += 1
 
-        info = {
+        return value_nodes, self._inference_info(energies, T)
+
+    def _inference_analytical(
+        self,
+        value_nodes: list[torch.Tensor],
+        rope_freqs: torch.Tensor | None,
+        rope_offset: int,
+        attn_mask: torch.Tensor | None,
+        T: int,
+        eta: float,
+        decay: float,
+    ) -> tuple[list[torch.Tensor], dict[str, float]]:
+        """Analytical inference: O(1) memory using residual Jacobian approx.
+
+        Instead of building an autograd graph per iteration, computes the
+        value-node gradient from the closed-form expression:
+
+            grad(i) = precision(i-1) * ε(i-1) - precision(i) * ε(i)
+
+        where ε(l) = value(l+1) - f_l(value(l)).  The identity Jacobian
+        approximation comes from TransformerBlock's residual structure.
+        """
+        energies: list[float] = []
+
+        for t in range(T):
+            current_eta = eta * (decay ** t)
+
+            with torch.no_grad():
+                # Compute predictions and errors for all layers
+                predictions: list[torch.Tensor] = []
+                errors: list[torch.Tensor] = []
+                for i, pc_layer in enumerate(self.pc_layers):
+                    pred = pc_layer.predict(
+                        value_nodes[i], rope_freqs, rope_offset, attn_mask
+                    )
+                    predictions.append(pred)
+                    err = pc_layer.prediction_error(value_nodes[i + 1], pred)
+                    errors.append(err)
+
+                # Compute total energy for monitoring
+                total_energy = 0.0
+                for i, pc_layer in enumerate(self.pc_layers):
+                    total_energy += pc_layer.layer_energy(
+                        value_nodes[i + 1], predictions[i]
+                    ).item()
+                energies.append(total_energy)
+
+                # Update interior value nodes using analytical gradients
+                for i in range(1, len(value_nodes) - 1):
+                    # error_above: ε(i-1) from layer i-1 (pred of i-1 vs value i)
+                    error_above = errors[i - 1]
+                    prec_above = self.pc_layers[i - 1].precision
+
+                    # error_below: ε(i) from layer i (pred of i vs value i+1)
+                    error_below = errors[i] if i < len(errors) else None
+                    prec_below = (
+                        self.pc_layers[i].precision if i < self.num_layers
+                        else None
+                    )
+
+                    grad = self.pc_layers[i - 1].analytical_value_gradient(
+                        error_above, error_below, prec_above, prec_below,
+                    )
+                    value_nodes[i] = value_nodes[i] - current_eta * grad
+
+                # Update top value node
+                if len(value_nodes) > 1 and errors:
+                    top_idx = len(value_nodes) - 1
+                    grad = self.pc_layers[-1].precision * errors[-1]
+                    value_nodes[top_idx] = (
+                        value_nodes[top_idx] - current_eta * grad
+                    )
+
+                # Optional value-node decay
+                if self.pc_config.error_decay > 0:
+                    for i in range(1, len(value_nodes)):
+                        value_nodes[i] = value_nodes[i] * (
+                            1 - current_eta * self.pc_config.error_decay
+                        )
+
+        return value_nodes, self._inference_info(energies, T)
+
+    @staticmethod
+    def _inference_info(
+        energies: list[float], T: int
+    ) -> dict[str, float]:
+        """Build inference statistics from energy trajectory."""
+        return {
             "initial_energy": energies[0] if energies else 0.0,
             "final_energy": energies[-1] if energies else 0.0,
             "energy_reduction": (
@@ -317,8 +518,6 @@ class PredictiveCodingNetwork(nn.Module):
             ),
             "num_inference_steps": T,
         }
-
-        return value_nodes, info
 
     def learning_phase(
         self,
@@ -463,12 +662,11 @@ class PredictiveCodingNetwork(nn.Module):
         output = model.decoders[target_modality](tgt_latent_pc)
 
         # --- Supervised reconstruction loss ---
-        recon_fn = ReconstructionLoss()
-        recon_loss = recon_fn(target_modality, output, target_data)
+        recon_loss = self._recon_loss(target_modality, output, target_data)
 
         # --- Combine: PC energy + supervised loss ---
         pc_energy = learning_losses["total_energy"]
-        alpha = self.pc_config.backprop_blend
+        alpha = self._get_backprop_blend(global_step)
         if alpha > 0:
             # Hybrid: blend PC energy with standard recon loss
             total_loss = (1 - alpha) * pc_energy + alpha * recon_loss
@@ -480,6 +678,7 @@ class PredictiveCodingNetwork(nn.Module):
             "total": total_loss,
             "pc_energy": pc_energy,
             "recon_loss": recon_loss,
+            "backprop_blend": alpha,
             "output": output,
         }
         # Per-layer energies
@@ -581,7 +780,7 @@ class PCTrainer:
         )
         self.optimizer_precision = torch.optim.Adam(
             precision_params,
-            lr=pc_config.learning_lr * 0.1,  # slower for stability
+            lr=pc_config.learning_lr * pc_config.precision_lr_ratio,
         )
 
         # Mixed precision
@@ -612,7 +811,7 @@ class PCTrainer:
             for pg in opt.param_groups:
                 pg["lr"] = lr
         for pg in self.optimizer_precision.param_groups:
-            pg["lr"] = lr * 0.1
+            pg["lr"] = lr * self.pc_config.precision_lr_ratio
         return lr
 
     def _train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
@@ -727,6 +926,7 @@ class PCTrainer:
                 ]
                 avg_prec = sum(precisions) / len(precisions)
                 infer_steps = self.pc_net._get_inference_steps(step)
+                blend = self.pc_net._get_backprop_blend(step)
 
                 print(
                     f"step {step + 1:>6d} | "
@@ -735,6 +935,7 @@ class PCTrainer:
                     f"recon {avg_recon:.4f} | "
                     f"prec {avg_prec:.2f} | "
                     f"T_inf {infer_steps} | "
+                    f"blend {blend:.2f} | "
                     f"lr {lr:.2e} | "
                     f"{steps_per_sec:.1f} steps/s"
                 )
@@ -744,6 +945,10 @@ class PCTrainer:
                 running_recon = 0.0
                 t0 = time.time()
 
+            # Checkpoint saving
+            if save_dir and (step + 1) % self.pc_config.save_every == 0:
+                self._save_checkpoint(save_dir, step + 1)
+
             if (
                 self.val_dataloader is not None
                 and (step + 1) % (log_interval * 10) == 0
@@ -751,9 +956,36 @@ class PCTrainer:
                 val_loss = self.validate()
                 print(f"  -> val_loss {val_loss:.4f}")
 
+        # Save final checkpoint
+        if save_dir:
+            self._save_checkpoint(save_dir, self.pc_config.max_steps)
+
         summary = self.metrics.summary()
         print(f"\nPC Training complete. Final avg loss: {summary['avg_loss']:.4f}")
         print(f"Task distribution: {summary['task_distribution']}")
+
+    def _save_checkpoint(self, save_dir: str, step: int) -> None:
+        """Save model checkpoint to disk."""
+        from pathlib import Path
+
+        path = Path(save_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        ckpt_path = path / f"checkpoint_{step}.pt"
+        torch.save(
+            {
+                "step": step,
+                "model_state_dict": self.pc_net.model.state_dict(),
+                "pc_layers_state_dict": self.pc_net.pc_layers.state_dict(),
+                "output_log_precision": self.pc_net.output_log_precision.data,
+                "optimizer_backbone": self.optimizer_backbone.state_dict(),
+                "optimizer_peripheral": self.optimizer_peripheral.state_dict(),
+                "optimizer_precision": self.optimizer_precision.state_dict(),
+                "pc_config": self.pc_config,
+                "model_config": self.model_config,
+            },
+            ckpt_path,
+        )
+        print(f"  -> checkpoint saved to {ckpt_path}")
 
     @torch.no_grad()
     def validate(self, max_batches: int = 20) -> float:

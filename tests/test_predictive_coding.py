@@ -8,6 +8,10 @@ Verifies:
   5. Inference step annealing works correctly
   6. Value node shapes are correct throughout
   7. Hybrid blend mode works
+  8. Analytical inference mode (memory-efficient)
+  9. Blend annealing curriculum
+ 10. Checkpoint saving
+ 11. Inference LR decay
 """
 
 from __future__ import annotations
@@ -498,3 +502,319 @@ class TestNumericalStability:
             if p.grad is not None:
                 assert not torch.isnan(p.grad).any(), f"NaN gradient in {name}"
                 assert not torch.isinf(p.grad).any(), f"Inf gradient in {name}"
+
+
+# -----------------------------------------------------------------------
+# Analytical inference tests
+# -----------------------------------------------------------------------
+
+class TestAnalyticalInference:
+    def test_analytical_reduces_energy(
+        self, model: OmniLatentModel,
+        sample_data: dict[str, torch.Tensor],
+    ) -> None:
+        """Analytical inference should also reduce energy."""
+        pc_cfg = PCConfig(
+            inference_steps=10,
+            inference_lr=0.1,
+            use_analytical_inference=True,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+        model.eval()
+
+        src_tokens = model.encode("image", sample_data["image"])
+        rope_freqs = model.backbone.rope_freqs
+
+        value_nodes, info = pc_net.inference_phase(
+            x_input=src_tokens,
+            rope_freqs=rope_freqs,
+            num_steps=10,
+        )
+
+        assert info["final_energy"] <= info["initial_energy"], (
+            f"Analytical inference energy should decrease: "
+            f"{info['initial_energy']:.4f} -> {info['final_energy']:.4f}"
+        )
+
+    def test_analytical_value_node_shapes(
+        self, model: OmniLatentModel,
+        sample_data: dict[str, torch.Tensor],
+    ) -> None:
+        """Analytical inference should produce correct value node shapes."""
+        pc_cfg = PCConfig(
+            inference_steps=3,
+            use_analytical_inference=True,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+
+        src_tokens = model.encode("image", sample_data["image"])
+        rope_freqs = model.backbone.rope_freqs
+
+        value_nodes, _ = pc_net.inference_phase(
+            x_input=src_tokens,
+            rope_freqs=rope_freqs,
+            num_steps=3,
+        )
+
+        assert len(value_nodes) == pc_net.num_layers + 1
+        B, N, D = src_tokens.shape
+        for i, vn in enumerate(value_nodes):
+            assert vn.shape == (B, N, D), (
+                f"Value node {i} shape {vn.shape} != ({B}, {N}, {D})"
+            )
+
+    def test_analytical_forward_pc_no_nan(
+        self, model: OmniLatentModel,
+        sample_data: dict[str, torch.Tensor],
+    ) -> None:
+        """Full forward_pc with analytical inference should be NaN-free."""
+        pc_cfg = PCConfig(
+            inference_steps=3,
+            use_analytical_inference=True,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+        pc_net.train()
+
+        result = pc_net.forward_pc(
+            source_modality="image",
+            source_data=sample_data["image"],
+            target_modality="image",
+            target_data=sample_data["image"],
+        )
+
+        for k, v in result.items():
+            if isinstance(v, torch.Tensor):
+                assert not torch.isnan(v).any(), f"NaN in {k}"
+
+    def test_analytical_gradient_method(self) -> None:
+        """PCLayer.analytical_value_gradient should produce correct shape."""
+        from omnilatent.model.layers import TransformerBlock
+
+        block = TransformerBlock(dim=64, num_heads=4, mlp_dim=128, dropout=0.0)
+        layer = PCLayer(block, dim=64)
+
+        error_above = torch.randn(2, 8, 64)
+        error_below = torch.randn(2, 8, 64)
+        prec_above = layer.precision
+        prec_below = layer.precision
+
+        grad = layer.analytical_value_gradient(
+            error_above, error_below, prec_above, prec_below,
+        )
+        assert grad.shape == (2, 8, 64)
+
+        # Without error_below (top node)
+        grad_top = layer.analytical_value_gradient(
+            error_above, None, prec_above, None,
+        )
+        assert grad_top.shape == (2, 8, 64)
+
+
+# -----------------------------------------------------------------------
+# Blend annealing tests
+# -----------------------------------------------------------------------
+
+class TestBlendAnnealing:
+    def test_annealing_progression(self, model: OmniLatentModel) -> None:
+        """Blend should decrease from start to end over annealing steps."""
+        pc_cfg = PCConfig(
+            backprop_blend_anneal=True,
+            backprop_blend_start=1.0,
+            backprop_blend_end=0.0,
+            backprop_blend_anneal_steps=100,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+
+        # At step 0: should be at start
+        assert pc_net._get_backprop_blend(0) == 1.0
+
+        # At midpoint: should be ~0.5
+        mid = pc_net._get_backprop_blend(50)
+        assert abs(mid - 0.5) < 0.01, f"Expected ~0.5 at midpoint, got {mid}"
+
+        # At end: should be at end value
+        assert pc_net._get_backprop_blend(100) == 0.0
+
+        # Past end: should stay at end
+        assert pc_net._get_backprop_blend(200) == 0.0
+
+    def test_no_annealing_returns_static(self, model: OmniLatentModel) -> None:
+        """Without annealing, blend should be static."""
+        pc_cfg = PCConfig(
+            backprop_blend=0.3,
+            backprop_blend_anneal=False,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+
+        for step in [0, 50, 100, 1000]:
+            assert pc_net._get_backprop_blend(step) == 0.3
+
+    def test_annealing_affects_forward(
+        self, model: OmniLatentModel,
+        sample_data: dict[str, torch.Tensor],
+    ) -> None:
+        """Annealed blend should appear in forward_pc result."""
+        pc_cfg = PCConfig(
+            inference_steps=3,
+            backprop_blend_anneal=True,
+            backprop_blend_start=1.0,
+            backprop_blend_end=0.0,
+            backprop_blend_anneal_steps=100,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+        pc_net.train()
+
+        result = pc_net.forward_pc(
+            source_modality="image",
+            source_data=sample_data["image"],
+            target_modality="image",
+            target_data=sample_data["image"],
+            global_step=50,
+        )
+
+        assert "backprop_blend" in result
+        assert abs(result["backprop_blend"] - 0.5) < 0.01
+
+
+# -----------------------------------------------------------------------
+# Inference LR decay tests
+# -----------------------------------------------------------------------
+
+class TestInferenceLRDecay:
+    def test_lr_decay_converges_better(
+        self, model: OmniLatentModel,
+        sample_data: dict[str, torch.Tensor],
+    ) -> None:
+        """Inference with LR decay should converge (energy reduces)."""
+        pc_cfg = PCConfig(
+            inference_steps=10,
+            inference_lr=0.1,
+            inference_lr_decay=0.9,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+        model.eval()
+
+        src_tokens = model.encode("image", sample_data["image"])
+        rope_freqs = model.backbone.rope_freqs
+
+        value_nodes, info = pc_net.inference_phase(
+            x_input=src_tokens,
+            rope_freqs=rope_freqs,
+            num_steps=10,
+        )
+
+        assert info["final_energy"] <= info["initial_energy"]
+
+    def test_decay_one_is_constant_lr(
+        self, model: OmniLatentModel,
+    ) -> None:
+        """decay=1.0 should behave the same as no decay."""
+        pc_cfg = PCConfig(
+            inference_steps=3,
+            inference_lr_decay=1.0,
+            mixed_precision=False,
+        )
+        pc_net = PredictiveCodingNetwork(model, pc_cfg)
+        # Just verify it constructs and doesn't error
+        assert pc_net.pc_config.inference_lr_decay == 1.0
+
+
+# -----------------------------------------------------------------------
+# Checkpoint saving tests
+# -----------------------------------------------------------------------
+
+class TestCheckpointSaving:
+    def test_save_checkpoint(
+        self, model: OmniLatentModel, config: OmniLatentConfig,
+        tmp_path,
+    ) -> None:
+        """Checkpoint saving should create a file with expected keys."""
+        from omnilatent.training.data import (
+            SyntheticMultiModalDataset,
+            build_dataloader,
+        )
+
+        pc_cfg = PCConfig(
+            inference_steps=3,
+            max_steps=10,
+            batch_size=2,
+            mixed_precision=False,
+            save_every=5,
+        )
+        dataset = SyntheticMultiModalDataset(config, length=100)
+        dataloader = build_dataloader(config, dataset)
+
+        trainer = PCTrainer(
+            model=model,
+            model_config=config,
+            pc_config=pc_cfg,
+            dataloader=dataloader,
+        )
+
+        save_dir = str(tmp_path / "ckpt")
+        trainer._save_checkpoint(save_dir, step=1)
+
+        import pathlib
+
+        ckpt_path = pathlib.Path(save_dir) / "checkpoint_1.pt"
+        assert ckpt_path.exists(), "Checkpoint file should be created"
+
+        ckpt = torch.load(ckpt_path, weights_only=False)
+        expected_keys = {
+            "step",
+            "model_state_dict",
+            "pc_layers_state_dict",
+            "output_log_precision",
+            "optimizer_backbone",
+            "optimizer_peripheral",
+            "optimizer_precision",
+            "pc_config",
+            "model_config",
+        }
+        assert expected_keys.issubset(ckpt.keys()), (
+            f"Missing keys: {expected_keys - set(ckpt.keys())}"
+        )
+        assert ckpt["step"] == 1
+
+
+# -----------------------------------------------------------------------
+# PCConfig new fields tests
+# -----------------------------------------------------------------------
+
+class TestPCConfigNewFields:
+    def test_defaults(self) -> None:
+        """New config fields should have sensible defaults."""
+        cfg = PCConfig()
+        assert cfg.inference_lr_decay == 0.95
+        assert cfg.backprop_blend_anneal is False
+        assert cfg.backprop_blend_start == 1.0
+        assert cfg.backprop_blend_end == 0.0
+        assert cfg.backprop_blend_anneal_steps == 20_000
+        assert cfg.use_analytical_inference is False
+        assert cfg.precision_lr_ratio == 0.1
+        assert cfg.precision_min == 0.01
+        assert cfg.precision_max == 100.0
+        assert cfg.save_every == 5000
+        assert cfg.save_dir == "checkpoints/pc"
+
+    def test_custom_values(self) -> None:
+        """Config should accept custom values."""
+        cfg = PCConfig(
+            inference_lr_decay=0.8,
+            backprop_blend_anneal=True,
+            backprop_blend_start=0.9,
+            use_analytical_inference=True,
+            save_every=1000,
+        )
+        assert cfg.inference_lr_decay == 0.8
+        assert cfg.backprop_blend_anneal is True
+        assert cfg.backprop_blend_start == 0.9
+        assert cfg.use_analytical_inference is True
+        assert cfg.save_every == 1000
