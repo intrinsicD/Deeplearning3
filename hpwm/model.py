@@ -267,6 +267,7 @@ class HPWM(nn.Module):
             hidden=config.vqvae_hidden,
             n_layers=config.vqvae_n_layers,
             resolution=config.resolution,
+            quantizer_type=config.vqvae_quantizer,
         )
 
         # Prediction head
