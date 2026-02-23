@@ -131,6 +131,7 @@ class Trainer:
         self.model.train()
         accum_loss = 0.0
         accum_metrics = {}
+        steps_since_log = 0
         temporal_states = None
         step_start_time = time.time()
         micro_step = 0  # counts every forward/backward pass
@@ -193,6 +194,19 @@ class Trainer:
                     self.model._train_step += 1
 
                     self.global_step += 1
+                    steps_since_log += 1
+
+                    # Step 1 diagnostic: immediate feedback
+                    if self.global_step == 1:
+                        print(
+                            f"Step 1/{config.total_steps} | "
+                            f"loss={accum_loss / steps_since_log:.4f} | "
+                            f"first step OK, next log at step {config.log_every}"
+                        )
+                        accum_loss = 0.0
+                        accum_metrics = {}
+                        steps_since_log = 0
+                        step_start_time = time.time()
 
                     # Logging
                     if self.global_step % config.log_every == 0:
@@ -202,13 +216,21 @@ class Trainer:
                         lr = self.scheduler.get_last_lr()[0]
                         k_ratio = self.model.mod_router.current_k_ratio
 
+                        # Average over steps since last log
+                        n = max(1, steps_since_log)
+                        avg_loss = accum_loss / n
+                        avg_metrics = {k: v / n for k, v in accum_metrics.items()}
+
                         print(
                             f"Step {self.global_step}/{config.total_steps} | "
-                            f"loss={accum_loss:.4f} | "
-                            f"pred={accum_metrics.get('prediction_loss', 0):.4f} | "
-                            f"vqvae={accum_metrics.get('vqvae_recon_loss', 0):.4f} | "
-                            f"fwm={accum_metrics.get('fwm_loss', 0):.4f} | "
-                            f"slot_con={accum_metrics.get('slot_consistency_loss', 0):.4f} | "
+                            f"loss={avg_loss:.4f} | "
+                            f"pred={avg_metrics.get('prediction_loss', 0):.4f} | "
+                            f"vqvae={avg_metrics.get('vqvae_recon_loss', 0):.4f} | "
+                            f"fwm={avg_metrics.get('fwm_loss', 0):.4f} | "
+                            f"commit={avg_metrics.get('commitment_loss', 0):.4f} | "
+                            f"entropy={avg_metrics.get('entropy_loss', 0):.4f} | "
+                            f"slot_con={avg_metrics.get('slot_consistency_loss', 0):.4f} | "
+                            f"slot_spec={avg_metrics.get('slot_specialization_loss', 0):.4f} | "
                             f"k_ratio={k_ratio:.3f} | "
                             f"lr={lr:.2e} | "
                             f"grad_norm={grad_norm:.3f} | "
@@ -216,8 +238,8 @@ class Trainer:
                         )
 
                         if self.tb_writer:
-                            self.tb_writer.add_scalar("train/loss", accum_loss, self.global_step)
-                            for k, v in accum_metrics.items():
+                            self.tb_writer.add_scalar("train/loss", avg_loss, self.global_step)
+                            for k, v in avg_metrics.items():
                                 self.tb_writer.add_scalar(f"train/{k}", v, self.global_step)
                             self.tb_writer.add_scalar("train/lr", lr, self.global_step)
                             self.tb_writer.add_scalar("train/k_ratio", k_ratio, self.global_step)
@@ -225,6 +247,7 @@ class Trainer:
 
                         accum_loss = 0.0
                         accum_metrics = {}
+                        steps_since_log = 0
                         step_start_time = time.time()
 
                     # Evaluation
