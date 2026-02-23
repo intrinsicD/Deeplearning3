@@ -26,6 +26,7 @@ from omnilatent.model.layers import (
     TransformerBlock,
     precompute_rope_freqs,
 )
+from omnilatent.model.masking import HookPolicy, expand_mask_for_hooks
 
 
 class UnifiedTransformer(nn.Module):
@@ -64,6 +65,8 @@ class UnifiedTransformer(nn.Module):
         rope_offset: int = 0,
         attn_mask: torch.Tensor | None = None,
         hook_manager: "HookManager | None" = None,
+        prefix_len: int | None = None,
+        hook_policy: HookPolicy = HookPolicy.BIDIRECTIONAL_WITH_PREFIX,
     ) -> torch.Tensor:
         """Forward pass through all transformer layers.
 
@@ -73,19 +76,27 @@ class UnifiedTransformer(nn.Module):
             attn_mask: optional attention mask.
             hook_manager: optional HookManager that injects Latent Neural
                 Hooks at designated layers.
+            prefix_len: number of prefix tokens for mask expansion policy.
+                Required when hook_manager is provided with a mask.
+            hook_policy: how hook tokens interact with the attention mask.
         """
+        content_len = x.shape[1]
+
         for layer_idx, layer in enumerate(self.layers):
             # --- Latent Neural Hook injection (before layer) ---
             if hook_manager is not None:
                 x = hook_manager.pre_layer(layer_idx, x)
 
-            # Dynamically pad the attention mask if hooks changed seq length
+            # Expand attention mask for hook tokens using centralized logic
             layer_mask = attn_mask
             if layer_mask is not None and layer_mask.shape[-1] != x.shape[1]:
                 n_hook = x.shape[1] - layer_mask.shape[-1]
-                # Hook tokens get full attention access (True = can attend)
-                layer_mask = F.pad(
-                    layer_mask, (0, n_hook, 0, n_hook), value=True
+                effective_prefix = prefix_len if prefix_len is not None else content_len
+                layer_mask = expand_mask_for_hooks(
+                    layer_mask,
+                    n_hook_tokens=n_hook,
+                    prefix_len=effective_prefix,
+                    policy=hook_policy,
                 )
 
             # --- Transformer layer (with optional gradient checkpointing) ---

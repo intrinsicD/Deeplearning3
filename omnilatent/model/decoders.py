@@ -67,34 +67,45 @@ class AudioDecoder(nn.Module):
 class ImageDecoder(nn.Module):
     """Projects latent patch tokens back to pixel space.
 
-    Each token is projected to a flat patch of pixels, then reshaped
-    into the full image.
+    Each token is projected to a flat patch of C*P*P pixels, then
+    rearranged into the full image.  Works for any image_patch_size.
     """
 
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
         self.config = config
         D = config.hidden_dim
-        self.grid_size = config.image_size // config.image_patch_size
+        P = config.image_patch_size
+        C = config.image_channels
+        self.grid_size = config.image_size // P
+        self.patch_size = P
+        self.channels = C
         self.norm = RMSNorm(D)
-        
-        # 4x upsampling (2^4 = 16) to reach the 16x16 patch size smoothly
-        self.upconv_stack = nn.Sequential(
-            nn.ConvTranspose2d(D, D // 2, kernel_size=4, stride=2, padding=1),
+
+        # Project each token to a flat patch of pixels
+        self.head = nn.Linear(D, C * P * P, bias=True)
+
+        # Lightweight refinement conv to smooth patch boundary artifacts
+        self.refine = nn.Sequential(
+            nn.Conv2d(C, D // 4, kernel_size=3, padding=1, bias=False),
             nn.SiLU(),
-            nn.ConvTranspose2d(D // 2, D // 4, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(),
-            nn.ConvTranspose2d(D // 4, D // 8, kernel_size=4, stride=2, padding=1),
-            nn.SiLU(),
-            nn.ConvTranspose2d(D // 8, config.image_channels, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(D // 4, C, kernel_size=3, padding=1, bias=False),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm(x)
-        # Reshape 1D sequence to 2D spatial grid: (B, 196, D) -> (B, D, 14, 14)
-        x = rearrange(x, "b (gh gw) d -> b d gh gw", gh=self.grid_size, gw=self.grid_size)
-        # Apply deconvolutions to smooth out the image
-        return self.upconv_stack(x)
+        """x: (B, N_patches, D) → image (B, C, H, W)."""
+        x = self.head(self.norm(x))  # (B, N, C*P*P)
+        x = rearrange(
+            x,
+            "b (gh gw) (c ph pw) -> b c (gh ph) (gw pw)",
+            gh=self.grid_size,
+            gw=self.grid_size,
+            c=self.channels,
+            ph=self.patch_size,
+            pw=self.patch_size,
+        )
+        # Residual refinement to smooth patch boundaries
+        return x + self.refine(x)
 
 
 # ---------------------------------------------------------------------------

@@ -49,19 +49,20 @@ from torch.utils.data import Dataset
 from omnilatent.config import OmniLatentConfig
 
 # Optional imports — degrade gracefully
+# Catch ImportError, OSError, RuntimeError to handle binary mismatches
 try:
     import torchaudio
     from torchaudio.transforms import MelSpectrogram, Resample
 
     _HAS_TORCHAUDIO = True
-except ImportError:
+except (ImportError, OSError, RuntimeError):
     _HAS_TORCHAUDIO = False
 
 try:
     from torchvision.io import read_video
 
     _HAS_TORCHVISION_IO = True
-except ImportError:
+except (ImportError, OSError, RuntimeError):
     _HAS_TORCHVISION_IO = False
 
 
@@ -215,35 +216,56 @@ class _ClipIndex:
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
-        """Get video duration in seconds.  Falls back to loading a tiny
-        portion if metadata probing fails."""
-        try:
-            # read_video with a 0-length window returns metadata
-            _, _, info = read_video(
-                str(path), start_pts=0, end_pts=0.01, pts_unit="sec"
-            )
-            fps = info.get("video_fps", 30)
-            # Estimate from file — not perfect but avoids loading the whole file
-            # Better: use ffprobe.  For now, load 0.01s and check if it works,
-            # then estimate from file size heuristic or try a larger read.
-            # We'll use a pragmatic approach: try reading at a far offset.
-            for probe_time in [3600, 600, 60, 10, 1]:
-                try:
-                    v, _, _ = read_video(
-                        str(path),
-                        start_pts=probe_time,
-                        end_pts=probe_time + 0.01,
-                        pts_unit="sec",
-                    )
-                    if v.shape[0] > 0:
-                        continue  # video is at least this long
-                    else:
-                        return float(probe_time)
-                except Exception:
-                    return float(probe_time)
-            return 3600.0  # assume 1hr max
-        except Exception:
+        """Get video duration by finding the largest readable timestamp.
+
+        Uses coarse probing to find bounds, then binary search between
+        the last successful and first failed read for precision.
+        """
+        def _can_read_at(t: float) -> bool:
+            """Return True if we can read frames at time t."""
+            try:
+                v, _, _ = read_video(
+                    str(path),
+                    start_pts=t,
+                    end_pts=t + 0.01,
+                    pts_unit="sec",
+                )
+                return v is not None and v.shape[0] > 0
+            except Exception:
+                return False
+
+        # Verify the video is readable at all
+        if not _can_read_at(0.0):
             return None
+
+        # Coarse probe: find the smallest probe_time that fails
+        probe_times = [1, 10, 60, 600, 3600]
+        last_success = 0.0
+        first_fail = None
+
+        for t in probe_times:
+            if _can_read_at(float(t)):
+                last_success = float(t)
+            else:
+                first_fail = float(t)
+                break
+
+        if first_fail is None:
+            # Video is at least 3600s; cap at that
+            return 3600.0
+
+        # Binary search between last_success and first_fail
+        lo, hi = last_success, first_fail
+        for _ in range(10):  # ~0.1% precision
+            if hi - lo < 0.5:
+                break
+            mid = (lo + hi) / 2.0
+            if _can_read_at(mid):
+                lo = mid
+            else:
+                hi = mid
+
+        return lo
 
     def __len__(self) -> int:
         return len(self.entries)
