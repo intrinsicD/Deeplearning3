@@ -53,10 +53,13 @@ class VectorQuantizer(nn.Module):
         self.dim_per_codebook = dim // n_codebooks
 
         # Each codebook: [vocab_size, dim_per_codebook]
-        self.codebooks = nn.ParameterList([
-            nn.Parameter(torch.randn(vocab_size, self.dim_per_codebook) * 0.02)
-            for _ in range(n_codebooks)
-        ])
+        # Registered as buffers (not parameters) because codebooks are updated
+        # exclusively via EMA — they must NOT receive gradient updates.
+        for i in range(n_codebooks):
+            self.register_buffer(
+                f"codebook_{i}",
+                torch.randn(vocab_size, self.dim_per_codebook) * 0.02,
+            )
 
         # EMA tracking
         self.register_buffer("ema_count", torch.zeros(n_codebooks, vocab_size))
@@ -65,6 +68,14 @@ class VectorQuantizer(nn.Module):
             torch.randn(n_codebooks, vocab_size, self.dim_per_codebook) * 0.02,
         )
         self.ema_decay = ema_decay
+
+    def _get_codebook(self, idx: int) -> torch.Tensor:
+        """Get codebook tensor by index."""
+        return getattr(self, f"codebook_{idx}")
+
+    def _set_codebook(self, idx: int, value: torch.Tensor) -> None:
+        """Set codebook tensor by index."""
+        getattr(self, f"codebook_{idx}").copy_(value)
 
     def quantize_single(
         self, z: torch.Tensor, codebook_idx: int
@@ -78,7 +89,7 @@ class VectorQuantizer(nn.Module):
         Returns:
             quantized, indices, commitment_loss
         """
-        codebook = self.codebooks[codebook_idx]  # [V, D_cb]
+        codebook = self._get_codebook(codebook_idx)  # [V, D_cb]
 
         # L2 distances
         dists = (
@@ -108,8 +119,9 @@ class VectorQuantizer(nn.Module):
                     / (n + self.vocab_size * 1e-5)
                     * n
                 )
-                self.codebooks[codebook_idx].data = (
-                    self.ema_weight[codebook_idx] / count.unsqueeze(-1)
+                self._set_codebook(
+                    codebook_idx,
+                    self.ema_weight[codebook_idx] / count.unsqueeze(-1),
                 )
 
         # Commitment loss
@@ -198,7 +210,7 @@ class VectorQuantizer(nn.Module):
         parts = []
         for i in range(self.n_codebooks):
             idx = indices[:, i].reshape(-1)  # [B*H*W]
-            emb = self.codebooks[i][idx]     # [B*H*W, D_cb]
+            emb = self._get_codebook(i)[idx]  # [B*H*W, D_cb]
             parts.append(emb)
 
         combined = torch.cat(parts, dim=-1)  # [B*H*W, D]
