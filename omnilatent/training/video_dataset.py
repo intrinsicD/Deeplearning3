@@ -48,21 +48,22 @@ from torch.utils.data import Dataset
 
 from omnilatent.config import OmniLatentConfig
 
-# Optional imports — degrade gracefully
-# Catch ImportError, OSError, RuntimeError to handle binary mismatches
+# Optional imports — degrade gracefully.
+# Catch Exception (not just ImportError) because these libraries can fail
+# with RuntimeError, OSError, or AttributeError depending on build config.
 try:
     import torchaudio
     from torchaudio.transforms import MelSpectrogram, Resample
 
     _HAS_TORCHAUDIO = True
-except (ImportError, OSError, RuntimeError):
+except Exception:
     _HAS_TORCHAUDIO = False
 
 try:
     from torchvision.io import read_video
 
     _HAS_TORCHVISION_IO = True
-except (ImportError, OSError, RuntimeError):
+except Exception:
     _HAS_TORCHVISION_IO = False
 
 

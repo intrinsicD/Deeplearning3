@@ -41,16 +41,51 @@ class DINOBackbone(nn.Module):
         self._model = None  # Lazy loading
 
     def _load_model(self, device: torch.device):
-        """Load DINOv2 model (lazy, on first forward pass)."""
+        """Load DINOv2 model (lazy, on first forward pass).
+
+        Tries three sources in order of stability:
+        1. timm (pinned version, reproducible, works offline after first download)
+        2. torch.hub (requires network, version can drift)
+        3. Random fallback (for CI / testing only)
+        """
         if self._model is not None:
             return
 
+        # Map our model names to timm model names
+        _TIMM_NAMES = {
+            "dinov2_vits14": "vit_small_patch14_dinov2.lvd142m",
+            "dinov2_vitb14": "vit_base_patch14_dinov2.lvd142m",
+            "dinov2_vitl14": "vit_large_patch14_dinov2.lvd142m",
+        }
+
+        loaded = False
+
+        # Strategy 1: timm (preferred — pinned, cached, reproducible)
         try:
-            self._model = torch.hub.load(
-                "facebookresearch/dinov2", self.model_name, pretrained=True,
-            )
+            import timm
+            timm_name = _TIMM_NAMES.get(self.model_name)
+            if timm_name is not None:
+                self._model = timm.create_model(
+                    timm_name, pretrained=True, num_classes=0,
+                )
+                loaded = True
+                print(f"[DINO] Loaded via timm: {timm_name}")
         except Exception:
-            # Fallback: create a small ViT if hub isn't available
+            pass
+
+        # Strategy 2: torch.hub (fallback)
+        if not loaded:
+            try:
+                self._model = torch.hub.load(
+                    "facebookresearch/dinov2", self.model_name, pretrained=True,
+                )
+                loaded = True
+                print(f"[DINO] Loaded via torch.hub: {self.model_name}")
+            except Exception:
+                pass
+
+        # Strategy 3: random fallback (testing / offline)
+        if not loaded:
             from hpwm.components._dino_fallback import create_dino_fallback
             self._model = create_dino_fallback()
 
@@ -391,16 +426,21 @@ class HPWM(nn.Module):
         )  # [B, T, N_slots * D_slot]
 
         # ── Step 4: Temporal state ───────────────────────
+        # CAUSAL SPLIT: only feed context frames (0..T-2) into the
+        # temporal → multiscale → prediction pipeline so that the
+        # prediction for frame T-1 never sees frame T-1 features.
+        context_slots = slot_flat[:, :-1]  # [B, T-1, N_slots * D_slot]
+
         if self.grad_checkpointing and self.training:
             temporal_output, new_states = grad_checkpoint(
-                self.temporal, slot_flat, temporal_states,
+                self.temporal, context_slots, temporal_states,
                 use_reentrant=False,
             )
         else:
             temporal_output, new_states = self.temporal(
-                slot_flat, temporal_states,
+                context_slots, temporal_states,
             )
-        # temporal_output: [B, T, N_slots * D_slot]
+        # temporal_output: [B, T-1, N_slots * D_slot]
 
         # ── Step 5: Multi-scale attention ────────────────
         if self.grad_checkpointing and self.training:
@@ -428,14 +468,12 @@ class HPWM(nn.Module):
         vqvae_recon_loss = F.mse_loss(recon_frames, target_flat)
 
         # ── Step 7: Next-frame prediction ────────────────
-        # Predict next frame tokens from multi-scale output
+        # Predict next frame tokens from multi-scale output of CONTEXT
+        # frames only (no target leakage).
         pred_logits = self.prediction_head(multiscale_out["combined"])
         # [B, n_codebooks, N_spatial, vocab_size]
 
-        # Compute prediction loss against last frame's tokens
-        # Use the combined multi-scale representation to predict
-        # the tokens for all next frames
-        # For simplicity, predict the next frame (T -> T+1 direction)
+        # Predict the last target frame's tokens from context representation
         last_target = target_indices[:, -1]  # [B, n_codebooks, N_spatial]
 
         prediction_loss = F.cross_entropy(

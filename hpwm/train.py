@@ -105,7 +105,7 @@ class Trainer:
         try:
             from torch.utils.tensorboard import SummaryWriter
             self.tb_writer = SummaryWriter(config.log_dir)
-        except ImportError:
+        except Exception:
             print("[WARN] tensorboard not available, logging to stdout only")
 
         # State
@@ -133,6 +133,7 @@ class Trainer:
         accum_metrics = {}
         temporal_states = None
         step_start_time = time.time()
+        micro_step = 0  # counts every forward/backward pass
 
         while self.global_step < config.total_steps:
             self.epoch += 1
@@ -171,8 +172,10 @@ class Trainer:
                     for s in outputs["temporal_states"]
                 ]
 
+                micro_step += 1
+
                 # Gradient accumulation step
-                if (self.global_step + 1) % config.grad_accum_steps == 0 or True:
+                if micro_step % config.grad_accum_steps == 0:
                     # Gradient clipping
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = nn.utils.clip_grad_norm_(

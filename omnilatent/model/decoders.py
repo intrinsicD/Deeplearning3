@@ -67,8 +67,9 @@ class AudioDecoder(nn.Module):
 class ImageDecoder(nn.Module):
     """Projects latent patch tokens back to pixel space.
 
-    Each token is projected to a flat patch of C*P*P pixels, then
-    rearranged into the full image.  Works for any image_patch_size.
+    Each token is projected to a flat patch of pixels, then reshaped
+    into the full image.  The number of 2x upsampling stages is derived
+    from ``image_patch_size`` so it works for any power-of-2 patch size.
     """
 
     def __init__(self, config: OmniLatentConfig) -> None:
@@ -76,36 +77,37 @@ class ImageDecoder(nn.Module):
         self.config = config
         D = config.hidden_dim
         P = config.image_patch_size
-        C = config.image_channels
         self.grid_size = config.image_size // P
-        self.patch_size = P
-        self.channels = C
         self.norm = RMSNorm(D)
 
-        # Project each token to a flat patch of pixels
-        self.head = nn.Linear(D, C * P * P, bias=True)
+        # Number of 2x upsampling stages = log2(patch_size)
+        n_upsample = int(math.log2(P))
+        if 2 ** n_upsample != P:
+            raise ValueError(
+                f"image_patch_size must be a power of 2, got {P}"
+            )
 
-        # Lightweight refinement conv to smooth patch boundary artifacts
-        self.refine = nn.Sequential(
-            nn.Conv2d(C, D // 4, kernel_size=3, padding=1, bias=False),
-            nn.SiLU(),
-            nn.Conv2d(D // 4, C, kernel_size=3, padding=1, bias=False),
-        )
+        # Build transposed-conv stack: each stage does 2x spatial upsampling
+        # and halves channels until the final stage outputs image_channels.
+        layers: list[nn.Module] = []
+        ch_in = D
+        for i in range(n_upsample):
+            is_last = i == n_upsample - 1
+            ch_out = config.image_channels if is_last else max(ch_in // 2, config.image_channels)
+            layers.append(
+                nn.ConvTranspose2d(ch_in, ch_out, kernel_size=4, stride=2, padding=1)
+            )
+            if not is_last:
+                layers.append(nn.SiLU())
+            ch_in = ch_out
+        self.upconv_stack = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, N_patches, D) → image (B, C, H, W)."""
-        x = self.head(self.norm(x))  # (B, N, C*P*P)
-        x = rearrange(
-            x,
-            "b (gh gw) (c ph pw) -> b c (gh ph) (gw pw)",
-            gh=self.grid_size,
-            gw=self.grid_size,
-            c=self.channels,
-            ph=self.patch_size,
-            pw=self.patch_size,
-        )
-        # Residual refinement to smooth patch boundaries
-        return x + self.refine(x)
+        x = self.norm(x)
+        # Reshape 1D sequence to 2D spatial grid: (B, N, D) -> (B, D, G, G)
+        x = rearrange(x, "b (gh gw) d -> b d gh gw", gh=self.grid_size, gw=self.grid_size)
+        # Apply deconvolutions to reconstruct the image
+        return self.upconv_stack(x)
 
 
 # ---------------------------------------------------------------------------
