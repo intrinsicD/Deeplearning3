@@ -126,7 +126,9 @@ class Trainer:
         if torch.cuda.is_available():
             print(f"  GPU: {torch.cuda.get_device_name()}")
             print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-        print()
+        print(f"  Logging every {config.log_every} steps "
+              f"({config.log_every * config.grad_accum_steps} micro-steps)")
+        print(flush=True)
 
         self.model.train()
         accum_loss = 0.0
@@ -194,6 +196,18 @@ class Trainer:
 
                     self.global_step += 1
 
+                    # Log first step so user sees training is alive
+                    if self.global_step == 1:
+                        print(
+                            f"Step 1/{config.total_steps} | "
+                            f"loss={accum_loss:.4f} | "
+                            f"first step OK, next log at step {config.log_every}",
+                            flush=True,
+                        )
+                        accum_loss = 0.0
+                        accum_metrics = {}
+                        step_start_time = time.time()
+
                     # Logging
                     if self.global_step % config.log_every == 0:
                         elapsed = time.time() - step_start_time
@@ -212,7 +226,8 @@ class Trainer:
                             f"k_ratio={k_ratio:.3f} | "
                             f"lr={lr:.2e} | "
                             f"grad_norm={grad_norm:.3f} | "
-                            f"{steps_per_sec:.2f} steps/s"
+                            f"{steps_per_sec:.2f} steps/s",
+                            flush=True,
                         )
 
                         if self.tb_writer:
