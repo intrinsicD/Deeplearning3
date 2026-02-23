@@ -41,7 +41,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["omnilatent*"]
+include = ["omnilatent*", "lgq*", "hpwm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

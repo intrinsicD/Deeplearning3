@@ -295,6 +295,10 @@ class VQVAE(nn.Module):
 
     Encodes frames to discrete tokens (for prediction objective)
     and decodes back (for reconstruction loss during training).
+
+    Supports two quantizer backends:
+      - "ema" (default): VectorQuantizer with EMA codebook updates
+      - "lgq": LGQuantizer with learnable geometric soft assignments
     """
 
     def __init__(
@@ -305,15 +309,28 @@ class VQVAE(nn.Module):
         hidden: int = 128,
         n_layers: int = 3,
         resolution: int = 128,
+        quantizer_type: str = "ema",
     ):
         super().__init__()
 
         self.encoder = VQVAEEncoder(
             in_channels=3, hidden=hidden, out_dim=vq_dim, n_layers=n_layers,
         )
-        self.quantizer = VectorQuantizer(
-            n_codebooks=n_codebooks, vocab_size=vocab_size, dim=vq_dim,
-        )
+
+        self.quantizer_type = quantizer_type
+        if quantizer_type == "lgq":
+            from lgq.quantizer import LGQuantizer
+            codebook_dim = vq_dim // n_codebooks
+            self.quantizer = LGQuantizer(
+                n_codebooks=n_codebooks,
+                vocab_size=vocab_size,
+                codebook_dim=codebook_dim,
+            )
+        else:
+            self.quantizer = VectorQuantizer(
+                n_codebooks=n_codebooks, vocab_size=vocab_size, dim=vq_dim,
+            )
+
         self.decoder = VQVAEDecoder(
             in_dim=vq_dim, hidden=hidden, out_channels=3, n_layers=n_layers,
         )
@@ -334,8 +351,12 @@ class VQVAE(nn.Module):
             z_q: [B, D, H', W'] quantized features
         """
         z = self.encoder(x)
-        z_q, indices, _ = self.quantizer(z)
-        return indices, z_q
+        if self.quantizer_type == "lgq":
+            out = self.quantizer(z)
+            return out["indices"], out["quantized"]
+        else:
+            z_q, indices, _ = self.quantizer(z)
+            return indices, z_q
 
     def decode(self, z_q: torch.Tensor) -> torch.Tensor:
         """Decode quantized features to frames.
@@ -363,7 +384,13 @@ class VQVAE(nn.Module):
             z_q: [B, D, H', W'] quantized features
         """
         z = self.encoder(x)
-        z_q, indices, commitment_loss = self.quantizer(z)
+        if self.quantizer_type == "lgq":
+            out = self.quantizer(z)
+            z_q = out["quantized"]
+            indices = out["indices"]
+            commitment_loss = out["commitment_loss"]
+        else:
+            z_q, indices, commitment_loss = self.quantizer(z)
         recon = self.decoder(z_q)
         return recon, indices, commitment_loss, z_q
 

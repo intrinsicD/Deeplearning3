@@ -64,6 +64,7 @@ class HPWMConfig:
     vqvae_dim: int = 64          # codebook embedding dim
     vqvae_hidden: int = 128      # encoder/decoder hidden dim
     vqvae_n_layers: int = 3      # encoder/decoder depth
+    vqvae_quantizer: str = "ema" # "ema" (EMA VQ) or "lgq" (Learnable Geometric Quantization)
 
     # ── Training ─────────────────────────────────────────
     batch_size: int = 1
