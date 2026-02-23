@@ -217,10 +217,11 @@ class _ClipIndex:
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
-        """Get video duration by finding the largest readable timestamp.
+        """Get video duration in seconds.
 
-        Uses coarse probing to find bounds, then binary search between
-        the last successful and first failed read for precision.
+        Strategy:
+        1. Read a tiny clip and check info dict for total duration / frame count.
+        2. Fall back to coarse probing + binary search to bracket the duration.
         """
         def _can_read_at(t: float) -> bool:
             """Return True if we can read frames at time t."""
@@ -238,6 +239,17 @@ class _ClipIndex:
         # Verify the video is readable at all
         if not _can_read_at(0.0):
             return None
+
+        # Fast path: use metadata when the backend provides it
+        try:
+            _, _, info = read_video(
+                str(path), start_pts=0, end_pts=0.01, pts_unit="sec"
+            )
+            fps = info.get("video_fps", 30)
+            if "video_total_frames" in info and info["video_total_frames"] > 0:
+                return info["video_total_frames"] / fps
+        except Exception:
+            pass
 
         # Coarse probe: find the smallest probe_time that fails
         probe_times = [1, 10, 60, 600, 3600]

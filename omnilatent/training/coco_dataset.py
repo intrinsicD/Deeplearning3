@@ -31,16 +31,18 @@ from torch.utils.data import Dataset
 
 from omnilatent.config import OmniLatentConfig
 
+# Catch Exception (not just ImportError) because these libraries can fail
+# with RuntimeError, OSError, or AttributeError depending on build config.
 try:
     from PIL import Image
     _HAS_PIL = True
-except (ImportError, OSError, RuntimeError):
+except Exception:
     _HAS_PIL = False
 
 try:
     from torchvision import transforms as T
     _HAS_TORCHVISION = True
-except (ImportError, OSError, RuntimeError):
+except Exception:
     _HAS_TORCHVISION = False
 
 
