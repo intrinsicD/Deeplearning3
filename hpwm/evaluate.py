@@ -189,13 +189,18 @@ class Evaluator:
                     curr_hard = curr_attn.argmax(dim=1)  # [B, N_patches]
 
                     for s in range(self.config.n_slots):
-                        prev_mask = (prev_hard == s).float()
-                        curr_mask = (curr_hard == s).float()
+                        prev_mask = (prev_hard == s).float()  # [B, N_patches]
+                        curr_mask = (curr_hard == s).float()  # [B, N_patches]
 
-                        if prev_mask.sum() > 0 or curr_mask.sum() > 0:
-                            intersection = (prev_mask * curr_mask).sum(dim=-1)
-                            union = ((prev_mask + curr_mask) > 0).float().sum(dim=-1)
-                            jaccard = (intersection / (union + 1e-8)).mean().item()
+                        intersection = (prev_mask * curr_mask).sum(dim=-1)          # [B]
+                        union = ((prev_mask + curr_mask) > 0).float().sum(dim=-1)   # [B]
+
+                        # Only include samples where slot s is active in at least
+                        # one of the two frames; samples with union==0 produce 0/0
+                        # and must be excluded, not counted as zero Jaccard.
+                        valid = union > 0  # [B] bool
+                        if valid.any():
+                            jaccard = (intersection[valid] / union[valid]).mean().item()
                             all_jaccards.append(jaccard)
 
                 prev_attn = curr_attn
