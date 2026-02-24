@@ -57,9 +57,11 @@ class SlotAttention(nn.Module):
             nn.Linear(mlp_hidden, d_slot),
         )
 
-        # Learnable slot initialization
-        self.slot_mu = nn.Parameter(torch.randn(1, 1, d_slot) * 0.02)
-        self.slot_log_sigma = nn.Parameter(torch.zeros(1, 1, d_slot))
+        # Learnable slot initialization — per-slot so each slot learns
+        # a distinct starting point, breaking the symmetry that causes
+        # all slots to converge to identical uniform attention.
+        self.slot_mu = nn.Parameter(torch.randn(1, n_slots, d_slot) * 0.02)
+        self.slot_log_sigma = nn.Parameter(torch.zeros(1, n_slots, d_slot))
 
         self.scale = d_slot ** -0.5
 
