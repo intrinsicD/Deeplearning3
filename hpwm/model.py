@@ -421,6 +421,17 @@ class HPWM(nn.Module):
         slot_features = torch.stack(all_slots, dim=1)  # [B, T, N_slots, D_slot]
         attn_weights = all_attn  # [B, T, N_slots, N_patches]
 
+        # Slot diversity: penalise slots for encoding redundant information.
+        # Minimises average cosine similarity between distinct slot pairs,
+        # directly encouraging each slot to capture a different spatial region.
+        slots_norm = F.normalize(slot_features, dim=-1)  # [B, T, N_slots, D_slot]
+        BT_slots = slots_norm.flatten(0, 1)  # [B*T, N_slots, D_slot]
+        slot_sim = torch.bmm(BT_slots, BT_slots.transpose(1, 2))  # [B*T, N_slots, N_slots]
+        # Mask out diagonal (self-similarity = 1.0 always)
+        n_s = config.n_slots
+        off_diag = ~torch.eye(n_s, device=slot_sim.device, dtype=torch.bool)
+        slot_diversity_loss = slot_sim[:, off_diag].mean()
+
         # Flatten slots for temporal processing
         slot_flat = rearrange(
             slot_features, "b t n d -> b t (n d)",
@@ -507,6 +518,7 @@ class HPWM(nn.Module):
             + config.loss_weight_routing_entropy * entropy_loss
             + config.loss_weight_slot_consistency * slot_consistency_loss
             + config.loss_weight_slot_specialization * slot_specialization_loss
+            + config.loss_weight_slot_diversity * slot_diversity_loss
         )
 
         return {
@@ -518,6 +530,7 @@ class HPWM(nn.Module):
             "entropy_loss": entropy_loss.detach(),
             "slot_consistency_loss": slot_consistency_loss.detach(),
             "slot_specialization_loss": slot_specialization_loss.detach(),
+            "slot_diversity_loss": slot_diversity_loss.detach(),
             "pred_logits": pred_logits.detach(),
             "target_indices": target_indices.detach(),
             "surprise_maps": surprise_maps.detach(),

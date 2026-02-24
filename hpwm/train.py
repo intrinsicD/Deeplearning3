@@ -70,7 +70,7 @@ class Trainer:
             weight_decay=config.weight_decay,
         )
 
-        # Learning rate scheduler (cosine with warmup)
+        # Learning rate scheduler (cosine with warmup + min LR floor)
         def lr_lambda(step):
             if step < config.warmup_steps:
                 return step / max(1, config.warmup_steps)
@@ -78,7 +78,8 @@ class Trainer:
                 1, config.total_steps - config.warmup_steps,
             )
             import math as _math
-            return 0.5 * (1 + _math.cos(_math.pi * progress))
+            cosine_decay = 0.5 * (1 + _math.cos(_math.pi * min(progress, 1.0)))
+            return max(config.min_lr_ratio, cosine_decay)
 
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lr_lambda,
@@ -165,6 +166,7 @@ class Trainer:
                     "prediction_loss", "vqvae_recon_loss",
                     "fwm_loss", "commitment_loss", "entropy_loss",
                     "slot_consistency_loss", "slot_specialization_loss",
+                    "slot_diversity_loss",
                 ]:
                     val = outputs[key].item()
                     accum_metrics[key] = accum_metrics.get(key, 0) + val / config.grad_accum_steps
@@ -245,6 +247,7 @@ class Trainer:
                             f"entropy={avg_metrics.get('entropy_loss', 0):.4f} | "
                             f"slot_con={avg_metrics.get('slot_consistency_loss', 0):.4f} | "
                             f"slot_spec={avg_metrics.get('slot_specialization_loss', 0):.4f} | "
+                            f"slot_div={avg_metrics.get('slot_diversity_loss', 0):.4f} | "
                             f"k_ratio={k_ratio:.3f} | "
                             f"lr={lr:.2e} | "
                             f"grad_norm={grad_norm:.3f} | "

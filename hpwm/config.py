@@ -36,7 +36,7 @@ class HPWMConfig:
     # ── Slot encoder (Component 2) ───────────────────────
     n_slots: int = 8             # full spec: 32
     d_slot: int = 128            # full spec: 768
-    slot_iters: int = 3          # iterative refinement steps
+    slot_iters: int = 5          # iterative refinement steps
     slot_mlp_hidden: int = 256   # slot MLP hidden dim
     tome_threshold: float = 0.7  # Token Merging cosine sim threshold
 
@@ -77,6 +77,7 @@ class HPWMConfig:
     total_steps: int = 50000     # ~1 week on RTX 3070
     warmup_steps: int = 1000
     max_grad_norm: float = 1.0
+    min_lr_ratio: float = 0.05   # LR floor: 5% of peak (prevents dead zone at end of cosine schedule)
 
     # ── Loss weights ─────────────────────────────────────
     loss_weight_prediction: float = 0.15    # next-frame token prediction (reduced to prevent gradient dominance)
@@ -85,7 +86,8 @@ class HPWMConfig:
     loss_weight_commitment: float = 0.25   # VQ commitment loss
     loss_weight_routing_entropy: float = 0.3   # load-balancing loss (increased to break router collapse)
     loss_weight_slot_consistency: float = 0.5  # per-slot temporal smoothness
-    loss_weight_slot_specialization: float = 0.5  # slot attention sharpness (increased to force spatial specialization)
+    loss_weight_slot_specialization: float = 2.0  # slot attention sharpness (must dominate to break uniform attention)
+    loss_weight_slot_diversity: float = 1.0      # inter-slot repulsion (penalises redundant slots)
 
     # ── VQ-VAE warmup (freeze codebook drift) ──────────
     vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
