@@ -374,13 +374,18 @@ class FSQuantizer(nn.Module):
             z_q = z_clamped + (z_q - z_clamped).detach()
 
             quantized_parts.append(z_q)
-            # Encode multi-dim index as single index per spatial position
+            # Encode multi-dim index as single index per spatial position.
+            # Use the actual chunk size (may differ from dim_per_level when vq_dim
+            # is not evenly divisible by n_codebooks) and the i-th level's grid
+            # size as the radix for each position.
+            L = self.levels[i]
+            D = z_part.shape[-1]
             strides = torch.tensor(
-                [int(torch.prod(torch.tensor(self.levels[i+1:])).item()) if i + 1 < len(self.levels) else 1
-                 for i in range(self.dim_per_level)],
+                [int(L ** (D - 1 - d)) for d in range(D)],
                 device=z.device,
+                dtype=torch.long,
             )
-            flat_idx = (idx * strides.unsqueeze(0)).sum(-1)  # [N]
+            flat_idx = (idx.long() * strides.unsqueeze(0)).sum(-1)  # [N]
             all_indices.append(flat_idx.view(B, H, W))
 
         quantized = torch.cat(quantized_parts, dim=-1)
