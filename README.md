@@ -338,6 +338,296 @@ dataset = VideoWatchingDataset(
 )
 ```
 
+## Training & Inference Guide
+
+This repository contains four distinct networks. Below is a detailed description of how each one is trained and used for inference.
+
+---
+
+### 1. OmniLatent (all-to-all multimodal model)
+
+OmniLatent is the main model. It has four training entry points, each suited to different data and objectives.
+
+#### a) Synthetic data training (`train.py`)
+
+Trains on randomly generated tensors for all four modalities. Useful for verifying the pipeline, benchmarking hardware, and debugging.
+
+```bash
+python train.py                          # default: 768-dim, 12 layers, 100k steps
+python train.py --dim 512 --layers 8 --heads 8 --steps 5000
+python train.py --no-amp --batch-size 2  # disable mixed precision
+```
+
+**Training details:**
+- **Optimizer:** AdamW (lr=1e-4, weight_decay from config, betas=(0.9, 0.95))
+- **LR schedule:** cosine annealing with linear warmup
+- **Loss:** `MultiModalLoss` — per-modality reconstruction (cross-entropy for text, L1+MSE for audio, L1+frequency for image, L1+temporal-consistency for video) with learned uncertainty weighting (Kendall et al., 2018), plus optional InfoNCE contrastive alignment
+- **Mixed precision:** FP16 via `torch.amp` (on by default)
+- **Gradient checkpointing:** on by default (saves VRAM)
+- **Gradient clipping:** max norm from config
+- **Task sampling:** each step randomly picks a (source, target) modality pair, giving uniform coverage of all 16 combinations over time
+
+#### b) COCO Captions training (`train_coco.py`)
+
+Trains on real image–caption pairs from COCO for text ↔ image translation.
+
+```bash
+python train_coco.py \
+    --image-dir data/train2014 \
+    --annotation-file data/annotations/captions_train2014.json \
+    --total-steps 50000
+
+# Resume from checkpoint
+python train_coco.py --image-dir data/train2014 \
+    --annotation-file data/annotations/captions_train2014.json \
+    --resume checkpoints_coco/checkpoint_step5000.pt
+```
+
+**Training details:**
+- **Two-phase curriculum:**
+  - Phase 1 (warmup, first 15% of steps): self-reconstruction only (image→image, text→text)
+  - Phase 2 (remaining 85%): cross-modal translation (image→text 35%, text→image 35%, self-reconstruction 30%)
+- **Dataset:** `CocoCaptionsDataset` — loads COCO images + captions, resizes images to 224×224, byte-tokenizes captions
+- **Loss, optimizer, precision:** same as synthetic training
+- **Checkpoints:** saved every `--save-every` steps (default 5000) to `checkpoints_coco/`
+
+#### c) Curriculum training from video (`curriculum_train.py`)
+
+Learns from raw video files. A single video provides free cross-modal supervision (frames, audio, optional transcript) with no manual labelling.
+
+```bash
+python curriculum_train.py --video-dir /path/to/videos
+python curriculum_train.py --video-dir ./videos --total-steps 500  # quick test
+python curriculum_train.py --synthetic --total-steps 200           # no videos needed
+
+# With temporal context modules
+python curriculum_train.py --video-dir ./videos \
+    --enable-temporal-transformer --enable-memory
+```
+
+**Training details:**
+- **Five-phase curriculum** (each phase adds harder tasks):
+
+  | Phase | Fraction | Tasks |
+  |---|---|---|
+  | 1. Warmup | 10% | video recon, audio recon |
+  | 2. Cross-modal | 25% | + video↔audio |
+  | 3. Temporal | 25% | + temporal prediction, ordering, distance |
+  | 4. Grounding | 15% | + video→text, audio→text (needs transcripts) |
+  | 5. Joint | 25% | all tasks together |
+
+- **Temporal context** (three complementary approaches, enabled via flags):
+  1. Multi-scale temporal sampling — dataset-level clip pair tasks (order, distance, prediction)
+  2. Hierarchical temporal transformer (`--enable-temporal-transformer`) — sequence-level clip modeling with next-clip prediction
+  3. Recurrent memory tokens (`--enable-memory`) — persistent memory across clips with truncated BPTT
+- **Dataset:** `VideoWatchingDataset` — extracts overlapping clips from video files, extracts audio mel spectrograms, loads transcript files (.txt/.srt) if present
+- **Loss:** `MultiModalLoss` + `TemporalContextLoss` (temporal order BCE, temporal distance CE, next-clip MSE+cosine, scene boundary BCE), all with learned uncertainty weighting
+- **Checkpoints:** saved at each phase transition and at the end to `checkpoints/`
+
+#### d) Predictive Coding training (`train_pc.py`)
+
+Trains the OmniLatent backbone using Predictive Coding (Whittington & Bogacz 2017) instead of backpropagation. Each transformer layer becomes a level in a predictive hierarchy with local Hebbian-like weight updates.
+
+```bash
+python train_pc.py                            # pure predictive coding
+python train_pc.py --blend 0.5               # hybrid: 50% PC + 50% backprop
+python train_pc.py --blend-anneal            # curriculum: backprop → PC
+python train_pc.py --analytical              # memory-efficient O(1) inference
+python train_pc.py --inference-steps 50      # more inference iterations
+```
+
+**Training details:**
+- **PC-specific parameters:** inference steps (T_infer=20), inference LR (0.1), backprop blend ratio (0.0=pure PC, 1.0=pure backprop)
+- **Blend annealing:** optionally transitions smoothly from backprop to PC over a configurable number of steps
+- **Analytical inference:** uses residual Jacobian approximation for O(1) memory inference
+- **Optimizer:** AdamW (lr=1e-3 by default — higher than standard training because PC updates are local)
+- **Data:** synthetic multi-modal data (same as `train.py`)
+- **Checkpoints:** saved to `checkpoints/pc/`
+
+#### OmniLatent evaluation and inference (`evaluate.py`)
+
+Load a trained checkpoint and probe what the model learned:
+
+```bash
+# Self-reconstruction quality
+python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode reconstruct
+
+# Cross-modal translation (all 8 key pairs)
+python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode translate
+
+# Latent space alignment analysis (cosine similarity between modality latents)
+python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode latent
+
+# Full evaluation suite (all three modes above)
+python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode all
+
+# Inference on a real file
+python evaluate.py --checkpoint checkpoints/checkpoint_final.pt \
+    --input-file photo.jpg --source image --target text --mode file
+```
+
+**Evaluation modes:**
+- **`reconstruct`** — measures self-reconstruction quality: token accuracy for text, MSE + cosine similarity for continuous modalities (audio, image, video)
+- **`translate`** — tests all 8 cross-modal translation pairs (image↔text, image↔audio, audio↔video, video↔text), reports output validity (NaN/Inf check), mean absolute value, and standard deviation
+- **`latent`** — analyzes latent space alignment: computes cosine similarity between mean-pooled encoder outputs across all modality pairs (higher = more aligned), plus per-modality latent norm statistics
+- **`file`** — runs inference on a real file: loads an image/audio/video/text file, translates to the target modality, and saves the output. Text targets use autoregressive generation (`model.generate`); continuous targets use learned target queries
+
+**Inference API (programmatic):**
+
+```python
+model.eval()
+with torch.no_grad():
+    # Cross-modal translation
+    result = model("image", image_tensor, "text")
+    logits = result["output"]              # (B, T, vocab_size)
+
+    # Autoregressive text generation
+    token_ids = model.generate("image", image_tensor, max_len=64)
+
+    # Self-reconstruction
+    result = model.reconstruct("image", image_tensor)
+    reconstructed = result["output"]       # (B, 3, 224, 224)
+
+    # Multi-modal forward (multiple inputs → multiple outputs)
+    results = model.forward_multimodal(
+        inputs={"text": tokens, "image": image},
+        target_modalities=["text", "image"],
+    )
+```
+
+#### OmniLatent benchmarking (`benchmark.py`)
+
+Runs a comprehensive diagnostic analysis covering component parameter budgets, per-component timing, encoder information retention (effective rank), backbone per-layer contribution, scaling sensitivity, cross-modal alignment, loss attribution, and hook impact.
+
+```bash
+python benchmark.py                                              # quick report
+python benchmark.py --dim 768 --layers 12 --heads 12           # custom config
+python benchmark.py --checkpoint checkpoints/checkpoint_final.pt # trained model
+python benchmark.py --output report.json                        # save to file
+```
+
+---
+
+### 2. Gaussian Encoder (`gaussian_encoder/`)
+
+A small autoencoder with convolutional filters parameterized as mixtures of oriented 2D Gaussians — structured, interpretable kernels with fewer free parameters than standard convolutions.
+
+#### Training
+
+```bash
+python -m gaussian_encoder.train
+python -m gaussian_encoder.train --epochs 10 --latent-dim 16 --lr 3e-3
+```
+
+**Training details:**
+- **Dataset:** MNIST (28×28 greyscale, auto-downloaded via torchvision)
+- **Architecture:** encoder uses `GaussianConv2d` layers (5×5 kernels, each filter is a sum of 3 oriented Gaussian blobs with 6 learnable params each: μx, μy, log σx, log σy, θ, amplitude), decoder uses standard transposed convolutions
+- **Loss:** MSE reconstruction
+- **Optimizer:** Adam (lr=1e-3)
+- **Default:** 5 epochs, batch size 256, latent dim 32
+
+#### Inference
+
+After training, reconstruction samples are saved to `gaussian_encoder/samples.png` (top row: originals, bottom row: reconstructions). The script also prints the learned Gaussian σ statistics for the first layer.
+
+```python
+from gaussian_encoder.model import GaussianAutoencoder
+
+model = GaussianAutoencoder(in_ch=1, latent_dim=32)
+# Load weights...
+model.eval()
+with torch.no_grad():
+    reconstructed, latent = model(input_image)  # input: (B, 1, 28, 28)
+```
+
+---
+
+### 3. HPWM — Hierarchical Predictive World Model (`hpwm/`)
+
+A video world model that combines DINO visual features, Mixture-of-Depths (MoD) routing, slot attention for object-centric decomposition, VQ-VAE tokenization, and Mamba temporal state for long-range temporal modeling.
+
+#### Training
+
+```bash
+python -m hpwm.train                           # synthetic data (default)
+python -m hpwm.train --ssv2-dir /path/to/ssv2  # Something-Something V2
+python -m hpwm.train --resume checkpoints/hpwm/checkpoint_step_1000.pt
+python -m hpwm.train --no-mamba                # Transformer baseline
+python -m hpwm.train --steps 5000 --lr 3e-4
+```
+
+**Training details:**
+- **Architecture:** frozen DINO backbone → MoD router (selects high-surprise patches) → slot attention encoder (object-centric decomposition) → VQ-VAE (discrete tokenization) → Mamba temporal state (or Transformer baseline) → next-frame prediction head
+- **Loss:** composite of prediction loss, VQ-VAE reconstruction loss, FWM loss, commitment loss, entropy loss, slot consistency loss, slot specialization loss
+- **Optimizer:** AdamW with per-component learning rate scaling, cosine schedule with warmup
+- **Mixed precision:** bf16 (or fp16)
+- **Gradient accumulation:** effective batch size 16 (configurable)
+- **MoD K-ratio annealing:** the routing sparsity increases over training
+- **Checkpoints:** saved periodically + best model based on validation loss to `checkpoints/hpwm/`
+
+#### Evaluation
+
+```bash
+python -m hpwm.train --eval-only --resume checkpoints/hpwm/checkpoint_best.pt
+```
+
+**Three validation signals** (all three must pass):
+
+| Signal | Metric | Pass criterion |
+|---|---|---|
+| 1. MoD Routing Entropy | Entropy of routing weight distribution | Entropy decreases over training |
+| 2. Slot Binding Stability | Jaccard overlap of slot assignments across consecutive frames | Jaccard > 0.6 |
+| 3. Mamba State Retention | Cosine similarity of temporal features at early/mid/late positions | HPWM degrades gradually (vs Transformer which drops sharply) |
+
+Additional metrics: VQ-VAE codebook utilization (active ratio, perplexity), validation loss. Results are logged to TensorBoard and saved as JSON.
+
+---
+
+### 4. LGQ — Learnable Geometric Quantization (`lgq/`)
+
+A VQGAN-based image tokenizer supporting three quantization schemes: LGQ (learnable geometric), FSQ (fixed scalar), and SimVQ (simple vector with EMA).
+
+#### Training
+
+```bash
+python -m lgq.train --quantizer lgq --steps 100000
+python -m lgq.train --quantizer fsq --steps 100000
+python -m lgq.train --quantizer simvq --steps 100000
+python -m lgq.train --quantizer lgq --vocab-size 512 --n-codebooks 4 --lr 2e-4
+```
+
+**Training details:**
+- **Architecture:** convolutional encoder → quantizer (LGQ/FSQ/SimVQ) → convolutional decoder, with a PatchGAN discriminator for adversarial training
+- **Loss:** reconstruction (L1 + perceptual) + codebook loss (commitment + entropy) + adversarial loss (discriminator starts after `disc_start_step`)
+- **Optimizers:** separate AdamW for generator (betas=(0.5, 0.9)) and discriminator
+- **LR schedule:** cosine annealing with warmup (both generator and discriminator)
+- **Mixed precision:** bf16
+- **Data:** synthetic structured images by default (gradients, circles, grids at configurable resolution)
+- **Checkpoints:** periodic + best model (based on PSNR) to `checkpoints/lgq/`
+
+#### Evaluation
+
+```bash
+# Single model
+python -m lgq.evaluate --checkpoint checkpoints/lgq/best.pt
+
+# Compare multiple quantizers side by side
+python -m lgq.evaluate --compare lgq:path/lgq.pt fsq:path/fsq.pt simvq:path/simvq.pt
+
+# Save results
+python -m lgq.evaluate --checkpoint checkpoints/lgq/best.pt --output results.json
+```
+
+**Metrics reported:**
+- **PSNR** — peak signal-to-noise ratio (higher is better)
+- **SSIM** — structural similarity (higher is better)
+- **LPIPS** — learned perceptual similarity (lower is better)
+- **rFID** — reconstruction FID using Inception features (lower is better)
+- **Codebook utilization** — active ratio, perplexity, effective vocab bits
+- **Compression** — bits per pixel, compression ratio
+
+---
+
 ## Tests
 
 ```bash
