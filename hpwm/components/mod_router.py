@@ -257,20 +257,21 @@ class MoDSurpriseRouter(nn.Module):
         """Load-balancing loss on the hard routing mask.
 
         Penalises spatial concentration by pushing per-patch routing
-        frequency toward uniform.  Unlike the old soft entropy loss,
-        this directly targets the hard top-K selection that Signal 1
-        measures.
+        frequency toward uniform.  Uses the Switch-Transformer
+        formulation but **normalized by K** so the loss stays ~1.0
+        regardless of the current K-ratio annealing schedule.
 
-        Uses the Switch-Transformer formulation: CV^2 of per-patch
-        routing frequency across the batch, combined with a
-        differentiable surrogate through the soft surprise distribution.
+        Without normalization, the raw loss ≈ K (the number of heavy
+        patches), which makes the loss track the annealing schedule
+        rather than actual routing quality — causing this single term
+        to dominate ~80% of total loss at convergence.
 
         Args:
             routing_mask: [B, N_patches] binary mask from top-K
             surprise: [B, N_patches] raw surprise scores
 
         Returns:
-            loss: scalar, always >= 0
+            loss: scalar, ~1.0 when uniform, >1.0 when concentrated
         """
         N = routing_mask.shape[-1]
 
@@ -282,10 +283,13 @@ class MoDSurpriseRouter(nn.Module):
         p = probs.mean(dim=0)  # [N_patches]
 
         # Switch-Transformer auxiliary loss: N * sum(f_i * p_i)
-        # Minimised when f and p are both uniform (= 1/N each).
-        # Value at uniform: N * N * (1/N * 1/N) = 1.0
-        # Value when concentrated: >> 1.0
-        loss = N * (f * p).sum()
+        # Raw value at uniform routing: ≈ K (current number of heavy patches)
+        raw_loss = N * (f * p).sum()
+
+        # Normalize by K so loss ≈ 1.0 at uniform, >1.0 when concentrated.
+        # This decouples the loss magnitude from the K-ratio annealing schedule.
+        K = max(1, self.current_k)
+        loss = raw_loss / K
 
         return loss
 
