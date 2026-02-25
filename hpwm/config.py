@@ -80,14 +80,19 @@ class HPWMConfig:
     min_lr_ratio: float = 0.05   # LR floor: 5% of peak (prevents dead zone at end of cosine schedule)
 
     # ── Loss weights ─────────────────────────────────────
-    loss_weight_prediction: float = 0.15    # next-frame token prediction (reduced to prevent gradient dominance)
-    loss_weight_vqvae: float = 0.5         # VQ-VAE reconstruction
-    loss_weight_fwm: float = 0.1           # FWM next-frame feature prediction
-    loss_weight_commitment: float = 0.25   # VQ commitment loss
-    loss_weight_routing_entropy: float = 0.3   # load-balancing loss (increased to break router collapse)
-    loss_weight_slot_consistency: float = 0.5  # per-slot temporal smoothness
-    loss_weight_slot_specialization: float = 2.0  # slot attention sharpness (must dominate to break uniform attention)
-    loss_weight_slot_diversity: float = 1.0      # inter-slot repulsion (penalises redundant slots)
+    # NOTE: routing_entropy loss is now normalized to ~1.0 (independent
+    # of K-ratio), so its weight directly controls its contribution.
+    # Prediction is the primary learning signal; slot_consistency is
+    # prioritized over slot_specialization so slots learn to track
+    # objects across frames before being forced to sharpen.
+    loss_weight_prediction: float = 1.0        # next-frame token prediction (primary signal)
+    loss_weight_vqvae: float = 0.5             # VQ-VAE reconstruction
+    loss_weight_fwm: float = 0.1               # FWM next-frame feature prediction
+    loss_weight_commitment: float = 0.25       # VQ commitment loss
+    loss_weight_routing_entropy: float = 0.3   # load-balancing loss (now normalized to ~1.0)
+    loss_weight_slot_consistency: float = 2.0  # per-slot temporal smoothness (prioritize tracking)
+    loss_weight_slot_specialization: float = 0.5  # slot attention sharpness (secondary to tracking)
+    loss_weight_slot_diversity: float = 1.0    # inter-slot repulsion (penalises redundant slots)
 
     # ── VQ-VAE warmup (freeze codebook drift) ──────────
     vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training

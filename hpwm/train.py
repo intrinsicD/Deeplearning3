@@ -298,8 +298,9 @@ class Trainer:
 
         # Signal 1: MoD Routing Entropy
         sig1 = results.get("signal_1_routing_entropy", {})
-        print(f"\nSignal 1 - MoD Routing Entropy:")
-        print(f"  Entropy: {sig1.get('entropy', 'N/A'):.4f}")
+        print(f"\nSignal 1 - MoD Routing Concentration:")
+        print(f"  Spatial entropy (normalized): {sig1.get('spatial_entropy_normalized', 'N/A'):.4f}")
+        print(f"  Surprise-routing overlap: {sig1.get('surprise_routing_overlap', 'N/A'):.4f}")
         print(f"  Heavy ratio: {sig1.get('heavy_ratio', 'N/A'):.4f}")
 
         # Signal 2: Slot Binding Stability
@@ -308,11 +309,11 @@ class Trainer:
         print(f"  Mean Jaccard: {sig2.get('mean_jaccard', 'N/A'):.4f}")
         print(f"  Pass (>0.6): {'YES' if sig2.get('mean_jaccard', 0) > 0.6 else 'NO'}")
 
-        # Signal 3: Mamba State Retention
+        # Signal 3: Mamba State Retention (per-position prediction loss)
         sig3 = results.get("signal_3_state_retention", {})
-        print(f"\nSignal 3 - State Retention:")
-        for length, acc in sig3.items():
-            print(f"  {length}: {acc:.4f}")
+        print(f"\nSignal 3 - State Retention (pred CE at position, lower=better):")
+        for length, loss_val in sig3.items():
+            print(f"  {length}: {loss_val:.4f}")
 
         # VQ-VAE codebook utilization
         cb_metrics = self.model.vqvae.quantizer.codebook_utilization()

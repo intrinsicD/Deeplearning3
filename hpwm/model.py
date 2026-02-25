@@ -122,10 +122,17 @@ class DINOBackbone(nn.Module):
 
 class PredictionHead(nn.Module):
     """
-    Next-frame token prediction head.
+    Next-frame token prediction head using cross-attention.
 
-    Takes multi-scale representations and predicts VQ-VAE token indices
-    for the next frame.
+    Instead of mean-pooling all multiscale latents into a single vector
+    (which creates an information bottleneck — a 1024-d vector cannot
+    recover 256 independent spatial token predictions), this head uses
+    learnable spatial query tokens that cross-attend to the full set of
+    multiscale latent representations.
+
+    Each spatial query can selectively route information from the latents
+    most relevant to its spatial position, preserving the structure that
+    Mamba and multi-scale attention built.
     """
 
     def __init__(
@@ -135,27 +142,44 @@ class PredictionHead(nn.Module):
         vocab_size: int = 256,
         n_spatial_tokens: int = 256,  # (128/8)^2
         hidden_dim: int = 512,
+        n_heads: int = 4,
     ):
         super().__init__()
         self.n_codebooks = n_codebooks
         self.vocab_size = vocab_size
         self.n_spatial_tokens = n_spatial_tokens
+        self.hidden_dim = hidden_dim
 
-        # Project from multi-scale latents to spatial token predictions
-        self.proj = nn.Sequential(
-            nn.Linear(d_input, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
+        # Learnable spatial query tokens — one per VQ spatial position
+        self.spatial_queries = nn.Parameter(
+            torch.randn(1, n_spatial_tokens, hidden_dim) * 0.02,
         )
 
-        # Spatial unfolding: from latent tokens to spatial grid
-        self.spatial_proj = nn.Linear(hidden_dim, n_spatial_tokens * hidden_dim // 4)
-        self.spatial_norm = nn.LayerNorm(hidden_dim // 4)
+        # Cross-attention: spatial queries attend to multiscale latents
+        self.norm_q = nn.LayerNorm(hidden_dim)
+        self.norm_kv = nn.LayerNorm(d_input)
+        self.to_q = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.to_k = nn.Linear(d_input, hidden_dim, bias=False)
+        self.to_v = nn.Linear(d_input, hidden_dim, bias=False)
+        self.to_out = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+        self.n_heads = n_heads
+        self.d_head = hidden_dim // n_heads
+        self.scale = self.d_head ** -0.5
+
+        # FFN refinement after cross-attention
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+
+        self.out_norm = nn.LayerNorm(hidden_dim)
 
         # Per-codebook classification heads
         self.heads = nn.ModuleList([
-            nn.Linear(hidden_dim // 4, vocab_size)
+            nn.Linear(hidden_dim, vocab_size)
             for _ in range(n_codebooks)
         ])
 
@@ -169,16 +193,29 @@ class PredictionHead(nn.Module):
         """
         B = multiscale_output.shape[0]
 
-        # Mean-pool over all latent tokens to aggregate temporal context.
-        # Last-token-only discards the temporal structure Mamba and
-        # multi-scale attention built; mean-pooling preserves it.
-        pooled = multiscale_output.mean(dim=1)  # [B, D_input]
-        h = self.proj(pooled)  # [B, hidden_dim]
+        # Expand spatial queries for batch
+        queries = self.spatial_queries.expand(B, -1, -1)  # [B, N_spatial, hidden]
 
-        # Unfold to spatial grid
-        spatial = self.spatial_proj(h)  # [B, N_spatial * hidden//4]
-        spatial = spatial.view(B, self.n_spatial_tokens, -1)  # [B, N_spatial, hidden//4]
-        spatial = self.spatial_norm(spatial)
+        # Cross-attention: spatial queries attend to multiscale latents
+        q = self.to_q(self.norm_q(queries))
+        k = self.to_k(self.norm_kv(multiscale_output))
+        v = self.to_v(self.norm_kv(multiscale_output))
+
+        # Multi-head reshape
+        q = rearrange(q, "b n (h d) -> b h n d", h=self.n_heads)
+        k = rearrange(k, "b n (h d) -> b h n d", h=self.n_heads)
+        v = rearrange(v, "b n (h d) -> b h n d", h=self.n_heads)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+
+        out = attn @ v
+        out = rearrange(out, "b h n d -> b n (h d)")
+        spatial = queries + self.to_out(out)  # [B, N_spatial, hidden]
+
+        # FFN refinement
+        spatial = spatial + self.ffn(spatial)
+        spatial = self.out_norm(spatial)
 
         # Per-codebook predictions
         logits = torch.stack(
@@ -454,14 +491,9 @@ class HPWM(nn.Module):
             )
         # temporal_output: [B, T-1, N_slots * D_slot]
 
-        # ── Step 5: Multi-scale attention ────────────────
-        if self.grad_checkpointing and self.training:
-            multiscale_out = grad_checkpoint(
-                self.multiscale, temporal_output,
-                use_reentrant=False,
-            )
-        else:
-            multiscale_out = self.multiscale(temporal_output)
+        # ── Step 5+7 note: Multi-scale attention is now called per
+        # prediction position inside Step 7 below, so each temporal
+        # slice gets its own causal multiscale representation.
 
         # ── Step 6: VQ-VAE tokenization ──────────────────
         # Encode target frames for prediction loss
@@ -480,18 +512,43 @@ class HPWM(nn.Module):
         vqvae_recon_loss = F.mse_loss(recon_frames, target_flat)
 
         # ── Step 7: Next-frame prediction ────────────────
-        # Predict next frame tokens from multi-scale output of CONTEXT
-        # frames only (no target leakage).
-        pred_logits = self.prediction_head(multiscale_out["combined"])
-        # [B, n_codebooks, N_spatial, vocab_size]
+        # Predict target frame tokens at multiple temporal positions so
+        # the Mamba state is supervised to retain useful information
+        # throughout the sequence (not just at the last position).
+        #
+        # We predict at up to 4 evenly-spaced positions in the context.
+        # Each prediction uses context up to that position only (causal).
+        T_ctx = temporal_output.shape[1]  # T - 1
+        n_pred_positions = min(4, T_ctx)
+        pred_positions = [
+            int(i * (T_ctx - 1) / max(1, n_pred_positions - 1))
+            for i in range(n_pred_positions)
+        ]
+        # Deduplicate and sort
+        pred_positions = sorted(set(pred_positions))
 
-        # Predict the last target frame's tokens from context representation
-        last_target = target_indices[:, -1]  # [B, n_codebooks, N_spatial]
+        prediction_loss = torch.tensor(0.0, device=frames.device)
+        pred_logits = None  # Store the last-position logits for eval
 
-        prediction_loss = F.cross_entropy(
-            pred_logits.reshape(-1, config.vqvae_vocab_size),
-            last_target.reshape(-1),
-        )
+        for pos in pred_positions:
+            # Feed context up to position pos through multiscale + head
+            ctx = temporal_output[:, :pos + 1]  # [B, pos+1, D]
+            ms_out_pos = self.multiscale(ctx)
+            logits_pos = self.prediction_head(ms_out_pos["combined"])
+            # [B, n_codebooks, N_spatial, vocab_size]
+
+            # Target: the frame at position pos in target_indices
+            target_pos = target_indices[:, pos]  # [B, n_codebooks, N_spatial]
+
+            prediction_loss = prediction_loss + F.cross_entropy(
+                logits_pos.reshape(-1, config.vqvae_vocab_size),
+                target_pos.reshape(-1),
+            )
+
+            if pos == pred_positions[-1]:
+                pred_logits = logits_pos
+
+        prediction_loss = prediction_loss / len(pred_positions)
 
         # ── Aggregate losses ─────────────────────────────
         # Two-phase prediction warmup:
@@ -539,9 +596,6 @@ class HPWM(nn.Module):
             "attn_weights": attn_weights.detach(),
             "temporal_output": temporal_output.detach(),
             "temporal_states": new_states,
-            "multiscale_out": {
-                k: v.detach() for k, v in multiscale_out.items()
-            },
         }
 
     def forward_inference(
