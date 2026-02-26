@@ -113,6 +113,12 @@ class Trainer:
         self.global_step = 0
         self.epoch = 0
         self.best_loss = float("inf")
+        # Don't track best checkpoint until prediction loss is fully ramped in,
+        # otherwise the warmup period (pred_weight ≈ 0) produces artificially
+        # low val_loss that can never be beaten once prediction is turned on.
+        self._best_loss_eligible_step = (
+            config.vqvae_warmup_steps + config.pred_warmup_steps
+        )
 
         # Resume
         if resume_from:
@@ -339,10 +345,12 @@ class Trainer:
             self.tb_writer.add_scalar("vqvae/active_ratio", cb_metrics["active_ratio"], self.global_step)
             self.tb_writer.add_scalar("vqvae/perplexity", cb_metrics["perplexity"], self.global_step)
 
-        # Track best
-        if val_loss < self.best_loss:
-            self.best_loss = val_loss
-            self._save_checkpoint(is_best=True)
+        # Track best — only after prediction loss is fully ramped in so
+        # the metric is comparable across evaluations.
+        if self.global_step >= self._best_loss_eligible_step:
+            if val_loss < self.best_loss:
+                self.best_loss = val_loss
+                self._save_checkpoint(is_best=True)
 
         # Save evaluation results
         results_file = Path(self.config.log_dir) / f"eval_step_{self.global_step}.json"
@@ -411,9 +419,22 @@ class Trainer:
         self.scaler.load_state_dict(ckpt["scaler_state_dict"])
         self.global_step = ckpt["global_step"]
         self.epoch = ckpt["epoch"]
-        self.best_loss = ckpt.get("best_loss", float("inf"))
+        saved_best = ckpt.get("best_loss", float("inf"))
 
-        print(f"Resumed from step {self.global_step}")
+        # If the saved best_loss was recorded during the pred warmup period
+        # (when pred_weight < 1.0), it's not comparable to post-warmup losses.
+        # Reset it so post-warmup tracking starts fresh.
+        pred_ramp_end = (
+            self.config.vqvae_warmup_steps + self.config.pred_warmup_steps
+        )
+        saved_at_step = ckpt.get("global_step", 0)
+        if saved_at_step < pred_ramp_end:
+            self.best_loss = float("inf")
+            print(f"Resumed from step {self.global_step} "
+                  f"(reset best_loss — checkpoint was from warmup period)")
+        else:
+            self.best_loss = saved_best
+            print(f"Resumed from step {self.global_step}")
 
 
 def main():
