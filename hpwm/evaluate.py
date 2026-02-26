@@ -86,9 +86,12 @@ class Evaluator:
         all_heavy_ratios = []
         spatial_routing_counts = None
 
-        # Also track surprise-routing correlation (does router actually
-        # route the most surprising patches?)
-        surprise_rank_correlations = []
+        # Track surprise concentration: what fraction of total surprise
+        # is captured by the routed (top-K) patches?  At uniform surprise
+        # this equals K/N; higher values mean routing captures genuinely
+        # surprising patches.  We report the ratio to K/N so 1.0 = uniform
+        # (routing adds nothing) and >1.0 = concentrated (routing useful).
+        surprise_concentrations = []
 
         for i, batch in enumerate(self.val_loader):
             if i >= max_batches:
@@ -125,18 +128,19 @@ class Evaluator:
 
                 all_heavy_ratios.append(routing_mask.float().mean().item())
 
-                # Surprise-routing rank correlation: do the top-K patches
-                # by surprise match the actually-routed patches?
-                # (Spearman-style: compare ranks)
+                # Surprise concentration: fraction of total surprise mass
+                # captured by routed patches, normalized by baseline K/N.
                 for b in range(B):
                     s = surprise[b]  # [N_patches]
                     m = routing_mask[b]  # [N_patches]
                     K = int(m.sum().item())
-                    if K > 0 and K < self.config.n_patches:
-                        # Fraction of top-K surprise patches that were routed
-                        _, topk_idx = s.topk(K)
-                        overlap = m[topk_idx].sum().item() / K
-                        surprise_rank_correlations.append(overlap)
+                    N_p = self.config.n_patches
+                    s_total = s.sum().item()
+                    if K > 0 and K < N_p and s_total > 1e-8:
+                        s_routed = (s * m).sum().item()
+                        # fraction captured / fraction expected at uniform
+                        concentration = (s_routed / s_total) / (K / N_p)
+                        surprise_concentrations.append(concentration)
 
         # Normalize spatial counts to probability distribution
         if spatial_routing_counts is not None:
@@ -150,13 +154,13 @@ class Evaluator:
         else:
             normalized_entropy = 1.0
 
-        surprise_routing_overlap = (
-            sum(surprise_rank_correlations) / max(1, len(surprise_rank_correlations))
+        surprise_concentration = (
+            sum(surprise_concentrations) / max(1, len(surprise_concentrations))
         )
 
         return {
             "spatial_entropy_normalized": normalized_entropy,
-            "surprise_routing_overlap": surprise_routing_overlap,
+            "surprise_concentration": surprise_concentration,
             "heavy_ratio": sum(all_heavy_ratios) / max(1, len(all_heavy_ratios)),
             "k_ratio": self.model.mod_router.current_k_ratio,
         }
