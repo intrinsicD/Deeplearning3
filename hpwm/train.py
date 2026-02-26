@@ -119,6 +119,7 @@ class Trainer:
         self._best_loss_eligible_step = (
             config.vqvae_warmup_steps + config.pred_warmup_steps
         )
+        self._evals_without_improvement = 0
 
         # Resume
         if resume_from:
@@ -278,9 +279,36 @@ class Trainer:
                     if self.global_step % config.eval_every == 0:
                         self._evaluate()
 
+                        # Early stopping (only after pred warmup)
+                        if (
+                            config.early_stopping_patience > 0
+                            and self.global_step >= self._best_loss_eligible_step
+                            and self._evals_without_improvement >= config.early_stopping_patience
+                        ):
+                            print(
+                                f"\nEarly stopping at step {self.global_step}: "
+                                f"no improvement for {self._evals_without_improvement} "
+                                f"consecutive evaluations (best val_loss={self.best_loss:.4f})"
+                            )
+                            self._save_checkpoint(is_final=True)
+                            print("\nTraining complete!")
+                            return
+
                     # Save checkpoint
                     if self.global_step % config.save_every == 0:
                         self._save_checkpoint()
+
+                    # VQ-VAE dead code revival
+                    if (
+                        config.codebook_revival_every > 0
+                        and self.global_step % config.codebook_revival_every == 0
+                    ):
+                        n_revived = self.model.vqvae.revive_dead_codes(
+                            frames[:, 0],  # use first frame of current batch
+                            threshold=config.codebook_revival_threshold,
+                        )
+                        if n_revived > 0:
+                            print(f"  [codebook] revived {n_revived} dead codes")
 
                     # Reset temporal states periodically (between videos)
                     if self.global_step % 100 == 0:
@@ -306,7 +334,7 @@ class Trainer:
         sig1 = results.get("signal_1_routing_entropy", {})
         print(f"\nSignal 1 - MoD Routing Concentration:")
         print(f"  Spatial entropy (normalized): {sig1.get('spatial_entropy_normalized', 'N/A'):.4f}")
-        print(f"  Surprise-routing overlap: {sig1.get('surprise_routing_overlap', 'N/A'):.4f}")
+        print(f"  Surprise concentration (>1=focused): {sig1.get('surprise_concentration', 'N/A'):.4f}")
         print(f"  Heavy ratio: {sig1.get('heavy_ratio', 'N/A'):.4f}")
 
         # Signal 2: Slot Binding Stability
@@ -350,7 +378,10 @@ class Trainer:
         if self.global_step >= self._best_loss_eligible_step:
             if val_loss < self.best_loss:
                 self.best_loss = val_loss
+                self._evals_without_improvement = 0
                 self._save_checkpoint(is_best=True)
+            else:
+                self._evals_without_improvement += 1
 
         # Save evaluation results
         results_file = Path(self.config.log_dir) / f"eval_step_{self.global_step}.json"
@@ -387,6 +418,7 @@ class Trainer:
             "scheduler_state_dict": self.scheduler.state_dict(),
             "scaler_state_dict": self.scaler.state_dict(),
             "best_loss": self.best_loss,
+            "evals_without_improvement": self._evals_without_improvement,
             "config": vars(self.config),
         }
 
@@ -430,10 +462,14 @@ class Trainer:
         saved_at_step = ckpt.get("global_step", 0)
         if saved_at_step < pred_ramp_end:
             self.best_loss = float("inf")
+            self._evals_without_improvement = 0
             print(f"Resumed from step {self.global_step} "
                   f"(reset best_loss — checkpoint was from warmup period)")
         else:
             self.best_loss = saved_best
+            self._evals_without_improvement = ckpt.get(
+                "evals_without_improvement", 0
+            )
             print(f"Resumed from step {self.global_step}")
 
 

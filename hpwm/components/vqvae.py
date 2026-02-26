@@ -168,6 +168,55 @@ class VectorQuantizer(nn.Module):
 
         return quantized, indices, total_commitment
 
+    def revive_dead_codes(
+        self, z: torch.Tensor, threshold: float = 1.0,
+    ) -> int:
+        """Reinitialize dead codebook entries from encoder outputs.
+
+        Codes whose EMA count has fallen below ``threshold`` are replaced
+        with randomly sampled vectors from ``z`` (the current batch of
+        encoder outputs), and their EMA statistics are reset.
+
+        Args:
+            z: [N, D] flattened encoder outputs from the current batch.
+            threshold: codes with ema_count below this are considered dead.
+
+        Returns:
+            Total number of codes revived across all codebooks.
+        """
+        total_revived = 0
+        z_splits = z.chunk(self.n_codebooks, dim=-1)
+
+        with torch.no_grad():
+            for i, z_part in enumerate(z_splits):
+                dead_mask = self.ema_count[i] < threshold
+                n_dead = dead_mask.sum().item()
+                if n_dead == 0:
+                    continue
+
+                n_available = z_part.shape[0]
+                if n_available == 0:
+                    continue
+
+                # Sample replacement vectors from encoder outputs
+                pick = torch.randint(
+                    0, n_available, (n_dead,), device=z.device,
+                )
+                new_vecs = z_part[pick]
+
+                # Overwrite dead codes
+                codebook = self._get_codebook(i).clone()
+                codebook[dead_mask] = new_vecs
+                self._set_codebook(i, codebook)
+
+                # Reset EMA stats so the revived codes participate normally
+                self.ema_count[i][dead_mask] = 1.0
+                self.ema_weight[i][dead_mask] = new_vecs
+
+                total_revived += n_dead
+
+        return total_revived
+
     def codebook_utilization(self) -> dict[str, float]:
         """Compute per-codebook utilization metrics.
 
@@ -393,6 +442,24 @@ class VQVAE(nn.Module):
             z_q, indices, commitment_loss = self.quantizer(z)
         recon = self.decoder(z_q)
         return recon, indices, commitment_loss, z_q
+
+    @torch.no_grad()
+    def revive_dead_codes(
+        self, frames: torch.Tensor, threshold: float = 1.0,
+    ) -> int:
+        """Revive dead codebook entries using encoder outputs from *frames*.
+
+        Args:
+            frames: [B, 3, H, W] raw input frames.
+            threshold: passed to quantizer.revive_dead_codes.
+
+        Returns:
+            Number of codes revived.
+        """
+        z = self.encoder(frames)  # [B, D, H', W']
+        from einops import rearrange as _r
+        z_flat = _r(z, "b d h w -> (b h w) d")
+        return self.quantizer.revive_dead_codes(z_flat, threshold)
 
     def indices_to_features(self, indices: torch.Tensor) -> torch.Tensor:
         """Convert token indices to continuous features.

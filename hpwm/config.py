@@ -98,6 +98,13 @@ class HPWMConfig:
     vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
     pred_warmup_steps: int = 3000         # cosine ramp from 0 → full prediction weight
 
+    # ── Early stopping ──────────────────────────────────
+    early_stopping_patience: int = 10   # evals without improvement before stopping (0 = disabled)
+
+    # ── VQ-VAE codebook health ──────────────────────────
+    codebook_revival_every: int = 500   # check for dead codes every N training steps (0 = disabled)
+    codebook_revival_threshold: float = 1.0  # ema_count below this → dead code
+
     # ── Evaluation & logging ─────────────────────────────
     eval_every: int = 500
     save_every: int = 5000
