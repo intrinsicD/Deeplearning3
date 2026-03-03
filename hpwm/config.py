@@ -42,7 +42,7 @@ class HPWMConfig:
 
     # ── Temporal state (Component 4) ─────────────────────
     n_temporal_tiers: int = 1    # full spec: 2 or 3
-    d_mamba: int = 256           # full spec: 512/1024/2048
+    d_mamba: int = 512           # full spec: 512/1024/2048
     mamba_d_state: int = 16      # SSM state dimension
     mamba_d_conv: int = 4        # local convolution width
     mamba_expand: int = 2        # expansion factor
@@ -95,14 +95,14 @@ class HPWMConfig:
     loss_weight_slot_diversity: float = 1.0    # inter-slot repulsion (penalises redundant slots)
 
     # ── VQ-VAE warmup (freeze codebook drift) ──────────
-    vqvae_warmup_steps: int = 2000        # pretrain VQ-VAE alone before joint training
-    pred_warmup_steps: int = 3000         # cosine ramp from 0 → full prediction weight
+    vqvae_warmup_steps: int = 1000        # pretrain VQ-VAE alone before joint training
+    pred_warmup_steps: int = 1500         # cosine ramp from 0 → full prediction weight
 
     # ── Early stopping ──────────────────────────────────
-    early_stopping_patience: int = 10   # evals without improvement before stopping (0 = disabled)
+    early_stopping_patience: int = 20   # evals without improvement before stopping (0 = disabled)
 
     # ── VQ-VAE codebook health ──────────────────────────
-    codebook_revival_every: int = 500   # check for dead codes every N training steps (0 = disabled)
+    codebook_revival_every: int = 200   # check for dead codes every N training steps (0 = disabled)
     codebook_revival_threshold: float = 1.0  # ema_count below this → dead code
 
     # ── Evaluation & logging ─────────────────────────────

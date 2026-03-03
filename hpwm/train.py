@@ -211,24 +211,13 @@ class Trainer:
                     if self.global_step == 1:
                         print(
                             f"Step 1/{config.total_steps} | "
-                            f"loss={accum_loss / steps_since_log:.4f} | "
-                            f"first step OK, next log at step {config.log_every}"
-                        )
-                        accum_loss = 0.0
-                        accum_metrics = {}
-                        steps_since_log = 0
-                        step_start_time = time.time()
-
-                    # Log first step so user sees training is alive
-                    if self.global_step == 1:
-                        print(
-                            f"Step 1/{config.total_steps} | "
-                            f"loss={accum_loss:.4f} | "
+                            f"loss={accum_loss / max(1, steps_since_log):.4f} | "
                             f"first step OK, next log at step {config.log_every}",
                             flush=True,
                         )
                         accum_loss = 0.0
                         accum_metrics = {}
+                        steps_since_log = 0
                         step_start_time = time.time()
 
                     # Logging
@@ -511,6 +500,14 @@ def main():
         config.n_frames = args.n_frames
     if args.no_mamba:
         config.use_mamba = False
+
+    if config.n_frames < 32:
+        print(
+            f"[WARN] n_frames={config.n_frames} is very short for temporal "
+            f"learning. Signal 3 (state retention) needs >=32 frames to "
+            f"show meaningful early/mid/late differences. Consider "
+            f"--n-frames 64 or higher."
+        )
 
     use_synthetic = args.ssv2_dir is None
 
