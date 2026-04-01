@@ -10,7 +10,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from .containers import MemoryState, ObservationPacket
-from .curriculum import CurriculumPhase
+from .curriculum import AdaptiveCurriculumScheduler, CurriculumPhase
+from .evaluation import EvaluationSuite
 from .losses import WorldModelLoss
 from .model import ModularLatentWorldModel
 from .monitoring import HookManager
@@ -35,13 +36,21 @@ class Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=mixed_precision and device.type == "cuda")
         self.writer = SummaryWriter(log_dir=run_dir)
         self.hooks = HookManager(self.writer)
+        self.eval_suite = EvaluationSuite(writer=self.writer)
         self.global_step = 0
         self.curriculum: Optional[List[CurriculumPhase]] = None
+        self.adaptive_scheduler: Optional[AdaptiveCurriculumScheduler] = None
 
     def set_curriculum(self, phases: List["CurriculumPhase"]) -> None:
         self.curriculum = phases
 
+    def set_adaptive_curriculum(self, scheduler: AdaptiveCurriculumScheduler) -> None:
+        """Use an adaptive curriculum that transitions phases based on loss plateaus."""
+        self.adaptive_scheduler = scheduler
+
     def _active_phase(self) -> Optional["CurriculumPhase"]:
+        if self.adaptive_scheduler is not None:
+            return self.adaptive_scheduler.current_phase
         if not self.curriculum:
             return None
         for phase in self.curriculum:
@@ -102,7 +111,16 @@ class Trainer:
             self.hooks.log_text_predictions(output, {"text_target": batch["text_target"].to(self.device)}, self.global_step, split="train")
         self.hooks.log_embeddings(output, self.global_step, split="train")
 
+        # Evaluation metrics on training data
+        eval_result = self.eval_suite.evaluate_step(output, loss_inputs)
+        self.eval_suite.log_to_tensorboard(eval_result, self.global_step, split="train")
+
+        # Adaptive curriculum: feed loss to scheduler
+        if self.adaptive_scheduler is not None:
+            self.adaptive_scheduler.step(float(total_loss.detach().cpu().item()))
+
         result = {k: float(v.detach().cpu().item()) for k, v in losses.items()}
+        result.update(eval_result.all_metrics())
         if phase is not None:
             result["curriculum_phase"] = float(phase.phase_id)
             self.writer.add_scalar("train/curriculum_phase", phase.phase_id, self.global_step)
@@ -139,7 +157,12 @@ class Trainer:
             self.hooks.log_text_predictions(output, {"text_target": batch["text_target"].to(self.device)}, self.global_step, split="eval")
         self.hooks.log_embeddings(output, self.global_step, split="eval")
 
-        return {k: float(v.detach().cpu().item()) for k, v in losses.items()}
+        eval_result = self.eval_suite.evaluate_step(output, loss_inputs)
+        self.eval_suite.log_to_tensorboard(eval_result, self.global_step, split="eval")
+
+        result = {k: float(v.detach().cpu().item()) for k, v in losses.items()}
+        result.update(eval_result.all_metrics())
+        return result
 
     def fit(self, train_loader: DataLoader, eval_loader: Optional[DataLoader] = None, epochs: int = 1, eval_every_steps: Optional[int] = None) -> None:
         for epoch in range(epochs):

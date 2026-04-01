@@ -83,3 +83,163 @@ class VectorReconstructionHead(IDecoder):
 
     def forward(self, latent: LatentState, context: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
         return {"vector_recon": self.head(latent.z_sem)}
+
+
+class ResidualUpsampleBlock(nn.Module):
+    """Residual block with transposed convolution for spatial upsampling."""
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.upsample = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
+        self.conv = nn.Sequential(
+            nn.GroupNorm(min(8, out_channels), out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(min(8, out_channels), out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+        )
+        self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        self.upsample_skip = nn.Upsample(scale_factor=2, mode="nearest")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.upsample(x)
+        h = h + self.conv(h)
+        skip = self.upsample_skip(self.skip(x))
+        return h + skip
+
+
+@DECODERS.register("image_reconstruction")
+class ImageDecoderHead(IDecoder):
+    """Latent-conditioned convolutional image decoder.
+
+    Projects latent to a spatial grid, then uses residual upsampling blocks
+    with transposed convolutions to reconstruct the image.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int = 128,
+        base_channels: int = 128,
+        output_channels: int = 3,
+        output_size: int = 64,
+        init_spatial: int = 4,
+    ) -> None:
+        super().__init__()
+        self.init_spatial = init_spatial
+        self.output_size = output_size
+        self.latent_to_spatial = nn.Linear(latent_dim, base_channels * init_spatial * init_spatial)
+        self.norm = nn.GroupNorm(min(8, base_channels), base_channels)
+
+        num_upsample = 0
+        s = init_spatial
+        while s < output_size:
+            s *= 2
+            num_upsample += 1
+
+        blocks = []
+        ch = base_channels
+        for i in range(num_upsample):
+            out_ch = max(ch // 2, 32)
+            blocks.append(ResidualUpsampleBlock(ch, out_ch))
+            ch = out_ch
+        self.decoder_blocks = nn.Sequential(*blocks)
+        self.to_rgb = nn.Sequential(
+            nn.GroupNorm(min(8, ch), ch),
+            nn.GELU(),
+            nn.Conv2d(ch, output_channels, kernel_size=3, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, latent: LatentState, context: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
+        z = latent.primary()
+        spatial = self.latent_to_spatial(z)
+        B = z.shape[0]
+        ch = spatial.shape[-1] // (self.init_spatial * self.init_spatial)
+        spatial = spatial.view(B, ch, self.init_spatial, self.init_spatial)
+        spatial = self.norm(spatial)
+        h = self.decoder_blocks(spatial)
+        image = self.to_rgb(h)
+        if image.shape[-1] != self.output_size:
+            image = torch.nn.functional.interpolate(image, size=(self.output_size, self.output_size), mode="bilinear", align_corners=False)
+        return {"image_recon": image}
+
+
+class ResidualUpsample1DBlock(nn.Module):
+    """Residual block with 1D transposed convolution for temporal upsampling."""
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.upsample = nn.ConvTranspose1d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
+        self.conv = nn.Sequential(
+            nn.GroupNorm(min(8, out_channels), out_channels),
+            nn.GELU(),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(min(8, out_channels), out_channels),
+            nn.GELU(),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
+        )
+        self.skip = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+        self.upsample_skip = nn.Upsample(scale_factor=2, mode="nearest")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.upsample(x)
+        h = h + self.conv(h)
+        skip = self.upsample_skip(self.skip(x))
+        return h + skip
+
+
+@DECODERS.register("audio_reconstruction")
+class AudioDecoderHead(IDecoder):
+    """Latent-conditioned 1D convolutional audio decoder.
+
+    Projects latent to temporal features, then uses 1D transposed convolutions
+    to upsample to a spectrogram or waveform representation.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int = 128,
+        base_channels: int = 128,
+        output_channels: int = 1,
+        output_length: int = 1024,
+        init_length: int = 8,
+    ) -> None:
+        super().__init__()
+        self.init_length = init_length
+        self.output_length = output_length
+        self.latent_to_temporal = nn.Linear(latent_dim, base_channels * init_length)
+        self.norm = nn.GroupNorm(min(8, base_channels), base_channels)
+
+        num_upsample = 0
+        s = init_length
+        while s < output_length:
+            s *= 2
+            num_upsample += 1
+
+        blocks = []
+        ch = base_channels
+        for i in range(num_upsample):
+            out_ch = max(ch // 2, 16)
+            blocks.append(ResidualUpsample1DBlock(ch, out_ch))
+            ch = out_ch
+        self.decoder_blocks = nn.Sequential(*blocks)
+        self.to_audio = nn.Sequential(
+            nn.GroupNorm(min(8, ch), ch),
+            nn.GELU(),
+            nn.Conv1d(ch, output_channels, kernel_size=3, padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, latent: LatentState, context: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
+        z = latent.primary()
+        temporal = self.latent_to_temporal(z)
+        B = z.shape[0]
+        ch = temporal.shape[-1] // self.init_length
+        temporal = temporal.view(B, ch, self.init_length)
+        temporal = self.norm(temporal)
+        h = self.decoder_blocks(temporal)
+        audio = self.to_audio(h)
+        if audio.shape[-1] != self.output_length:
+            audio = torch.nn.functional.interpolate(audio, size=self.output_length, mode="linear", align_corners=False)
+        return {"audio_recon": audio}

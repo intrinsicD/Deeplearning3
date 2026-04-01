@@ -21,13 +21,21 @@ class LossWeights:
     regularizer: float = 1.0
     text_ce: float = 1.0
     vector_recon: float = 0.0
+    image_recon: float = 1.0
+    audio_recon: float = 1.0
 
 
 class WorldModelLoss(nn.Module):
-    def __init__(self, weights: Optional[LossWeights] = None, learned_uncertainty: bool = False) -> None:
+    def __init__(
+        self,
+        weights: Optional[LossWeights] = None,
+        learned_uncertainty: bool = False,
+        regularizer_min_weight: float = 0.5,
+    ) -> None:
         super().__init__()
         self.weights = weights or LossWeights()
         self.learned_uncertainty = learned_uncertainty
+        self.regularizer_min_weight = regularizer_min_weight
         if learned_uncertainty:
             self.log_vars = nn.ParameterDict({
                 "latent_sem_loss": nn.Parameter(torch.zeros(())),
@@ -37,6 +45,8 @@ class WorldModelLoss(nn.Module):
                 "regularizer_loss": nn.Parameter(torch.zeros(())),
                 "text_ce_loss": nn.Parameter(torch.zeros(())),
                 "vector_recon_loss": nn.Parameter(torch.zeros(())),
+                "image_recon_loss": nn.Parameter(torch.zeros(())),
+                "audio_recon_loss": nn.Parameter(torch.zeros(())),
             })
 
     @staticmethod
@@ -105,6 +115,24 @@ class WorldModelLoss(nn.Module):
         else:
             losses["vector_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
 
+        # Image reconstruction loss
+        img_w = self._safe_multiplier(task_multipliers, "image_recon_loss", base_device, base_dtype)
+        if "image_target" in batch and any(key.endswith("image_recon") for key in output.decoder_outputs):
+            image_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("image_recon"))
+            image_target = batch["image_target"]
+            losses["image_recon_loss"] = F.mse_loss(image_pred, image_target)
+        else:
+            losses["image_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+
+        # Audio reconstruction loss
+        audio_w = self._safe_multiplier(task_multipliers, "audio_recon_loss", base_device, base_dtype)
+        if "audio_target" in batch and any(key.endswith("audio_recon") for key in output.decoder_outputs):
+            audio_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("audio_recon"))
+            audio_target = batch["audio_target"]
+            losses["audio_recon_loss"] = F.mse_loss(audio_pred, audio_target)
+        else:
+            losses["audio_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+
         weighted_losses = {
             "latent_sem_loss": self.weights.latent_sem * sem_w * losses["latent_sem_loss"],
             "latent_dyn_loss": self.weights.latent_dyn * dyn_w * losses["latent_dyn_loss"],
@@ -113,24 +141,24 @@ class WorldModelLoss(nn.Module):
             "regularizer_loss": self.weights.regularizer * reg_w * losses["regularizer_loss"],
             "text_ce_loss": self.weights.text_ce * text_w * losses["text_ce_loss"],
             "vector_recon_loss": self.weights.vector_recon * vec_w * losses["vector_recon_loss"],
+            "image_recon_loss": self.weights.image_recon * img_w * losses["image_recon_loss"],
+            "audio_recon_loss": self.weights.audio_recon * audio_w * losses["audio_recon_loss"],
         }
 
         if self.learned_uncertainty:
             total = torch.zeros((), device=losses["regularizer_loss"].device, dtype=losses["regularizer_loss"].dtype)
             for name, task_loss in weighted_losses.items():
                 log_var = self.log_vars[name]
-                total = total + 0.5 * torch.exp(-log_var) * task_loss + 0.5 * log_var
+                effective_weight = 0.5 * torch.exp(-log_var)
+                # Clamp regularizer weight to prevent anti-collapse from being disabled
+                if name == "regularizer_loss":
+                    effective_weight = torch.clamp(effective_weight, min=self.regularizer_min_weight)
+                total = total + effective_weight * task_loss + 0.5 * log_var
                 losses[f"{name}_log_var"] = log_var.detach()
+                if name == "regularizer_loss":
+                    losses["regularizer_effective_weight"] = effective_weight.detach()
         else:
-            total = (
-                weighted_losses["latent_sem_loss"]
-                + weighted_losses["latent_dyn_loss"]
-                + weighted_losses["latent_ctrl_loss"]
-                + weighted_losses["latent_mem_loss"]
-                + weighted_losses["regularizer_loss"]
-                + weighted_losses["text_ce_loss"]
-                + weighted_losses["vector_recon_loss"]
-            )
+            total = sum(weighted_losses.values())
 
         losses["total_loss"] = total
         return losses

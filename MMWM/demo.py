@@ -8,7 +8,8 @@ import torch
 
 from .config import ModelConfig, build_model, build_tool_ecosystem
 from .containers import LatentPacket, ObservationPacket, ToolContext, ToolDescriptor
-from .curriculum import default_curriculum_phases
+from .curriculum import AdaptiveCurriculumScheduler, default_curriculum_phases, relative_curriculum_phases
+from .evaluation import EvaluationSuite
 from .losses import WorldModelLoss
 from .trainer import Trainer
 
@@ -33,15 +34,51 @@ def make_dummy_batch(
         "prefix_tokens": torch.randint(0, vocab_size, (batch_size, text_len), device=device),
         "text_target": torch.randint(0, vocab_size, (batch_size, text_len), device=device),
         "vector_target": torch.randn(batch_size, vector_dim, device=device),
+        "image_target": torch.rand(batch_size, 3, image_size, image_size, device=device),
     }
 
 
 def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = ModelConfig(
-        encoder_name="slot_multimodal",
+        encoder_name="structured_multimodal",
+        encoder_kwargs={
+            "text_vocab_size": 32000,
+            "text_embed_dim": 256,
+            "text_transformer_layers": 2,
+            "text_nhead": 4,
+            "vector_input_dim": 128,
+            "image_channels": 3,
+            "hidden_dim": 256,
+            "n_slots": 8,
+            "slot_dim": 128,
+            "slot_iters": 3,
+            "merge_threshold": 0.9,
+            "fusion_nhead": 4,
+        },
+        latent_projector_name="adaptive_role_split_mlp",
+        latent_projector_kwargs={
+            "input_dim": 256,
+            "latent_dim": 128,
+            "intermediate_dim": 512,
+            "use_batchnorm": True,
+        },
         memory_name="mamba_ssm",
         transition_core_name="mod_recurrent_attnres_transformer",
+        decoder_configs=[
+            ("text_autoregressive_head", {
+                "vocab_size": 32000,
+                "latent_dim": 128,
+                "text_embed_dim": 256,
+                "hidden_dim": 256,
+            }),
+            ("image_reconstruction", {
+                "latent_dim": 512,
+                "base_channels": 128,
+                "output_channels": 3,
+                "output_size": 64,
+            }),
+        ],
     )
     model = build_model(cfg)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
@@ -55,12 +92,17 @@ def main() -> None:
         grad_clip_norm=1.0,
         mixed_precision=True,
     )
-    trainer.set_curriculum(default_curriculum_phases())
+    # Use relative curriculum (adapts to total training steps)
+    trainer.set_curriculum(relative_curriculum_phases(total_steps=10_000))
+
+    # Optionally, use adaptive curriculum instead:
+    # adaptive = AdaptiveCurriculumScheduler(default_curriculum_phases(), patience=200)
+    # trainer.set_adaptive_curriculum(adaptive)
 
     for _ in range(10):
         batch = make_dummy_batch(device=device)
         metrics = trainer.train_step(batch)
-        print({k: round(v, 4) for k, v in metrics.items()})
+        print({k: round(v, 4) for k, v in metrics.items() if not k.endswith("_log_var")})
 
     registry, engine, critical_buffer, promoter = build_tool_ecosystem(
         model,

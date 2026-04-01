@@ -18,11 +18,20 @@ from .containers import (
     TransitionOutput,
 )
 from .config import ModelConfig, build_model, build_tool_ecosystem
-from .curriculum import CurriculumPhase, default_curriculum_phases
+from .curriculum import (
+    AdaptiveCurriculumScheduler,
+    CurriculumPhase,
+    default_curriculum_phases,
+    relative_curriculum_phases,
+)
+from .evaluation import EvalResult, EvaluationSuite
 from .losses import LossWeights, WorldModelLoss
 from .model import ModularLatentWorldModel
 
 __all__ = [
+    "AdaptiveCurriculumScheduler",
+    "EvalResult",
+    "EvaluationSuite",
     "LatentPacket",
     "LatentState",
     "LossWeights",
@@ -40,4 +49,5 @@ __all__ = [
     "build_model",
     "build_tool_ecosystem",
     "default_curriculum_phases",
+    "relative_curriculum_phases",
 ]

@@ -52,6 +52,57 @@ class RoleSplitLatentProjector(ILatentProjector):
         )
 
 
+@LATENT_PROJECTORS.register("adaptive_role_split_mlp")
+class AdaptiveRoleSplitLatentProjector(ILatentProjector):
+    """Learnable capacity allocation across latent roles.
+
+    Instead of fixed equal-size projections, each role attends over a shared
+    higher-dimensional intermediate space with learned soft gates, allowing the
+    model to allocate more capacity to roles that need it.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 256,
+        latent_dim: int = 128,
+        intermediate_dim: int = 512,
+        use_batchnorm: bool = True,
+        num_roles: int = 4,
+    ) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.num_roles = num_roles
+        self.bn = nn.BatchNorm1d(input_dim) if use_batchnorm else nn.Identity()
+        self.shared_proj = MLP([input_dim, intermediate_dim, intermediate_dim])
+        self.role_queries = nn.Parameter(torch.randn(num_roles, intermediate_dim) * 0.02)
+        self.gate_proj = nn.Linear(intermediate_dim, intermediate_dim)
+        self.role_out = nn.ModuleList([nn.Linear(intermediate_dim, latent_dim) for _ in range(num_roles)])
+        self.capacity_logits = nn.Parameter(torch.zeros(num_roles))
+
+    def forward(self, encoded: Dict[str, torch.Tensor]) -> LatentState:
+        fused = self.bn(encoded["fused"])
+        shared = self.shared_proj(fused)  # [B, intermediate_dim]
+
+        capacity_weights = torch.softmax(self.capacity_logits, dim=0)  # [num_roles]
+
+        role_features = []
+        for i in range(self.num_roles):
+            query = self.role_queries[i]  # [intermediate_dim]
+            gate = torch.sigmoid(self.gate_proj(shared * query.unsqueeze(0)))
+            gated = shared * gate * capacity_weights[i]
+            role_features.append(self.role_out[i](gated))
+
+        extras = {k: v for k, v in encoded.items()}
+        extras["capacity_weights"] = capacity_weights.detach()
+        return LatentState(
+            z_sem=role_features[0],
+            z_dyn=role_features[1],
+            z_ctrl=role_features[2],
+            z_mem=role_features[3],
+            extras=extras,
+        )
+
+
 # ============================================================
 # Memory modules
 # ============================================================
