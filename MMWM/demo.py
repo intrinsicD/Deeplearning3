@@ -8,6 +8,7 @@ import torch
 
 from .config import ModelConfig, build_model, build_tool_ecosystem
 from .containers import LatentPacket, ObservationPacket, ToolContext, ToolDescriptor
+from .curriculum import default_curriculum_phases
 from .losses import WorldModelLoss
 from .trainer import Trainer
 
@@ -37,10 +38,14 @@ def make_dummy_batch(
 
 def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cfg = ModelConfig()
+    cfg = ModelConfig(
+        encoder_name="slot_multimodal",
+        memory_name="mamba_ssm",
+        transition_core_name="mod_recurrent_attnres_transformer",
+    )
     model = build_model(cfg)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    loss_fn = WorldModelLoss()
+    loss_fn = WorldModelLoss(learned_uncertainty=True)
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -50,6 +55,7 @@ def main() -> None:
         grad_clip_norm=1.0,
         mixed_precision=True,
     )
+    trainer.set_curriculum(default_curriculum_phases())
 
     for _ in range(10):
         batch = make_dummy_batch(device=device)

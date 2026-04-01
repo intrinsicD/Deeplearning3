@@ -18,9 +18,9 @@ from .containers import (
     TransitionOutput,
 )
 from .config import ModelConfig, build_model, build_tool_ecosystem
+from .curriculum import CurriculumPhase, default_curriculum_phases
 from .losses import LossWeights, WorldModelLoss
 from .model import ModularLatentWorldModel
-from .trainer import Trainer
 
 __all__ = [
     "LatentPacket",
@@ -34,9 +34,10 @@ __all__ = [
     "ToolContext",
     "ToolDescriptor",
     "ToolResult",
-    "Trainer",
+    "CurriculumPhase",
     "TransitionOutput",
     "WorldModelLoss",
     "build_model",
     "build_tool_ecosystem",
+    "default_curriculum_phases",
 ]

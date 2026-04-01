@@ -24,9 +24,20 @@ class LossWeights:
 
 
 class WorldModelLoss(nn.Module):
-    def __init__(self, weights: Optional[LossWeights] = None) -> None:
+    def __init__(self, weights: Optional[LossWeights] = None, learned_uncertainty: bool = False) -> None:
         super().__init__()
         self.weights = weights or LossWeights()
+        self.learned_uncertainty = learned_uncertainty
+        if learned_uncertainty:
+            self.log_vars = nn.ParameterDict({
+                "latent_sem_loss": nn.Parameter(torch.zeros(())),
+                "latent_dyn_loss": nn.Parameter(torch.zeros(())),
+                "latent_ctrl_loss": nn.Parameter(torch.zeros(())),
+                "latent_mem_loss": nn.Parameter(torch.zeros(())),
+                "regularizer_loss": nn.Parameter(torch.zeros(())),
+                "text_ce_loss": nn.Parameter(torch.zeros(())),
+                "vector_recon_loss": nn.Parameter(torch.zeros(())),
+            })
 
     @staticmethod
     def _mse(pred: Optional[torch.Tensor], target: Optional[torch.Tensor]) -> torch.Tensor:
@@ -35,7 +46,23 @@ class WorldModelLoss(nn.Module):
             return torch.zeros((), device=device)
         return F.mse_loss(pred, target)
 
-    def forward(self, output: ModelOutput, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    def _safe_multiplier(
+        self,
+        task_multipliers: Optional[Dict[str, float]],
+        key: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if task_multipliers is None:
+            return torch.ones((), device=device, dtype=dtype)
+        return torch.tensor(float(task_multipliers.get(key, 1.0)), device=device, dtype=dtype)
+
+    def forward(
+        self,
+        output: ModelOutput,
+        batch: Dict[str, Any],
+        task_multipliers: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, torch.Tensor]:
         if output.target_next_latent is None:
             raise ValueError("WorldModelLoss requires target_next_latent. Provide obs_tp1 during forward().")
 
@@ -47,13 +74,16 @@ class WorldModelLoss(nn.Module):
 
         losses["regularizer_loss"] = output.aux["regularizer_total"]
 
-        total = (
-            self.weights.latent_sem * losses["latent_sem_loss"]
-            + self.weights.latent_dyn * losses["latent_dyn_loss"]
-            + self.weights.latent_ctrl * losses["latent_ctrl_loss"]
-            + self.weights.latent_mem * losses["latent_mem_loss"]
-            + self.weights.regularizer * losses["regularizer_loss"]
-        )
+        base_device = losses["regularizer_loss"].device
+        base_dtype = losses["regularizer_loss"].dtype
+
+        sem_w = self._safe_multiplier(task_multipliers, "latent_sem_loss", losses["latent_sem_loss"].device, losses["latent_sem_loss"].dtype)
+        dyn_w = self._safe_multiplier(task_multipliers, "latent_dyn_loss", losses["latent_dyn_loss"].device, losses["latent_dyn_loss"].dtype)
+        ctrl_w = self._safe_multiplier(task_multipliers, "latent_ctrl_loss", losses["latent_ctrl_loss"].device, losses["latent_ctrl_loss"].dtype)
+        mem_w = self._safe_multiplier(task_multipliers, "latent_mem_loss", losses["latent_mem_loss"].device, losses["latent_mem_loss"].dtype)
+        reg_w = self._safe_multiplier(task_multipliers, "regularizer_loss", losses["regularizer_loss"].device, losses["regularizer_loss"].dtype)
+        text_w = self._safe_multiplier(task_multipliers, "text_ce_loss", base_device, base_dtype)
+        vec_w = self._safe_multiplier(task_multipliers, "vector_recon_loss", base_device, base_dtype)
 
         if "text_target" in batch and any(key.endswith("text_logits") for key in output.decoder_outputs):
             text_logits = next(v for k, v in output.decoder_outputs.items() if k.endswith("text_logits"))
@@ -65,19 +95,42 @@ class WorldModelLoss(nn.Module):
                 )
             else:
                 losses["text_ce_loss"] = F.cross_entropy(text_logits, text_target)
-            total = total + self.weights.text_ce * losses["text_ce_loss"]
         else:
-            device = total.device
-            losses["text_ce_loss"] = torch.zeros((), device=device)
+            losses["text_ce_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
 
         if "vector_target" in batch and any(key.endswith("vector_recon") for key in output.decoder_outputs):
             vector_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("vector_recon"))
             vector_target = batch["vector_target"]
             losses["vector_recon_loss"] = F.mse_loss(vector_pred, vector_target)
-            total = total + self.weights.vector_recon * losses["vector_recon_loss"]
         else:
-            device = total.device
-            losses["vector_recon_loss"] = torch.zeros((), device=device)
+            losses["vector_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+
+        weighted_losses = {
+            "latent_sem_loss": self.weights.latent_sem * sem_w * losses["latent_sem_loss"],
+            "latent_dyn_loss": self.weights.latent_dyn * dyn_w * losses["latent_dyn_loss"],
+            "latent_ctrl_loss": self.weights.latent_ctrl * ctrl_w * losses["latent_ctrl_loss"],
+            "latent_mem_loss": self.weights.latent_mem * mem_w * losses["latent_mem_loss"],
+            "regularizer_loss": self.weights.regularizer * reg_w * losses["regularizer_loss"],
+            "text_ce_loss": self.weights.text_ce * text_w * losses["text_ce_loss"],
+            "vector_recon_loss": self.weights.vector_recon * vec_w * losses["vector_recon_loss"],
+        }
+
+        if self.learned_uncertainty:
+            total = torch.zeros((), device=losses["regularizer_loss"].device, dtype=losses["regularizer_loss"].dtype)
+            for name, task_loss in weighted_losses.items():
+                log_var = self.log_vars[name]
+                total = total + 0.5 * torch.exp(-log_var) * task_loss + 0.5 * log_var
+                losses[f"{name}_log_var"] = log_var.detach()
+        else:
+            total = (
+                weighted_losses["latent_sem_loss"]
+                + weighted_losses["latent_dyn_loss"]
+                + weighted_losses["latent_ctrl_loss"]
+                + weighted_losses["latent_mem_loss"]
+                + weighted_losses["regularizer_loss"]
+                + weighted_losses["text_ce_loss"]
+                + weighted_losses["vector_recon_loss"]
+            )
 
         losses["total_loss"] = total
         return losses
