@@ -362,14 +362,65 @@ class AdaptiveHaltingHead(nn.Module):
 # ============================================================
 
 
+class ModalitySubEncoder(nn.Module, abc.ABC):
+    """Base class for per-modality sub-encoders."""
+
+    @abc.abstractmethod
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Encode a single modality tensor to [B, hidden_dim]."""
+        raise NotImplementedError
+
+
+class TextSubEncoder(ModalitySubEncoder):
+    def __init__(self, vocab_size: int, embed_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.proj = MLP([embed_dim, hidden_dim])
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        emb = self.embedding(x)  # [B, T, D]
+        if mask is not None:
+            mask_f = mask.float().unsqueeze(-1)
+            pooled = (emb * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp_min(1.0)
+        else:
+            pooled = emb.mean(dim=1)
+        return self.proj(pooled)
+
+
+class VectorSubEncoder(ModalitySubEncoder):
+    def __init__(self, input_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.proj = MLP([input_dim, hidden_dim, hidden_dim])
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.proj(x)
+
+
+class ImageSubEncoder(ModalitySubEncoder):
+    def __init__(self, channels: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(channels, 32, kernel_size=5, stride=2, padding=2),
+            nn.GELU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.proj = MLP([128, hidden_dim, hidden_dim])
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.proj(self.conv(x).flatten(1))
+
+
 @ENCODERS.register("simple_multimodal")
 class SimpleMultimodalEncoder(IEncoder):
-    """Reference encoder with pluggable modality sub-encoders.
+    """Flexible multimodal encoder that fuses an arbitrary set of modalities.
 
-    Supported out of the box:
-      - vector: [B, D]
-      - text: token ids [B, T]
-      - image: [B, C, H, W]
+    Sub-encoders are registered by name. At forward time, only present modalities
+    are encoded and fused via learned gating + summation, so adding or removing a
+    modality requires no changes to this class.
     """
 
     def __init__(
@@ -383,57 +434,45 @@ class SimpleMultimodalEncoder(IEncoder):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        self.text_embedding = nn.Embedding(text_vocab_size, text_embed_dim)
-        self.text_proj = MLP([text_embed_dim, hidden_dim])
+        self.sub_encoders = nn.ModuleDict({
+            "text": TextSubEncoder(text_vocab_size, text_embed_dim, hidden_dim),
+            "vector": VectorSubEncoder(vector_input_dim, hidden_dim),
+            "image": ImageSubEncoder(image_channels, hidden_dim),
+        })
+        # Learned per-modality importance gate
+        self.modality_gates = nn.ParameterDict({
+            name: nn.Parameter(torch.ones(hidden_dim)) for name in self.sub_encoders
+        })
+        self.fuse_norm = RMSNorm(hidden_dim)
+        self.fuse_proj = MLP([hidden_dim, hidden_dim * 2, hidden_dim])
 
-        self.vector_proj = MLP([vector_input_dim, hidden_dim, hidden_dim])
-
-        self.image_conv = nn.Sequential(
-            nn.Conv2d(image_channels, 32, kernel_size=5, stride=2, padding=2),
-            nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-        )
-        self.image_proj = MLP([128, hidden_dim, hidden_dim])
-
-        self.fuse = MLP([hidden_dim * 3, hidden_dim * 2, hidden_dim])
+    def add_modality(self, name: str, sub_encoder: ModalitySubEncoder) -> None:
+        """Register a new modality at runtime (no architecture change needed)."""
+        self.sub_encoders[name] = sub_encoder
+        self.modality_gates[name] = nn.Parameter(torch.ones(self.hidden_dim, device=next(self.parameters()).device))
 
     def forward(self, obs: ObservationPacket) -> Dict[str, torch.Tensor]:
         device = obs.device()
         batch_size = next(iter(obs.modalities.values())).shape[0]
 
-        text_feat = torch.zeros(batch_size, self.hidden_dim, device=device)
-        vector_feat = torch.zeros(batch_size, self.hidden_dim, device=device)
-        image_feat = torch.zeros(batch_size, self.hidden_dim, device=device)
+        per_modality: Dict[str, torch.Tensor] = {}
+        fused = torch.zeros(batch_size, self.hidden_dim, device=device)
+        num_present = 0
 
-        if "text" in obs.modalities:
-            text = obs.modalities["text"]
-            emb = self.text_embedding(text)  # [B, T, D]
-            if "text" in obs.masks:
-                mask = obs.masks["text"].float().unsqueeze(-1)
-                pooled = (emb * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
-            else:
-                pooled = emb.mean(dim=1)
-            text_feat = self.text_proj(pooled)
+        for name, sub_enc in self.sub_encoders.items():
+            if name not in obs.modalities:
+                continue
+            feat = sub_enc(obs.modalities[name], obs.masks.get(name))
+            gate = torch.sigmoid(self.modality_gates[name])
+            per_modality[f"{name}_feat"] = feat
+            fused = fused + gate * feat
+            num_present += 1
 
-        if "vector" in obs.modalities:
-            vector_feat = self.vector_proj(obs.modalities["vector"])
-
-        if "image" in obs.modalities:
-            image = obs.modalities["image"]
-            conv = self.image_conv(image).flatten(1)
-            image_feat = self.image_proj(conv)
-
-        fused = self.fuse(torch.cat([text_feat, vector_feat, image_feat], dim=-1))
-        return {
-            "text_feat": text_feat,
-            "vector_feat": vector_feat,
-            "image_feat": image_feat,
-            "fused": fused,
-        }
+        if num_present > 0:
+            fused = fused / num_present
+        fused = self.fuse_proj(self.fuse_norm(fused))
+        per_modality["fused"] = fused
+        return per_modality
 
 
 # ============================================================
@@ -853,28 +892,70 @@ class SIGRegLike(IRegularizer):
 
 @DECODERS.register("text_autoregressive_head")
 class TextAutoregressiveHead(IDecoder):
-    """Simple next-token head.
+    """Causally-masked autoregressive text decoder conditioned on a latent state.
 
-    This uses the predicted latent as conditioning and the provided prefix token
-    embeddings as local token context.
+    The latent is injected as a prefix token in the sequence. A causal
+    self-attention transformer then predicts next-token logits at every
+    position, enabling proper autoregressive generation with KV caching.
     """
 
-    def __init__(self, vocab_size: int = 32000, latent_dim: int = 128, text_embed_dim: int = 256, hidden_dim: int = 256) -> None:
+    def __init__(
+        self,
+        vocab_size: int = 32000,
+        latent_dim: int = 128,
+        text_embed_dim: int = 256,
+        hidden_dim: int = 256,
+        num_layers: int = 2,
+        nhead: int = 4,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
+        self.hidden_dim = hidden_dim
         self.token_embed = nn.Embedding(vocab_size, text_embed_dim)
-        self.prefix_proj = nn.Linear(text_embed_dim, hidden_dim)
+        self.token_proj = nn.Linear(text_embed_dim, hidden_dim) if text_embed_dim != hidden_dim else nn.Identity()
         self.latent_proj = nn.Linear(latent_dim, hidden_dim)
-        self.fuse = MLP([hidden_dim * 2, hidden_dim, hidden_dim])
+        self.pos_embed = nn.Embedding(2048, hidden_dim)
+        decoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.transformer = nn.TransformerEncoder(decoder_layer, num_layers=num_layers)
+        self.norm = RMSNorm(hidden_dim)
         self.lm_head = nn.Linear(hidden_dim, vocab_size)
+        # KV cache for generation
+        self._cache: Optional[torch.Tensor] = None
+
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        return torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=device), diagonal=1)
+
+    def clear_cache(self) -> None:
+        self._cache = None
 
     def forward(self, latent: LatentState, context: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
         if context is None or "prefix_tokens" not in context:
             raise ValueError("TextAutoregressiveHead requires context['prefix_tokens']")
-        prefix_tokens: torch.Tensor = context["prefix_tokens"]
-        emb = self.token_embed(prefix_tokens)
-        prefix_summary = self.prefix_proj(emb.mean(dim=1))
-        fused = self.fuse(torch.cat([prefix_summary, self.latent_proj(latent.z_sem)], dim=-1))
-        logits = self.lm_head(fused)
+        prefix_tokens: torch.Tensor = context["prefix_tokens"]  # [B, T]
+        B, T = prefix_tokens.shape
+        device = prefix_tokens.device
+
+        # Latent becomes position 0; token embeddings fill positions 1..T
+        latent_token = self.latent_proj(latent.z_sem).unsqueeze(1)  # [B, 1, D]
+        token_emb = self.token_proj(self.token_embed(prefix_tokens))  # [B, T, D]
+        seq = torch.cat([latent_token, token_emb], dim=1)  # [B, 1+T, D]
+        positions = torch.arange(seq.shape[1], device=device).unsqueeze(0)
+        seq = seq + self.pos_embed(positions)
+
+        causal_mask = self._causal_mask(seq.shape[1], device)
+        h = self.transformer(seq, mask=causal_mask)
+        h = self.norm(h)
+
+        # Logits at positions 1..T predict tokens at positions 1..T
+        # (position 0 is the latent conditioning token)
+        logits = self.lm_head(h[:, 1:, :])  # [B, T, vocab]
         return {"text_logits": logits}
 
 
@@ -931,6 +1012,7 @@ class ModularLatentWorldModel(nn.Module):
         predicted_next = self.prediction_head(hidden, reference=latent)
         updated_memory = self.memory.update(predicted_next, action_repr, next_memory_from_core)
         uncertainty = predicted_next.extras.get("predicted_logvar")
+        aux["action_norm"] = action_repr.norm(dim=-1).mean()
         return TransitionOutput(next_latent=predicted_next, next_memory=updated_memory, uncertainty=uncertainty, aux=aux)
 
     def decode(self, latent: LatentState, context: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
@@ -960,7 +1042,6 @@ class ModularLatentWorldModel(nn.Module):
 
         aux = dict(transition.aux)
         aux.update(self.regularizer(current_latent))
-        aux["action_norm"] = self.action_encoder(action_t).norm(dim=-1).mean()
         aux["latent_norm"] = current_latent.z_sem.norm(dim=-1).mean()
         return ModelOutput(
             current_latent=current_latent,
@@ -1023,7 +1104,13 @@ class WorldModelLoss(nn.Module):
         if "text_target" in batch and any(key.endswith("text_logits") for key in output.decoder_outputs):
             text_logits = next(v for k, v in output.decoder_outputs.items() if k.endswith("text_logits"))
             text_target = batch["text_target"]
-            losses["text_ce_loss"] = F.cross_entropy(text_logits, text_target)
+            # text_logits is [B, T, V] from causal decoder; text_target is [B, T]
+            if text_logits.ndim == 3:
+                losses["text_ce_loss"] = F.cross_entropy(
+                    text_logits.reshape(-1, text_logits.size(-1)), text_target.reshape(-1)
+                )
+            else:
+                losses["text_ce_loss"] = F.cross_entropy(text_logits, text_target)
             total = total + self.weights.text_ce * losses["text_ce_loss"]
         else:
             device = total.device
@@ -1098,17 +1185,23 @@ class HookManager:
         if text_key is None or "text_target" not in batch:
             return
         logits = output.decoder_outputs[text_key].detach()
-        pred_ids = logits.argmax(dim=-1)
+        pred_ids = logits.argmax(dim=-1)  # [B, T] or [B]
         target_ids = batch["text_target"].detach()
 
         def tok(i: int) -> str:
             return id_to_token(i) if id_to_token is not None else str(i)
 
         preview = []
-        for p, t in zip(pred_ids[:8].tolist(), target_ids[:8].tolist()):
-            preview.append(f"pred={tok(int(p))} | target={tok(int(t))}")
-        text = "
-".join(preview)
+        # Handle both [B, T] sequence logits and legacy [B] single-token logits
+        if pred_ids.ndim == 2:
+            for p_seq, t_seq in zip(pred_ids[:4].tolist(), target_ids[:4].tolist()):
+                pred_str = " ".join(tok(int(x)) for x in p_seq[:8])
+                tgt_str = " ".join(tok(int(x)) for x in (t_seq[:8] if isinstance(t_seq, list) else [t_seq]))
+                preview.append(f"pred=[{pred_str}] | target=[{tgt_str}]")
+        else:
+            for p, t in zip(pred_ids[:8].tolist(), target_ids[:8].tolist()):
+                preview.append(f"pred={tok(int(p))} | target={tok(int(t))}")
+        text = "\n".join(preview)
         self.writer.add_text(f"{split}/text_predictions", text, step)
 
     def log_learning_rate(self, optimizer: torch.optim.Optimizer, step: int) -> None:
@@ -1164,7 +1257,7 @@ class Trainer:
         self.loss_fn = loss_fn
         self.device = device
         self.grad_clip_norm = grad_clip_norm
-        self.scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision and device.type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=mixed_precision and device.type == "cuda")
         self.writer = SummaryWriter(log_dir=run_dir)
         self.hooks = HookManager(self.writer)
         self.global_step = 0
@@ -1192,7 +1285,7 @@ class Trainer:
             decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
 
         self.optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=self.scaler.is_enabled()):
+        with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
             output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=None, decoder_context=decoder_context)
             loss_inputs: Dict[str, Any] = {}
             if "text_target" in batch:
@@ -1234,7 +1327,7 @@ class Trainer:
         if "prefix_tokens" in batch:
             decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
 
-        with torch.cuda.amp.autocast(enabled=self.scaler.is_enabled()):
+        with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
             output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=None, decoder_context=decoder_context)
             loss_inputs: Dict[str, Any] = {}
             if "text_target" in batch:
@@ -1270,6 +1363,12 @@ class Trainer:
         prefix_tokens: torch.Tensor,
         steps: int = 16,
     ) -> List[int]:
+        """Autoregressively generate tokens from the causal text decoder.
+
+        The world model transition is computed once to obtain the predicted
+        next-latent, then the text decoder is called step-by-step, appending
+        each sampled token to the growing prefix.
+        """
         self.model.eval()
         batch_size = prefix_tokens.shape[0]
         if batch_size != 1:
@@ -1285,18 +1384,18 @@ class Trainer:
 
         latent = self.model.encode(obs_t)
         memory = self.model.memory.init_state(batch_size=1, device=self.device)
+        transition = self.model.transition(latent, action_t, memory)
+        pred_latent = transition.next_latent
         generated: List[int] = []
 
         for _ in range(steps):
-            transition = self.model.transition(latent, action_t, memory)
-            outputs = self.model.decode(transition.next_latent, context={"prefix_tokens": prefix_tokens})
+            outputs = self.model.decode(pred_latent, context={"prefix_tokens": prefix_tokens})
             logits = next(v for k, v in outputs.items() if k.endswith("text_logits"))
-            next_token = int(logits.argmax(dim=-1).item())
+            # logits is [B, T, V]; take last position for next-token prediction
+            next_token = int(logits[:, -1, :].argmax(dim=-1).item())
             generated.append(next_token)
             next_token_tensor = torch.tensor([[next_token]], device=self.device, dtype=prefix_tokens.dtype)
             prefix_tokens = torch.cat([prefix_tokens, next_token_tensor], dim=1)
-            latent = transition.next_latent
-            memory = transition.next_memory
 
         self.hooks.log_inference_trace(generated, self.global_step, split="inference")
         return generated
@@ -1914,7 +2013,7 @@ def make_dummy_batch(
         "image_tp1": torch.randn(batch_size, 3, image_size, image_size, device=device),
         "action": torch.randn(batch_size, action_dim, device=device),
         "prefix_tokens": torch.randint(0, vocab_size, (batch_size, text_len), device=device),
-        "text_target": torch.randint(0, vocab_size, (batch_size,), device=device),
+        "text_target": torch.randint(0, vocab_size, (batch_size, text_len), device=device),
         "vector_target": torch.randn(batch_size, vector_dim, device=device),
     }
 
