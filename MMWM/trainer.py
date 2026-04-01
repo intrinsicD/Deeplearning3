@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from .containers import MemoryState, ObservationPacket
+from .curriculum import CurriculumPhase
 from .losses import WorldModelLoss
 from .model import ModularLatentWorldModel
 from .monitoring import HookManager
@@ -35,6 +36,18 @@ class Trainer:
         self.writer = SummaryWriter(log_dir=run_dir)
         self.hooks = HookManager(self.writer)
         self.global_step = 0
+        self.curriculum: Optional[List[CurriculumPhase]] = None
+
+    def set_curriculum(self, phases: List["CurriculumPhase"]) -> None:
+        self.curriculum = phases
+
+    def _active_phase(self) -> Optional["CurriculumPhase"]:
+        if not self.curriculum:
+            return None
+        for phase in self.curriculum:
+            if self.global_step < phase.until_step:
+                return phase
+        return self.curriculum[-1]
 
     def _to_packet(self, batch: Mapping[str, Any], suffix: str) -> ObservationPacket:
         modalities: Dict[str, torch.Tensor] = {}
@@ -58,6 +71,9 @@ class Trainer:
         if "prefix_tokens" in batch:
             decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
 
+        phase = self._active_phase()
+        task_multipliers = phase.task_multipliers if phase is not None else None
+
         self.optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
             output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=None, decoder_context=decoder_context)
@@ -66,7 +82,7 @@ class Trainer:
                 loss_inputs["text_target"] = batch["text_target"].to(self.device)
             if "vector_target" in batch:
                 loss_inputs["vector_target"] = batch["vector_target"].to(self.device)
-            losses = self.loss_fn(output, loss_inputs)
+            losses = self.loss_fn(output, loss_inputs, task_multipliers=task_multipliers)
             total_loss = losses["total_loss"]
 
         self.scaler.scale(total_loss).backward()
@@ -87,6 +103,9 @@ class Trainer:
         self.hooks.log_embeddings(output, self.global_step, split="train")
 
         result = {k: float(v.detach().cpu().item()) for k, v in losses.items()}
+        if phase is not None:
+            result["curriculum_phase"] = float(phase.phase_id)
+            self.writer.add_scalar("train/curriculum_phase", phase.phase_id, self.global_step)
         self.global_step += 1
         return result
 
@@ -108,7 +127,9 @@ class Trainer:
                 loss_inputs["text_target"] = batch["text_target"].to(self.device)
             if "vector_target" in batch:
                 loss_inputs["vector_target"] = batch["vector_target"].to(self.device)
-            losses = self.loss_fn(output, loss_inputs)
+            phase = self._active_phase()
+            task_multipliers = phase.task_multipliers if phase is not None else None
+            losses = self.loss_fn(output, loss_inputs, task_multipliers=task_multipliers)
 
         self.hooks.log_losses(losses, self.global_step, split="eval")
         self.hooks.log_aux(output.aux, self.global_step, split="eval")

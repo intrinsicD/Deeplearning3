@@ -204,3 +204,62 @@ class RecurrentAttnResTransformerTransitionCore(ITransitionCore):
             "recurrent_hidden_norm": current.norm(dim=-1).mean(),
         })
         return current, result_aux
+
+
+@TRANSITION_CORES.register("mod_recurrent_attnres_transformer")
+class MoDRecurrentAttnResTransformerTransitionCore(ITransitionCore):
+    """Mixture-of-Depth over latent dimensions using surprise routing."""
+
+    def __init__(
+        self,
+        input_dim: int = 512,
+        hidden_dim: int = 512,
+        recurrent_steps: int = 4,
+        route_ratio_init: float = 1.0,
+        route_ratio_final: float = 0.3,
+        route_warmup_steps: int = 5000,
+    ) -> None:
+        super().__init__()
+        self.core = RecurrentAttnResTransformerTransitionCore(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            recurrent_steps=recurrent_steps,
+        )
+        self.light = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.register_buffer("_step", torch.tensor(0, dtype=torch.long))
+        self.route_ratio_init = route_ratio_init
+        self.route_ratio_final = route_ratio_final
+        self.route_warmup_steps = route_warmup_steps
+
+    def _route_ratio(self) -> float:
+        step = int(self._step.item())
+        if step >= self.route_warmup_steps:
+            return self.route_ratio_final
+        progress = step / max(self.route_warmup_steps, 1)
+        return self.route_ratio_init - progress * (self.route_ratio_init - self.route_ratio_final)
+
+    def forward(self, conditioned_input: torch.Tensor, memory_state: MemoryState) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        hidden_heavy, aux = self.core(conditioned_input, memory_state)
+        hidden_light = conditioned_input + 0.1 * self.light(conditioned_input)
+
+        surprise = (hidden_heavy - conditioned_input).abs()
+        d = surprise.shape[-1]
+        k = max(1, int(self._route_ratio() * d))
+        _, topk = torch.topk(surprise, k=k, dim=-1)
+        mask = torch.zeros_like(surprise)
+        mask.scatter_(dim=-1, index=topk, value=1.0)
+
+        hidden = hidden_light + mask * (hidden_heavy - hidden_light)
+        self._step += 1
+        aux = dict(aux)
+        aux.update({
+            "mod_route_ratio": torch.tensor(self._route_ratio(), device=hidden.device),
+            "mod_surprise_mean": surprise.mean(),
+            "mod_routed_dims": mask.sum(dim=-1).float().mean(),
+        })
+        return hidden, aux

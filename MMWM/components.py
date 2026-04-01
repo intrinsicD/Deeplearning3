@@ -102,6 +102,45 @@ class GRUMemory(IMemory):
         return state.context
 
 
+@MEMORIES.register("mamba_ssm")
+class MambaSSMMemory(IMemory):
+    """Selective SSM-inspired memory with stable diagonal dynamics."""
+
+    def __init__(self, input_dim: int = 256, hidden_dim: int = 128, expansion: int = 2) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        inner_dim = hidden_dim * expansion
+        self.in_proj = nn.Linear(input_dim, inner_dim)
+        self.delta_proj = nn.Linear(inner_dim, hidden_dim)
+        self.b_proj = nn.Linear(inner_dim, hidden_dim)
+        self.c_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.a_log = nn.Parameter(torch.zeros(hidden_dim))
+
+    def init_state(self, batch_size: int, device: torch.device) -> MemoryState:
+        hidden = torch.zeros(batch_size, self.hidden_dim, device=device)
+        return MemoryState(context=hidden, hidden=hidden, extras={"memory_type": "mamba_ssm"})
+
+    def update(self, latent: LatentState, action_repr: torch.Tensor, state: MemoryState) -> MemoryState:
+        mem_part = latent.z_mem if latent.z_mem is not None else latent.z_sem
+        x = torch.cat([mem_part, action_repr], dim=-1)
+        prev = state.hidden
+        if prev is None:
+            raise RuntimeError("MambaSSMMemory requires state.hidden")
+
+        u = F.silu(self.in_proj(x))
+        delta = F.softplus(self.delta_proj(u))
+        a = -torch.exp(self.a_log).unsqueeze(0)
+        b = self.b_proj(u)
+        hidden = torch.exp(delta * a) * prev + delta * b
+        context = self.out_proj(F.silu(self.c_proj(hidden)))
+        return MemoryState(context=context, hidden=hidden, extras=dict(state.extras))
+
+    def read(self, state: MemoryState) -> torch.Tensor:
+        assert state.context is not None
+        return state.context
+
+
 # ============================================================
 # Action encoders
 # ============================================================
