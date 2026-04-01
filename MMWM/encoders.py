@@ -180,6 +180,151 @@ class SimpleMultimodalEncoder(IEncoder):
         return per_modality
 
 
+class TextTransformerSubEncoder(ModalitySubEncoder):
+    """Token-level causal transformer for structured text features."""
+
+    def __init__(self, vocab_size: int, embed_dim: int, hidden_dim: int, num_layers: int = 2, nhead: int = 4) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = nn.Embedding(2048, embed_dim)
+        self.input_proj = nn.Linear(embed_dim, hidden_dim) if embed_dim != hidden_dim else nn.Identity()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, nhead=nhead, dim_feedforward=hidden_dim * 4,
+            dropout=0.1, batch_first=True, activation="gelu",
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = RMSNorm(hidden_dim)
+
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        return torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=device), diagonal=1)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        B, T = x.shape
+        emb = self.embedding(x)
+        positions = torch.arange(T, device=x.device).unsqueeze(0)
+        emb = self.input_proj(emb + self.pos_embed(positions))
+        causal_mask = self._causal_mask(T, x.device)
+        h = self.transformer(emb, mask=causal_mask)
+        h = self.norm(h)
+        if mask is not None:
+            mask_f = mask.float().unsqueeze(-1)
+            return (h * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp_min(1.0)
+        return h.mean(dim=1)
+
+
+class CrossModalAttentionFusion(nn.Module):
+    """Cross-modal attention fusion replacing naive gated averaging.
+
+    Each modality attends to all other modalities, producing a richer fused
+    representation that captures inter-modal relationships.
+    """
+
+    def __init__(self, hidden_dim: int, nhead: int = 4, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.nhead = nhead
+        self.mha = nn.MultiheadAttention(hidden_dim, nhead, dropout=dropout, batch_first=True)
+        self.norm1 = RMSNorm(hidden_dim)
+        self.norm2 = RMSNorm(hidden_dim)
+        self.ffn = MLP([hidden_dim, hidden_dim * 2, hidden_dim])
+
+    def forward(self, modality_features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        if len(modality_features) == 0:
+            raise ValueError("CrossModalAttentionFusion requires at least one modality")
+        if len(modality_features) == 1:
+            return next(iter(modality_features.values()))
+        tokens = torch.stack(list(modality_features.values()), dim=1)  # [B, M, D]
+        attn_out, _ = self.mha(tokens, tokens, tokens)
+        tokens = self.norm1(tokens + attn_out)
+        tokens = self.norm2(tokens + self.ffn(tokens))
+        return tokens.mean(dim=1)  # [B, D]
+
+
+@ENCODERS.register("structured_multimodal")
+class StructuredMultimodalEncoder(IEncoder):
+    """Multimodal encoder with modality-specific structuring + cross-modal attention.
+
+    Text gets a causal transformer, images get slot attention, vectors get MLP.
+    Fusion uses cross-modal attention instead of naive gated averaging.
+    """
+
+    def __init__(
+        self,
+        text_vocab_size: int = 32000,
+        text_embed_dim: int = 256,
+        text_transformer_layers: int = 2,
+        text_nhead: int = 4,
+        vector_input_dim: int = 128,
+        image_channels: int = 3,
+        hidden_dim: int = 256,
+        n_slots: int = 8,
+        slot_dim: int = 128,
+        slot_iters: int = 3,
+        merge_threshold: float = 0.9,
+        fusion_nhead: int = 4,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        self.text_encoder = TextTransformerSubEncoder(
+            text_vocab_size, text_embed_dim, hidden_dim,
+            num_layers=text_transformer_layers, nhead=text_nhead,
+        )
+        self.vector_encoder = VectorSubEncoder(vector_input_dim, hidden_dim)
+        self.image_encoder = ImageSubEncoder(image_channels, hidden_dim)
+
+        self.image_tokenizer = nn.Sequential(
+            nn.Conv2d(image_channels, slot_dim, kernel_size=7, stride=4, padding=3),
+            nn.GELU(),
+            nn.Conv2d(slot_dim, slot_dim, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+        )
+        self.slot_attention = SlotAttentionBlock(n_slots=n_slots, d_input=slot_dim, d_slot=slot_dim, n_iters=slot_iters)
+        self.token_merger = TokenMerger(threshold=merge_threshold)
+        self.slot_proj = MLP([n_slots * slot_dim, hidden_dim, hidden_dim])
+
+        self.cross_modal_fusion = CrossModalAttentionFusion(hidden_dim, nhead=fusion_nhead)
+        self.fuse_norm = RMSNorm(hidden_dim)
+        self.fuse_proj = MLP([hidden_dim, hidden_dim * 2, hidden_dim])
+
+    def forward(self, obs: ObservationPacket) -> Dict[str, torch.Tensor]:
+        device = obs.device()
+        per_modality: Dict[str, torch.Tensor] = {}
+        fusion_inputs: Dict[str, torch.Tensor] = {}
+
+        if "text" in obs.modalities:
+            feat = self.text_encoder(obs.modalities["text"], obs.masks.get("text"))
+            per_modality["text_feat"] = feat
+            fusion_inputs["text"] = feat
+
+        if "vector" in obs.modalities:
+            feat = self.vector_encoder(obs.modalities["vector"], obs.masks.get("vector"))
+            per_modality["vector_feat"] = feat
+            fusion_inputs["vector"] = feat
+
+        if "image" in obs.modalities:
+            image = obs.modalities["image"]
+            cnn_feat = self.image_encoder(image)
+            per_modality["image_feat"] = cnn_feat
+
+            tokens = self.image_tokenizer(image).flatten(2).transpose(1, 2)
+            slots = self.slot_attention(tokens)
+            slots = self.token_merger(slots)
+            slot_feat = self.slot_proj(slots.flatten(1))
+            per_modality["image_slots"] = slot_feat
+            fusion_inputs["image"] = 0.5 * cnn_feat + 0.5 * slot_feat
+
+        if len(fusion_inputs) > 0:
+            fused = self.cross_modal_fusion(fusion_inputs)
+        else:
+            batch_size = next(iter(obs.modalities.values())).shape[0]
+            fused = torch.zeros(batch_size, self.hidden_dim, device=device)
+
+        fused = self.fuse_proj(self.fuse_norm(fused))
+        per_modality["fused"] = fused
+        return per_modality
+
+
 @ENCODERS.register("slot_multimodal")
 class SlotMultimodalEncoder(SimpleMultimodalEncoder):
     """SimpleMultimodalEncoder + object-centric slot path for images."""
