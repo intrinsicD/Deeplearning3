@@ -17,7 +17,7 @@ class CurriculumPhase:
 _ALL_TASK_KEYS = [
     "latent_sem_loss", "latent_dyn_loss", "latent_ctrl_loss", "latent_mem_loss",
     "regularizer_loss", "text_ce_loss", "vector_recon_loss",
-    "image_recon_loss", "audio_recon_loss",
+    "image_recon_loss", "audio_recon_loss", "contrastive_alignment_loss",
 ]
 
 
@@ -43,18 +43,21 @@ def default_curriculum_phases() -> List[CurriculumPhase]:
             latent_mem_loss=0.75, regularizer_loss=1.0,
             text_ce_loss=0.25, vector_recon_loss=0.25,
             image_recon_loss=0.25, audio_recon_loss=0.25,
+            contrastive_alignment_loss=0.25,
         )),
         CurriculumPhase(phase_id=4, until_step=10_000, task_multipliers=_mults(
             latent_sem_loss=1.0, latent_dyn_loss=1.0, latent_ctrl_loss=1.0,
             latent_mem_loss=1.0, regularizer_loss=1.0,
             text_ce_loss=0.75, vector_recon_loss=0.75,
             image_recon_loss=0.75, audio_recon_loss=0.75,
+            contrastive_alignment_loss=0.75,
         )),
         CurriculumPhase(phase_id=5, until_step=1_000_000_000, task_multipliers=_mults(
             latent_sem_loss=1.0, latent_dyn_loss=1.0, latent_ctrl_loss=1.0,
             latent_mem_loss=1.0, regularizer_loss=1.0,
             text_ce_loss=1.0, vector_recon_loss=1.0,
             image_recon_loss=1.0, audio_recon_loss=1.0,
+            contrastive_alignment_loss=1.0,
         )),
     ]
 
@@ -85,18 +88,21 @@ def relative_curriculum_phases(total_steps: int) -> List[CurriculumPhase]:
             latent_mem_loss=0.75, regularizer_loss=1.0,
             text_ce_loss=0.25, vector_recon_loss=0.25,
             image_recon_loss=0.25, audio_recon_loss=0.25,
+            contrastive_alignment_loss=0.25,
         )),
         CurriculumPhase(phase_id=4, until_step=boundaries[3], task_multipliers=_mults(
             latent_sem_loss=1.0, latent_dyn_loss=1.0, latent_ctrl_loss=1.0,
             latent_mem_loss=1.0, regularizer_loss=1.0,
             text_ce_loss=0.75, vector_recon_loss=0.75,
             image_recon_loss=0.75, audio_recon_loss=0.75,
+            contrastive_alignment_loss=0.75,
         )),
         CurriculumPhase(phase_id=5, until_step=boundaries[4], task_multipliers=_mults(
             latent_sem_loss=1.0, latent_dyn_loss=1.0, latent_ctrl_loss=1.0,
             latent_mem_loss=1.0, regularizer_loss=1.0,
             text_ce_loss=1.0, vector_recon_loss=1.0,
             image_recon_loss=1.0, audio_recon_loss=1.0,
+            contrastive_alignment_loss=1.0,
         )),
     ]
 
