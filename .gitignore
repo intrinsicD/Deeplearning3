@@ -10,3 +10,4 @@ build/
 *.ckpt
 checkpoints/
 eval_output/
+runs/
