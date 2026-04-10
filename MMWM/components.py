@@ -33,16 +33,16 @@ from .interfaces import (
 
 @LATENT_PROJECTORS.register("role_split_mlp")
 class RoleSplitLatentProjector(ILatentProjector):
-    def __init__(self, input_dim: int = 256, latent_dim: int = 128, use_batchnorm: bool = True) -> None:
+    def __init__(self, input_dim: int = 256, latent_dim: int = 128, use_norm: bool = True) -> None:
         super().__init__()
         self.sem = nn.Linear(input_dim, latent_dim)
         self.dyn = nn.Linear(input_dim, latent_dim)
         self.ctrl = nn.Linear(input_dim, latent_dim)
         self.mem = nn.Linear(input_dim, latent_dim)
-        self.bn = nn.BatchNorm1d(input_dim) if use_batchnorm else nn.Identity()
+        self.norm = nn.LayerNorm(input_dim) if use_norm else nn.Identity()
 
     def forward(self, encoded: Dict[str, torch.Tensor]) -> LatentState:
-        fused = self.bn(encoded["fused"])
+        fused = self.norm(encoded["fused"])
         return LatentState(
             z_sem=self.sem(fused),
             z_dyn=self.dyn(fused),
@@ -66,13 +66,13 @@ class AdaptiveRoleSplitLatentProjector(ILatentProjector):
         input_dim: int = 256,
         latent_dim: int = 128,
         intermediate_dim: int = 512,
-        use_batchnorm: bool = True,
+        use_norm: bool = True,
         num_roles: int = 4,
     ) -> None:
         super().__init__()
         self.latent_dim = latent_dim
         self.num_roles = num_roles
-        self.bn = nn.BatchNorm1d(input_dim) if use_batchnorm else nn.Identity()
+        self.norm = nn.LayerNorm(input_dim) if use_norm else nn.Identity()
         self.shared_proj = MLP([input_dim, intermediate_dim, intermediate_dim])
         self.role_queries = nn.Parameter(torch.randn(num_roles, intermediate_dim) * 0.02)
         self.gate_proj = nn.Linear(intermediate_dim, intermediate_dim)
@@ -80,7 +80,7 @@ class AdaptiveRoleSplitLatentProjector(ILatentProjector):
         self.capacity_logits = nn.Parameter(torch.zeros(num_roles))
 
     def forward(self, encoded: Dict[str, torch.Tensor]) -> LatentState:
-        fused = self.bn(encoded["fused"])
+        fused = self.norm(encoded["fused"])
         shared = self.shared_proj(fused)  # [B, intermediate_dim]
 
         capacity_weights = torch.softmax(self.capacity_logits, dim=0)  # [num_roles]

@@ -11,7 +11,7 @@ from .containers import LatentPacket, ObservationPacket, ToolContext, ToolDescri
 from .curriculum import AdaptiveCurriculumScheduler, default_curriculum_phases, relative_curriculum_phases
 from .evaluation import EvaluationSuite
 from .losses import WorldModelLoss
-from .trainer import Trainer
+from .trainer import Trainer, build_lr_scheduler
 
 
 def make_dummy_batch(
@@ -61,7 +61,7 @@ def main() -> None:
             "input_dim": 256,
             "latent_dim": 128,
             "intermediate_dim": 512,
-            "use_batchnorm": True,
+            "use_norm": True,
         },
         memory_name="mamba_ssm",
         transition_core_name="mod_recurrent_attnres_transformer",
@@ -82,6 +82,7 @@ def main() -> None:
     )
     model = build_model(cfg)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = build_lr_scheduler(optimizer, total_steps=10_000, warmup_fraction=0.05)
     loss_fn = WorldModelLoss(learned_uncertainty=True)
     trainer = Trainer(
         model=model,
@@ -91,6 +92,7 @@ def main() -> None:
         run_dir="runs/modular_world_model",
         grad_clip_norm=1.0,
         mixed_precision=True,
+        lr_scheduler=scheduler,
     )
     # Use relative curriculum (adapts to total training steps)
     trainer.set_curriculum(relative_curriculum_phases(total_steps=10_000))
@@ -101,7 +103,7 @@ def main() -> None:
 
     for _ in range(10):
         batch = make_dummy_batch(device=device)
-        metrics = trainer.train_step(batch)
+        metrics, _ = trainer.train_step(batch)
         print({k: round(v, 4) for k, v in metrics.items() if not k.endswith("_log_var")})
 
     registry, engine, critical_buffer, promoter = build_tool_ecosystem(

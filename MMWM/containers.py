@@ -72,6 +72,19 @@ class MemoryState:
     hidden: Optional[Any] = None
     extras: Dict[str, Any] = field(default_factory=dict)
 
+    def detach(self) -> "MemoryState":
+        def _detach(x: Any) -> Any:
+            if isinstance(x, torch.Tensor):
+                return x.detach()
+            if isinstance(x, (tuple, list)):
+                return type(x)(_detach(item) for item in x)
+            return x
+        return MemoryState(
+            context=_detach(self.context),
+            hidden=_detach(self.hidden),
+            extras={k: _detach(v) for k, v in self.extras.items()},
+        )
+
 
 @dataclass
 class TransitionOutput:

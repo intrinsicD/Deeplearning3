@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+import tempfile
+
 import torch
 
 from MMWM.config import ModelConfig, build_model
-from MMWM.containers import LatentState, ModelOutput, ObservationPacket
+from MMWM.containers import LatentState, MemoryState, ModelOutput, ObservationPacket
 from MMWM.curriculum import (
     AdaptiveCurriculumScheduler,
     default_curriculum_phases,
@@ -15,7 +18,8 @@ from MMWM.evaluation import (
     ReconstructionMetrics,
     RolloutMetrics,
 )
-from MMWM.losses import WorldModelLoss
+from MMWM.losses import ContrastiveAlignmentLoss, WorldModelLoss
+from MMWM.trainer import Trainer, build_lr_scheduler
 
 
 def _dummy_output(batch_size: int = 2, latent_dim: int = 8) -> ModelOutput:
@@ -41,6 +45,32 @@ def _dummy_output(batch_size: int = 2, latent_dim: int = 8) -> ModelOutput:
         decoder_outputs={},
         aux={"regularizer_total": torch.tensor(0.1)},
     )
+
+
+def _small_model_cfg() -> ModelConfig:
+    """Minimal config for fast test execution."""
+    return ModelConfig(
+        encoder_name="simple_multimodal",
+        encoder_kwargs={"text_vocab_size": 256, "text_embed_dim": 32, "vector_input_dim": 16, "image_channels": 3, "hidden_dim": 32},
+        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_norm": False},
+        memory_kwargs={"input_dim": 32, "hidden_dim": 16},
+        action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
+        conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
+        transition_core_name="mlp",
+        transition_core_kwargs={"input_dim": 64, "hidden_dim": 64},
+        prediction_head_kwargs={"hidden_dim": 64, "latent_dim": 16},
+        decoder_configs=[],
+    )
+
+
+def _small_batch(batch_size: int = 2) -> dict:
+    return {
+        "text_t": torch.randint(0, 256, (batch_size, 6)),
+        "text_tp1": torch.randint(0, 256, (batch_size, 6)),
+        "vector_t": torch.randn(batch_size, 16),
+        "vector_tp1": torch.randn(batch_size, 16),
+        "action": torch.randn(batch_size, 8),
+    }
 
 
 def test_kendall_uncertainty_loss_produces_logvars() -> None:
@@ -70,7 +100,7 @@ def test_slot_mamba_mod_model_builds_and_runs_forward() -> None:
             "slot_iters": 2,
             "merge_threshold": 0.8,
         },
-        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_batchnorm": False},
+        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_norm": False},
         memory_name="mamba_ssm",
         memory_kwargs={"input_dim": 32, "hidden_dim": 16},
         action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
@@ -94,7 +124,7 @@ def test_slot_mamba_mod_model_builds_and_runs_forward() -> None:
 
 
 # ============================================================
-# New tests for concern fixes
+# Tests for concern fixes
 # ============================================================
 
 
@@ -104,7 +134,7 @@ def test_adaptive_role_split_projector() -> None:
         encoder_name="simple_multimodal",
         encoder_kwargs={"text_vocab_size": 256, "text_embed_dim": 32, "vector_input_dim": 16, "image_channels": 3, "hidden_dim": 32},
         latent_projector_name="adaptive_role_split_mlp",
-        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "intermediate_dim": 64, "use_batchnorm": False},
+        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "intermediate_dim": 64, "use_norm": False},
         memory_kwargs={"input_dim": 32, "hidden_dim": 16},
         action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
         conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
@@ -131,7 +161,7 @@ def test_structured_multimodal_encoder() -> None:
             "hidden_dim": 32, "n_slots": 4, "slot_dim": 16, "slot_iters": 2,
             "merge_threshold": 0.8, "fusion_nhead": 2,
         },
-        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_batchnorm": False},
+        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_norm": False},
         memory_kwargs={"input_dim": 32, "hidden_dim": 16},
         action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
         conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
@@ -187,20 +217,10 @@ def test_adaptive_curriculum_scheduler() -> None:
 
 def test_image_decoder_head() -> None:
     """Concern 5: Image decoder reconstructs from latent."""
-    cfg = ModelConfig(
-        encoder_name="simple_multimodal",
-        encoder_kwargs={"text_vocab_size": 256, "text_embed_dim": 32, "vector_input_dim": 16, "image_channels": 3, "hidden_dim": 32},
-        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_batchnorm": False},
-        memory_kwargs={"input_dim": 32, "hidden_dim": 16},
-        action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
-        conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
-        transition_core_name="mlp",
-        transition_core_kwargs={"input_dim": 64, "hidden_dim": 64},
-        prediction_head_kwargs={"hidden_dim": 64, "latent_dim": 16},
-        decoder_configs=[
-            ("image_reconstruction", {"latent_dim": 64, "base_channels": 32, "output_channels": 3, "output_size": 32}),
-        ],
-    )
+    cfg = _small_model_cfg()
+    cfg.decoder_configs = [
+        ("image_reconstruction", {"latent_dim": 64, "base_channels": 32, "output_channels": 3, "output_size": 32}),
+    ]
     model = build_model(cfg)
     packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
     action = torch.randn(2, 8)
@@ -211,20 +231,10 @@ def test_image_decoder_head() -> None:
 
 def test_audio_decoder_head() -> None:
     """Concern 6: Audio decoder reconstructs from latent."""
-    cfg = ModelConfig(
-        encoder_name="simple_multimodal",
-        encoder_kwargs={"text_vocab_size": 256, "text_embed_dim": 32, "vector_input_dim": 16, "image_channels": 3, "hidden_dim": 32},
-        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_batchnorm": False},
-        memory_kwargs={"input_dim": 32, "hidden_dim": 16},
-        action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
-        conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
-        transition_core_name="mlp",
-        transition_core_kwargs={"input_dim": 64, "hidden_dim": 64},
-        prediction_head_kwargs={"hidden_dim": 64, "latent_dim": 16},
-        decoder_configs=[
-            ("audio_reconstruction", {"latent_dim": 64, "base_channels": 32, "output_channels": 1, "output_length": 256}),
-        ],
-    )
+    cfg = _small_model_cfg()
+    cfg.decoder_configs = [
+        ("audio_reconstruction", {"latent_dim": 64, "base_channels": 32, "output_channels": 1, "output_length": 256}),
+    ]
     model = build_model(cfg)
     packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
     action = torch.randn(2, 8)
@@ -285,10 +295,173 @@ def test_image_recon_loss_in_world_model_loss() -> None:
     assert losses["image_recon_loss"].item() > 0
 
 
-def test_curriculum_includes_image_audio_multipliers() -> None:
-    """Curriculum phases include image/audio multipliers."""
+def test_curriculum_includes_image_audio_contrastive_multipliers() -> None:
+    """Curriculum phases include image/audio/contrastive multipliers."""
     phases = default_curriculum_phases()
     phase5 = phases[-1]
     assert "image_recon_loss" in phase5.task_multipliers
     assert "audio_recon_loss" in phase5.task_multipliers
+    assert "contrastive_alignment_loss" in phase5.task_multipliers
     assert phase5.task_multipliers["image_recon_loss"] == 1.0
+    assert phase5.task_multipliers["contrastive_alignment_loss"] == 1.0
+    # Contrastive loss is 0 in early phases
+    assert phases[0].task_multipliers["contrastive_alignment_loss"] == 0.0
+    assert phases[1].task_multipliers["contrastive_alignment_loss"] == 0.0
+    # Introduced in phase 3
+    assert phases[2].task_multipliers["contrastive_alignment_loss"] == 0.25
+
+
+# ============================================================
+# New tests for review blocker fixes
+# ============================================================
+
+
+def test_memory_propagation_in_train_step() -> None:
+    """Blocker 2: Memory state is propagated across train_step calls."""
+    model = build_model(_small_model_cfg())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_fn = WorldModelLoss()
+    trainer = Trainer(model=model, optimizer=optimizer, loss_fn=loss_fn, device=torch.device("cpu"), mixed_precision=False)
+
+    batch = _small_batch()
+    metrics1, memory1 = trainer.train_step(batch)
+    assert memory1 is not None
+    # Second step uses the returned memory
+    metrics2, memory2 = trainer.train_step(batch, memory_state=memory1.detach())
+    assert memory2 is not None
+    assert "total_loss" in metrics2
+
+
+def test_checkpoint_save_load() -> None:
+    """Blocker 3: Checkpoint save and load restores full state."""
+    cfg = _small_model_cfg()
+    model = build_model(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_fn = WorldModelLoss(learned_uncertainty=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        trainer = Trainer(model=model, optimizer=optimizer, loss_fn=loss_fn, device=torch.device("cpu"), run_dir=tmpdir, mixed_precision=False)
+        batch = _small_batch()
+        trainer.train_step(batch)
+        trainer.train_step(batch)
+        assert trainer.global_step == 2
+
+        path = trainer.save_checkpoint()
+        assert os.path.exists(path)
+
+        # Create a fresh trainer and load
+        model2 = build_model(cfg)
+        optimizer2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
+        loss_fn2 = WorldModelLoss(learned_uncertainty=True)
+        trainer2 = Trainer(model=model2, optimizer=optimizer2, loss_fn=loss_fn2, device=torch.device("cpu"), run_dir=tmpdir, mixed_precision=False)
+        trainer2.load_checkpoint(path)
+        assert trainer2.global_step == 2
+
+
+def test_lr_scheduler_integration() -> None:
+    """Blocker 6: LR scheduler steps with training."""
+    model = build_model(_small_model_cfg())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = build_lr_scheduler(optimizer, total_steps=100, warmup_fraction=0.1)
+    loss_fn = WorldModelLoss()
+    trainer = Trainer(model=model, optimizer=optimizer, loss_fn=loss_fn, device=torch.device("cpu"), mixed_precision=False, lr_scheduler=scheduler)
+
+    initial_lr = optimizer.param_groups[0]["lr"]
+    batch = _small_batch()
+    # During warmup, LR should increase
+    for _ in range(5):
+        trainer.train_step(batch)
+    warmup_lr = optimizer.param_groups[0]["lr"]
+    # After a few warmup steps, LR should be higher than initial (which starts at 0)
+    assert warmup_lr > 0
+
+
+def test_layernorm_replaces_batchnorm() -> None:
+    """Blocker 8: LayerNorm works with batch_size=1."""
+    cfg = _small_model_cfg()
+    cfg.latent_projector_kwargs = {"input_dim": 32, "latent_dim": 16, "use_norm": True}
+    model = build_model(cfg)
+    # batch_size=1 should work (would fail with BatchNorm)
+    packet = ObservationPacket(modalities={"vector": torch.randn(1, 16)})
+    action = torch.randn(1, 8)
+    out = model(packet, action, obs_tp1=packet)
+    assert out.predicted_next_latent.z_sem.shape == (1, 16)
+
+
+def test_contrastive_alignment_loss() -> None:
+    """Blocker 9: InfoNCE contrastive loss for cross-modal alignment."""
+    loss_fn = ContrastiveAlignmentLoss(temperature=0.07)
+    feat_a = torch.randn(8, 32)
+    feat_b = torch.randn(8, 32)
+    loss = loss_fn(feat_a, feat_b)
+    assert loss.shape == ()
+    assert loss.item() > 0
+    # Same features should have lower loss
+    loss_same = loss_fn(feat_a, feat_a)
+    assert loss_same.item() < loss.item()
+
+
+def test_contrastive_loss_in_world_model_loss() -> None:
+    """Contrastive loss is computed when multiple modality features are present."""
+    loss_fn = WorldModelLoss(learned_uncertainty=False)
+    output = _dummy_output(batch_size=4)
+    # Add per-modality features to extras
+    output.current_latent.extras["text_feat"] = torch.randn(4, 8)
+    output.current_latent.extras["vector_feat"] = torch.randn(4, 8)
+    losses = loss_fn(output, {})
+    assert "contrastive_alignment_loss" in losses
+    assert losses["contrastive_alignment_loss"].item() > 0
+
+
+def test_memory_state_detach() -> None:
+    """MemoryState.detach() cuts the computation graph."""
+    ctx = torch.randn(2, 8, requires_grad=True)
+    hidden = torch.randn(2, 8, requires_grad=True)
+    ms = MemoryState(context=ctx, hidden=hidden, extras={"extra_t": torch.randn(2, 4, requires_grad=True)})
+    detached = ms.detach()
+    assert not detached.context.requires_grad
+    assert not detached.hidden.requires_grad
+    assert not detached.extras["extra_t"].requires_grad
+
+
+def test_sequence_level_training() -> None:
+    """Blocker 4: Sequence-level training (BPTT) runs end-to-end."""
+    model = build_model(_small_model_cfg())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_fn = WorldModelLoss()
+    trainer = Trainer(model=model, optimizer=optimizer, loss_fn=loss_fn, device=torch.device("cpu"), mixed_precision=False)
+
+    T = 4  # 4 transitions → 5 timesteps
+    B = 2
+    batch_seq = {
+        "vector_seq": torch.randn(B, T + 1, 16),
+        "action_seq": torch.randn(B, T, 8),
+    }
+    metrics = trainer.train_sequence_step(batch_seq, window_length=2)
+    assert "total_loss" in metrics
+    assert metrics["sequence_length"] == T
+
+
+def test_gradient_checkpointing_flag() -> None:
+    """Blocker: Gradient checkpointing option on RecurrentAttnRes."""
+    cfg = ModelConfig(
+        encoder_name="simple_multimodal",
+        encoder_kwargs={"text_vocab_size": 256, "text_embed_dim": 32, "vector_input_dim": 16, "image_channels": 3, "hidden_dim": 32},
+        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_norm": False},
+        memory_kwargs={"input_dim": 32, "hidden_dim": 16},
+        action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
+        conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
+        transition_core_name="recurrent_attnres_transformer",
+        transition_core_kwargs={"input_dim": 64, "hidden_dim": 64, "recurrent_steps": 2, "gradient_checkpointing": True},
+        prediction_head_kwargs={"hidden_dim": 64, "latent_dim": 16},
+        decoder_configs=[],
+    )
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
+    action = torch.randn(2, 8)
+    out = model(packet, action, obs_tp1=packet)
+    assert out.predicted_next_latent.z_sem.shape == (2, 16)
+    # Verify gradient flows
+    loss = out.predicted_next_latent.z_sem.sum()
+    loss.backward()
+    assert any(p.grad is not None for p in model.parameters())

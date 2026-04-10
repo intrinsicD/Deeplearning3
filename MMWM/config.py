@@ -64,7 +64,7 @@ class ModelConfig:
     latent_projector_kwargs: Dict[str, Any] = field(default_factory=lambda: {
         "input_dim": 256,
         "latent_dim": 128,
-        "use_batchnorm": True,
+        "use_norm": True,
     })
 
     memory_name: str = "gru"

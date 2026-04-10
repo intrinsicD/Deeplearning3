@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 from .containers import MemoryState
 from .helpers import (
@@ -158,6 +159,7 @@ class RecurrentAttnResTransformerTransitionCore(ITransitionCore):
         recurrent_steps: int = 4,
         halt_threshold: float = 0.5,
         adapter_rank: int = 8,
+        gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.core = AttnResTransformerTransitionCore(
@@ -170,10 +172,18 @@ class RecurrentAttnResTransformerTransitionCore(ITransitionCore):
         )
         self.recurrent_steps = recurrent_steps
         self.halt_threshold = halt_threshold
+        self.gradient_checkpointing = gradient_checkpointing
         self.hyper_adapter = LowRankHyperAdapter(hidden_dim, rank=adapter_rank)
         self.halting = AdaptiveHaltingHead(hidden_dim)
         self.input_proj = nn.Linear(input_dim, hidden_dim) if input_dim != hidden_dim else nn.Identity()
         self.silent_thought_scale = nn.Parameter(torch.tensor(0.1))
+
+    def _core_step(self, current: torch.Tensor, memory_state: MemoryState) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Single recurrent step — wrapped by gradient checkpointing when enabled."""
+        core_hidden, aux = self.core(current, memory_state)
+        core_hidden = self.hyper_adapter(core_hidden)
+        core_hidden = current + self.silent_thought_scale * (core_hidden - current)
+        return core_hidden, aux
 
     def forward(self, conditioned_input: torch.Tensor, memory_state: MemoryState) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         current = self.input_proj(conditioned_input)
@@ -182,9 +192,12 @@ class RecurrentAttnResTransformerTransitionCore(ITransitionCore):
         last_aux: Dict[str, torch.Tensor] = {}
 
         for step in range(self.recurrent_steps):
-            core_hidden, aux = self.core(current, memory_state)
-            core_hidden = self.hyper_adapter(core_hidden)
-            core_hidden = current + self.silent_thought_scale * (core_hidden - current)
+            if self.gradient_checkpointing and self.training:
+                core_hidden, aux = grad_checkpoint(
+                    self._core_step, current, memory_state, use_reentrant=False,
+                )
+            else:
+                core_hidden, aux = self._core_step(current, memory_state)
 
             halt_logit = self.halting(core_hidden).squeeze(-1)
             should_halt = torch.sigmoid(halt_logit) > self.halt_threshold

@@ -27,6 +27,7 @@ from .curriculum import (
 from .evaluation import EvalResult, EvaluationSuite
 from .losses import LossWeights, WorldModelLoss
 from .model import ModularLatentWorldModel
+from .trainer import build_lr_scheduler
 
 __all__ = [
     "AdaptiveCurriculumScheduler",
@@ -46,6 +47,7 @@ __all__ = [
     "CurriculumPhase",
     "TransitionOutput",
     "WorldModelLoss",
+    "build_lr_scheduler",
     "build_model",
     "build_tool_ecosystem",
     "default_curriculum_phases",

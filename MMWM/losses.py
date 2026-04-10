@@ -12,6 +12,29 @@ import torch.nn.functional as F
 from .containers import ModelOutput
 
 
+class ContrastiveAlignmentLoss(nn.Module):
+    """InfoNCE contrastive loss for cross-modal alignment."""
+
+    def __init__(self, temperature: float = 0.07) -> None:
+        super().__init__()
+        self.log_temperature = nn.Parameter(torch.tensor(float(temperature)).log())
+
+    def forward(self, feat_a: torch.Tensor, feat_b: torch.Tensor) -> torch.Tensor:
+        """Compute symmetric InfoNCE between two batches of features [B, D].
+
+        Returns zero for batch_size < 2 since InfoNCE needs negatives.
+        """
+        if feat_a.shape[0] < 2:
+            return torch.zeros((), device=feat_a.device, dtype=feat_a.dtype)
+        a = F.normalize(feat_a, dim=-1)
+        b = F.normalize(feat_b, dim=-1)
+        temperature = self.log_temperature.exp().clamp(min=0.01, max=1.0)
+        logits = a @ b.T / temperature  # [B, B]
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        loss = 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
+        return loss
+
+
 @dataclass
 class LossWeights:
     latent_sem: float = 1.0
@@ -23,6 +46,7 @@ class LossWeights:
     vector_recon: float = 0.0
     image_recon: float = 1.0
     audio_recon: float = 1.0
+    contrastive_alignment: float = 1.0
 
 
 class WorldModelLoss(nn.Module):
@@ -36,6 +60,7 @@ class WorldModelLoss(nn.Module):
         self.weights = weights or LossWeights()
         self.learned_uncertainty = learned_uncertainty
         self.regularizer_min_weight = regularizer_min_weight
+        self.contrastive_loss_fn = ContrastiveAlignmentLoss()
         if learned_uncertainty:
             self.log_vars = nn.ParameterDict({
                 "latent_sem_loss": nn.Parameter(torch.zeros(())),
@@ -47,6 +72,7 @@ class WorldModelLoss(nn.Module):
                 "vector_recon_loss": nn.Parameter(torch.zeros(())),
                 "image_recon_loss": nn.Parameter(torch.zeros(())),
                 "audio_recon_loss": nn.Parameter(torch.zeros(())),
+                "contrastive_alignment_loss": nn.Parameter(torch.zeros(())),
             })
 
     @staticmethod
@@ -133,6 +159,25 @@ class WorldModelLoss(nn.Module):
         else:
             losses["audio_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
 
+        # Contrastive alignment loss across modalities
+        contrastive_w = self._safe_multiplier(task_multipliers, "contrastive_alignment_loss", base_device, base_dtype)
+        extras = output.current_latent.extras
+        modality_feats = {k: v for k, v in extras.items()
+                         if isinstance(v, torch.Tensor) and k.endswith("_feat") and v.ndim == 2}
+        if len(modality_feats) >= 2:
+            feat_names = sorted(modality_feats.keys())
+            contrastive_total = torch.zeros((), device=base_device, dtype=base_dtype)
+            n_pairs = 0
+            for i in range(len(feat_names)):
+                for j in range(i + 1, len(feat_names)):
+                    contrastive_total = contrastive_total + self.contrastive_loss_fn(
+                        modality_feats[feat_names[i]], modality_feats[feat_names[j]],
+                    )
+                    n_pairs += 1
+            losses["contrastive_alignment_loss"] = contrastive_total / max(n_pairs, 1)
+        else:
+            losses["contrastive_alignment_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+
         weighted_losses = {
             "latent_sem_loss": self.weights.latent_sem * sem_w * losses["latent_sem_loss"],
             "latent_dyn_loss": self.weights.latent_dyn * dyn_w * losses["latent_dyn_loss"],
@@ -143,12 +188,14 @@ class WorldModelLoss(nn.Module):
             "vector_recon_loss": self.weights.vector_recon * vec_w * losses["vector_recon_loss"],
             "image_recon_loss": self.weights.image_recon * img_w * losses["image_recon_loss"],
             "audio_recon_loss": self.weights.audio_recon * audio_w * losses["audio_recon_loss"],
+            "contrastive_alignment_loss": self.weights.contrastive_alignment * contrastive_w * losses["contrastive_alignment_loss"],
         }
 
         if self.learned_uncertainty:
             total = torch.zeros((), device=losses["regularizer_loss"].device, dtype=losses["regularizer_loss"].dtype)
             for name, task_loss in weighted_losses.items():
-                log_var = self.log_vars[name]
+                # Clamp log_var to [-6, 10] to prevent divergence when task_loss is zero
+                log_var = self.log_vars[name].clamp(-6.0, 10.0)
                 effective_weight = 0.5 * torch.exp(-log_var)
                 # Clamp regularizer weight to prevent anti-collapse from being disabled
                 if name == "regularizer_loss":
