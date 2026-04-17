@@ -157,6 +157,11 @@ class SimpleMultimodalEncoder(IEncoder):
         )
 
     def forward(self, obs: ObservationPacket) -> Dict[str, torch.Tensor]:
+        if not obs.modalities:
+            raise ValueError(
+                "SimpleMultimodalEncoder.forward received an ObservationPacket "
+                "with no modalities; cannot infer batch size or produce features."
+            )
         device = obs.device()
         batch_size = next(iter(obs.modalities.values())).shape[0]
 
@@ -173,8 +178,16 @@ class SimpleMultimodalEncoder(IEncoder):
             fused = fused + gate * feat
             num_present += 1
 
-        if num_present > 0:
-            fused = fused / num_present
+        # Defensive: every modality in obs may still be unknown to this encoder
+        # (caller passed e.g. {"audio": ...} but no audio sub-encoder is registered).
+        if num_present == 0:
+            known = sorted(self.sub_encoders.keys())
+            got = sorted(obs.modalities.keys())
+            raise ValueError(
+                f"SimpleMultimodalEncoder received modalities {got} but none "
+                f"match its registered sub-encoders {known}."
+            )
+        fused = fused / num_present
         fused = self.fuse_proj(self.fuse_norm(fused))
         per_modality["fused"] = fused
         return per_modality

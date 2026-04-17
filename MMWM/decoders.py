@@ -30,13 +30,15 @@ class TextAutoregressiveHead(IDecoder):
         num_layers: int = 2,
         nhead: int = 4,
         dropout: float = 0.1,
+        max_seq_len: int = 2048,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.max_seq_len = max_seq_len
         self.token_embed = nn.Embedding(vocab_size, text_embed_dim)
         self.token_proj = nn.Linear(text_embed_dim, hidden_dim) if text_embed_dim != hidden_dim else nn.Identity()
         self.latent_proj = nn.Linear(latent_dim, hidden_dim)
-        self.pos_embed = nn.Embedding(2048, hidden_dim)
+        self.pos_embed = nn.Embedding(max_seq_len, hidden_dim)
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=nhead,
@@ -63,6 +65,12 @@ class TextAutoregressiveHead(IDecoder):
         latent_token = self.latent_proj(latent.z_sem).unsqueeze(1)  # [B, 1, D]
         token_emb = self.token_proj(self.token_embed(prefix_tokens))  # [B, T, D]
         seq = torch.cat([latent_token, token_emb], dim=1)  # [B, 1+T, D]
+        if seq.shape[1] > self.max_seq_len:
+            raise ValueError(
+                f"TextAutoregressiveHead received sequence length {seq.shape[1]} "
+                f"(prefix={T} + 1 latent token) but pos_embed only has "
+                f"{self.max_seq_len} slots. Increase max_seq_len or truncate inputs."
+            )
         positions = torch.arange(seq.shape[1], device=device).unsqueeze(0)
         seq = seq + self.pos_embed(positions)
 

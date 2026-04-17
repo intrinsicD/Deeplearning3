@@ -55,11 +55,18 @@ class WorldModelLoss(nn.Module):
         weights: Optional[LossWeights] = None,
         learned_uncertainty: bool = False,
         regularizer_min_weight: float = 0.5,
+        regularizer_max_weight: float = 100.0,
+        text_pad_token_id: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.weights = weights or LossWeights()
         self.learned_uncertainty = learned_uncertainty
         self.regularizer_min_weight = regularizer_min_weight
+        # Symmetric upper clamp prevents an active task with log_var << 0 from
+        # producing an effective weight that overwhelms every other gradient.
+        self.regularizer_max_weight = regularizer_max_weight
+        # When set, padding tokens are excluded from the text cross-entropy.
+        self.text_pad_token_id = text_pad_token_id
         self.contrastive_loss_fn = ContrastiveAlignmentLoss()
         if learned_uncertainty:
             self.log_vars = nn.ParameterDict({
@@ -76,10 +83,24 @@ class WorldModelLoss(nn.Module):
             })
 
     @staticmethod
-    def _mse(pred: Optional[torch.Tensor], target: Optional[torch.Tensor]) -> torch.Tensor:
+    def _mse(
+        pred: Optional[torch.Tensor],
+        target: Optional[torch.Tensor],
+        *,
+        fallback_device: torch.device,
+    ) -> torch.Tensor:
+        # Both absent => role is genuinely missing for this batch; contribute zero.
+        if pred is None and target is None:
+            return torch.zeros((), device=fallback_device)
+        # Mismatch is almost always a bug: a target exists but the head returned
+        # None, or vice versa. Surfacing this loudly avoids silently zero loss.
         if pred is None or target is None:
-            device = pred.device if pred is not None else target.device if target is not None else torch.device("cpu")
-            return torch.zeros((), device=device)
+            missing = "pred" if pred is None else "target"
+            raise ValueError(
+                f"_mse received only one of (pred, target); '{missing}' is None. "
+                "This usually means a prediction head dropped a role that the "
+                "target still has (or vice versa). Check RoleSplit configuration."
+            )
         return F.mse_loss(pred, target)
 
     def _safe_multiplier(
@@ -102,16 +123,38 @@ class WorldModelLoss(nn.Module):
         if output.target_next_latent is None:
             raise ValueError("WorldModelLoss requires target_next_latent. Provide obs_tp1 during forward().")
 
+        base_device = output.aux["regularizer_total"].device
+        base_dtype = output.aux["regularizer_total"].dtype
+
+        # Track which losses correspond to a real signal this batch. Losses
+        # without a signal are kept as zero placeholders for logging but are
+        # excluded from the learned-uncertainty sum so their log_var doesn't
+        # drift on noise.
+        active: Dict[str, bool] = {}
+
+        def _role_active(pred: Optional[torch.Tensor], target: Optional[torch.Tensor]) -> bool:
+            return pred is not None and target is not None
+
         losses: Dict[str, torch.Tensor] = {}
-        losses["latent_sem_loss"] = self._mse(output.predicted_next_latent.z_sem, output.target_next_latent.z_sem)
-        losses["latent_dyn_loss"] = self._mse(output.predicted_next_latent.z_dyn, output.target_next_latent.z_dyn)
-        losses["latent_ctrl_loss"] = self._mse(output.predicted_next_latent.z_ctrl, output.target_next_latent.z_ctrl)
-        losses["latent_mem_loss"] = self._mse(output.predicted_next_latent.z_mem, output.target_next_latent.z_mem)
+        losses["latent_sem_loss"] = self._mse(
+            output.predicted_next_latent.z_sem, output.target_next_latent.z_sem, fallback_device=base_device,
+        )
+        losses["latent_dyn_loss"] = self._mse(
+            output.predicted_next_latent.z_dyn, output.target_next_latent.z_dyn, fallback_device=base_device,
+        )
+        losses["latent_ctrl_loss"] = self._mse(
+            output.predicted_next_latent.z_ctrl, output.target_next_latent.z_ctrl, fallback_device=base_device,
+        )
+        losses["latent_mem_loss"] = self._mse(
+            output.predicted_next_latent.z_mem, output.target_next_latent.z_mem, fallback_device=base_device,
+        )
+        active["latent_sem_loss"] = _role_active(output.predicted_next_latent.z_sem, output.target_next_latent.z_sem)
+        active["latent_dyn_loss"] = _role_active(output.predicted_next_latent.z_dyn, output.target_next_latent.z_dyn)
+        active["latent_ctrl_loss"] = _role_active(output.predicted_next_latent.z_ctrl, output.target_next_latent.z_ctrl)
+        active["latent_mem_loss"] = _role_active(output.predicted_next_latent.z_mem, output.target_next_latent.z_mem)
 
         losses["regularizer_loss"] = output.aux["regularizer_total"]
-
-        base_device = losses["regularizer_loss"].device
-        base_dtype = losses["regularizer_loss"].dtype
+        active["regularizer_loss"] = True
 
         sem_w = self._safe_multiplier(task_multipliers, "latent_sem_loss", losses["latent_sem_loss"].device, losses["latent_sem_loss"].dtype)
         dyn_w = self._safe_multiplier(task_multipliers, "latent_dyn_loss", losses["latent_dyn_loss"].device, losses["latent_dyn_loss"].dtype)
@@ -124,22 +167,34 @@ class WorldModelLoss(nn.Module):
         if "text_target" in batch and any(key.endswith("text_logits") for key in output.decoder_outputs):
             text_logits = next(v for k, v in output.decoder_outputs.items() if k.endswith("text_logits"))
             text_target = batch["text_target"]
+            ce_kwargs: Dict[str, Any] = {}
+            if self.text_pad_token_id is not None:
+                ce_kwargs["ignore_index"] = self.text_pad_token_id
             # text_logits is [B, T, V] from causal decoder; text_target is [B, T]
             if text_logits.ndim == 3:
+                if text_logits.size(1) != text_target.size(1):
+                    raise ValueError(
+                        f"text_logits/text_target seq lengths disagree: "
+                        f"{text_logits.size(1)} vs {text_target.size(1)}"
+                    )
                 losses["text_ce_loss"] = F.cross_entropy(
-                    text_logits.reshape(-1, text_logits.size(-1)), text_target.reshape(-1)
+                    text_logits.reshape(-1, text_logits.size(-1)), text_target.reshape(-1), **ce_kwargs,
                 )
             else:
-                losses["text_ce_loss"] = F.cross_entropy(text_logits, text_target)
+                losses["text_ce_loss"] = F.cross_entropy(text_logits, text_target, **ce_kwargs)
+            active["text_ce_loss"] = True
         else:
             losses["text_ce_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+            active["text_ce_loss"] = False
 
         if "vector_target" in batch and any(key.endswith("vector_recon") for key in output.decoder_outputs):
             vector_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("vector_recon"))
             vector_target = batch["vector_target"]
             losses["vector_recon_loss"] = F.mse_loss(vector_pred, vector_target)
+            active["vector_recon_loss"] = True
         else:
             losses["vector_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+            active["vector_recon_loss"] = False
 
         # Image reconstruction loss
         img_w = self._safe_multiplier(task_multipliers, "image_recon_loss", base_device, base_dtype)
@@ -147,8 +202,10 @@ class WorldModelLoss(nn.Module):
             image_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("image_recon"))
             image_target = batch["image_target"]
             losses["image_recon_loss"] = F.mse_loss(image_pred, image_target)
+            active["image_recon_loss"] = True
         else:
             losses["image_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+            active["image_recon_loss"] = False
 
         # Audio reconstruction loss
         audio_w = self._safe_multiplier(task_multipliers, "audio_recon_loss", base_device, base_dtype)
@@ -156,8 +213,10 @@ class WorldModelLoss(nn.Module):
             audio_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("audio_recon"))
             audio_target = batch["audio_target"]
             losses["audio_recon_loss"] = F.mse_loss(audio_pred, audio_target)
+            active["audio_recon_loss"] = True
         else:
             losses["audio_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+            active["audio_recon_loss"] = False
 
         # Contrastive alignment loss across modalities
         contrastive_w = self._safe_multiplier(task_multipliers, "contrastive_alignment_loss", base_device, base_dtype)
@@ -175,8 +234,10 @@ class WorldModelLoss(nn.Module):
                     )
                     n_pairs += 1
             losses["contrastive_alignment_loss"] = contrastive_total / max(n_pairs, 1)
+            active["contrastive_alignment_loss"] = True
         else:
             losses["contrastive_alignment_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
+            active["contrastive_alignment_loss"] = False
 
         weighted_losses = {
             "latent_sem_loss": self.weights.latent_sem * sem_w * losses["latent_sem_loss"],
@@ -194,12 +255,19 @@ class WorldModelLoss(nn.Module):
         if self.learned_uncertainty:
             total = torch.zeros((), device=losses["regularizer_loss"].device, dtype=losses["regularizer_loss"].dtype)
             for name, task_loss in weighted_losses.items():
+                # Skip the uncertainty term entirely when this loss has no
+                # signal in the batch. Otherwise the +0.5*log_var penalty
+                # would still be applied, dragging log_var around on noise.
+                if not active.get(name, True):
+                    continue
                 # Clamp log_var to [-6, 10] to prevent divergence when task_loss is zero
                 log_var = self.log_vars[name].clamp(-6.0, 10.0)
                 effective_weight = 0.5 * torch.exp(-log_var)
-                # Clamp regularizer weight to prevent anti-collapse from being disabled
-                if name == "regularizer_loss":
-                    effective_weight = torch.clamp(effective_weight, min=self.regularizer_min_weight)
+                # Symmetric clamp: floor for the regularizer (so anti-collapse
+                # cannot be silently disabled) and a ceiling for every loss
+                # (so a single task with log_var << 0 cannot dominate).
+                lower = self.regularizer_min_weight if name == "regularizer_loss" else 0.0
+                effective_weight = torch.clamp(effective_weight, min=lower, max=self.regularizer_max_weight)
                 total = total + effective_weight * task_loss + 0.5 * log_var
                 losses[f"{name}_log_var"] = log_var.detach()
                 if name == "regularizer_loss":
