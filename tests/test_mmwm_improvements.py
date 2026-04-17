@@ -626,6 +626,142 @@ def test_simple_multimodal_encoder_rejects_unknown_modalities() -> None:
         enc(ObservationPacket(modalities={"audio": torch.randn(2, 16)}))
 
 
+def test_build_model_catches_dim_mismatch() -> None:
+    """Review #10: dimension mismatches across components should fail at
+    build time, not deep inside a forward pass."""
+    import pytest
+
+    cfg = _small_model_cfg()
+    # Conditioner.latent_dim must equal 4 * latent_projector.latent_dim.
+    cfg.conditioner_kwargs["latent_dim"] = 99
+    with pytest.raises(ValueError, match="conditioner.latent_dim"):
+        build_model(cfg)
+
+    cfg2 = _small_model_cfg()
+    cfg2.prediction_head_kwargs["hidden_dim"] = 99
+    with pytest.raises(ValueError, match="prediction_head.hidden_dim"):
+        build_model(cfg2)
+
+
+def test_build_model_skip_validation_works() -> None:
+    """Review #10: users with custom components should be able to opt out."""
+    cfg = _small_model_cfg()
+    cfg.conditioner_kwargs["latent_dim"] = 99  # would normally fail
+    # Building with skip_validation=True must not raise at validate time
+    # (it may still fail at forward if dims are truly wrong, but that's the
+    # user's problem once they opt out).
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_model(cfg)
+    # Explicit opt-out proceeds past validation:
+    try:
+        build_model(cfg, skip_validation=True)
+    except ValueError as e:
+        if "ModelConfig dimension mismatch" in str(e):
+            pytest.fail("skip_validation=True should bypass dim validation")
+
+
+def test_transition_aux_reserved_key_raises() -> None:
+    """Review #8: only the documented '_transition_hidden' aux key is allowed;
+    typos that start with '_' must surface instead of silently disappearing."""
+    import pytest
+    import torch.nn as nn
+
+    from MMWM.containers import ObservationPacket
+    from MMWM.interfaces import ITransitionCore, TRANSITION_CORES
+
+    class BadCore(ITransitionCore):
+        def __init__(self, input_dim: int = 64, hidden_dim: int = 64) -> None:
+            super().__init__()
+            self.net = nn.Linear(input_dim, hidden_dim)
+
+        def forward(self, conditioned_input, memory_state):
+            return self.net(conditioned_input), {"_typo_key": torch.tensor(0.0)}
+
+    # Register under a unique name so we don't collide with other tests.
+    name = "bad_core_for_aux_test"
+    if name not in TRANSITION_CORES.names():
+        TRANSITION_CORES.register(name)(BadCore)
+
+    cfg = _small_model_cfg()
+    cfg.transition_core_name = name
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
+    action = torch.randn(2, 8)
+    with pytest.raises(ValueError, match="reserved aux keys"):
+        model(packet, action, obs_tp1=packet)
+
+
+def test_memory_read_default_implementation() -> None:
+    """Review #9: IMemory.read has a default implementation that validates
+    context is not None and returns it."""
+    import pytest
+
+    from MMWM.interfaces import IMemory, MEMORIES
+
+    # All registered memories should inherit the default or override consistently.
+    for mem_name in MEMORIES.names():
+        mem = MEMORIES.build(mem_name, **({"input_dim": 32, "hidden_dim": 16}
+                                          if mem_name != "identity"
+                                          else {"latent_dim": 16}))
+        state = mem.init_state(batch_size=2, device=torch.device("cpu"))
+        # Default read() should return a non-None tensor equal to state.context.
+        out = mem.read(state)
+        assert out is state.context
+
+    # If context is None, read() must raise clearly.
+    from MMWM.containers import MemoryState
+
+    mem = MEMORIES.build("identity", latent_dim=16)
+    with pytest.raises(RuntimeError, match="state.context is None"):
+        mem.read(MemoryState(context=None, hidden=None))
+
+
+def test_checkpoint_save_load_roundtrip() -> None:
+    """Review #19: save/load should round-trip model + optimizer + loss_fn
+    state exactly, including global_step and learned log_vars."""
+    import tempfile
+
+    cfg = _small_model_cfg()
+    model = build_model(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_fn = WorldModelLoss(learned_uncertainty=True)
+    device = torch.device("cpu")
+
+    trainer_a = Trainer(
+        model=model, optimizer=optimizer, loss_fn=loss_fn, device=device,
+        run_dir=tempfile.mkdtemp(prefix="mmwm_ckpt_"), mixed_precision=False,
+    )
+    # Mutate some state so the round-trip is meaningful.
+    trainer_a.global_step = 123
+    trainer_a.best_eval_loss = 0.5
+    with torch.no_grad():
+        trainer_a.loss_fn.log_vars["latent_sem_loss"].fill_(-1.5)
+    ckpt_path = trainer_a.save_checkpoint()
+
+    # Build a fresh trainer B and load.
+    model_b = build_model(cfg)
+    optimizer_b = torch.optim.AdamW(model_b.parameters(), lr=1e-3)
+    loss_fn_b = WorldModelLoss(learned_uncertainty=True)
+    trainer_b = Trainer(
+        model=model_b, optimizer=optimizer_b, loss_fn=loss_fn_b, device=device,
+        run_dir=tempfile.mkdtemp(prefix="mmwm_ckpt_b_"), mixed_precision=False,
+    )
+    trainer_b.load_checkpoint(ckpt_path)
+
+    assert trainer_b.global_step == 123
+    assert trainer_b.best_eval_loss == 0.5
+    # log_vars must round-trip.
+    assert torch.allclose(
+        trainer_b.loss_fn.log_vars["latent_sem_loss"],
+        trainer_a.loss_fn.log_vars["latent_sem_loss"],
+    )
+    # Model parameters must match bit-for-bit.
+    for p_a, p_b in zip(trainer_a.model.parameters(), trainer_b.model.parameters()):
+        assert torch.equal(p_a, p_b)
+
+
 def test_gradient_checkpointing_flag() -> None:
     """Blocker: Gradient checkpointing option on RecurrentAttnRes."""
     cfg = ModelConfig(
