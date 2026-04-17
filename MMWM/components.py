@@ -123,10 +123,6 @@ class IdentityMemory(IMemory):
             hidden=state.hidden,
         )
 
-    def read(self, state: MemoryState) -> torch.Tensor:
-        assert state.context is not None
-        return state.context
-
 
 @MEMORIES.register("gru")
 class GRUMemory(IMemory):
@@ -147,10 +143,6 @@ class GRUMemory(IMemory):
             raise RuntimeError("GRUMemory requires state.hidden")
         hidden = self.cell(x, prev)
         return MemoryState(context=hidden, hidden=hidden)
-
-    def read(self, state: MemoryState) -> torch.Tensor:
-        assert state.context is not None
-        return state.context
 
 
 @MEMORIES.register("mamba_ssm")
@@ -186,10 +178,6 @@ class MambaSSMMemory(IMemory):
         hidden = torch.exp(delta * a) * prev + delta * b
         context = self.out_proj(F.silu(self.c_proj(hidden)))
         return MemoryState(context=context, hidden=hidden, extras=dict(state.extras))
-
-    def read(self, state: MemoryState) -> torch.Tensor:
-        assert state.context is not None
-        return state.context
 
 
 # ============================================================

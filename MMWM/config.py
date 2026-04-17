@@ -112,9 +112,133 @@ class ModelConfig:
     ])
 
 
-def build_model(cfg: ModelConfig) -> ModularLatentWorldModel:
+#: Number of latent roles concatenated by ``LatentState.primary()``.
+_NUM_LATENT_ROLES = 4
+
+
+def _validate_dims(cfg: ModelConfig) -> None:
+    """Cross-check dimension kwargs across components so mismatches fail fast.
+
+    The checks match the conventions of the default components in this package.
+    Custom components that break these conventions can opt out by setting
+    ``skip_validation=True`` in ``build_model``.
+    """
+    problems: List[str] = []
+
+    enc = cfg.encoder_kwargs
+    proj = cfg.latent_projector_kwargs
+    mem = cfg.memory_kwargs
+    act = cfg.action_encoder_kwargs
+    cond = cfg.conditioner_kwargs
+    core = cfg.transition_core_kwargs
+    head = cfg.prediction_head_kwargs
+
+    def check(cond_ok: bool, msg: str) -> None:
+        if not cond_ok:
+            problems.append(msg)
+
+    # encoder.hidden_dim -> latent_projector.input_dim
+    if "hidden_dim" in enc and "input_dim" in proj:
+        check(
+            enc["hidden_dim"] == proj["input_dim"],
+            f"encoder.hidden_dim ({enc['hidden_dim']}) != "
+            f"latent_projector.input_dim ({proj['input_dim']})",
+        )
+
+    # latent_projector.latent_dim -> conditioner.latent_dim (× num_roles)
+    if "latent_dim" in proj and "latent_dim" in cond:
+        expected = proj["latent_dim"] * _NUM_LATENT_ROLES
+        check(
+            cond["latent_dim"] == expected,
+            f"conditioner.latent_dim ({cond['latent_dim']}) != "
+            f"{_NUM_LATENT_ROLES} * latent_projector.latent_dim "
+            f"({proj['latent_dim']}) = {expected}. "
+            f"LatentState.primary() concatenates {_NUM_LATENT_ROLES} role vectors.",
+        )
+
+    # action_encoder.action_embed_dim -> conditioner.action_dim
+    if "action_embed_dim" in act and "action_dim" in cond:
+        check(
+            act["action_embed_dim"] == cond["action_dim"],
+            f"action_encoder.action_embed_dim ({act['action_embed_dim']}) != "
+            f"conditioner.action_dim ({cond['action_dim']})",
+        )
+
+    # memory.hidden_dim -> conditioner.memory_dim (for stateful memories)
+    if cfg.memory_name != "identity" and "hidden_dim" in mem and "memory_dim" in cond:
+        check(
+            mem["hidden_dim"] == cond["memory_dim"],
+            f"memory.hidden_dim ({mem['hidden_dim']}) != "
+            f"conditioner.memory_dim ({cond['memory_dim']})",
+        )
+
+    # conditioner.out_dim -> transition_core.input_dim (concat_mlp only;
+    # FiLM preserves the latent_dim from core_input).
+    if cfg.conditioner_name == "concat_mlp" and "out_dim" in cond and "input_dim" in core:
+        check(
+            cond["out_dim"] == core["input_dim"],
+            f"conditioner.out_dim ({cond['out_dim']}) != "
+            f"transition_core.input_dim ({core['input_dim']})",
+        )
+
+    # transition_core.hidden_dim -> prediction_head.hidden_dim
+    if "hidden_dim" in core and "hidden_dim" in head:
+        check(
+            core["hidden_dim"] == head["hidden_dim"],
+            f"transition_core.hidden_dim ({core['hidden_dim']}) != "
+            f"prediction_head.hidden_dim ({head['hidden_dim']})",
+        )
+
+    # prediction_head.latent_dim -> latent_projector.latent_dim
+    if "latent_dim" in head and "latent_dim" in proj:
+        check(
+            head["latent_dim"] == proj["latent_dim"],
+            f"prediction_head.latent_dim ({head['latent_dim']}) != "
+            f"latent_projector.latent_dim ({proj['latent_dim']})",
+        )
+
+    # Decoders: the meaning of ``latent_dim`` differs per decoder.
+    #   - text_autoregressive_head / vector_reconstruction read ``latent.z_sem``
+    #     so their latent_dim must equal the projector's per-role latent_dim.
+    #   - image_reconstruction / audio_reconstruction read ``latent.primary()``
+    #     which concatenates ``_NUM_LATENT_ROLES`` role vectors.
+    per_role_decoders = {"text_autoregressive_head", "vector_reconstruction"}
+    primary_decoders = {"image_reconstruction", "audio_reconstruction"}
+    for dec_name, dec_kwargs in cfg.decoder_configs:
+        if "latent_dim" not in dec_kwargs or "latent_dim" not in proj:
+            continue
+        if dec_name in per_role_decoders:
+            check(
+                dec_kwargs["latent_dim"] == proj["latent_dim"],
+                f"decoder[{dec_name}].latent_dim ({dec_kwargs['latent_dim']}) != "
+                f"latent_projector.latent_dim ({proj['latent_dim']})",
+            )
+        elif dec_name in primary_decoders:
+            expected = proj["latent_dim"] * _NUM_LATENT_ROLES
+            check(
+                dec_kwargs["latent_dim"] == expected,
+                f"decoder[{dec_name}].latent_dim ({dec_kwargs['latent_dim']}) != "
+                f"{_NUM_LATENT_ROLES} * latent_projector.latent_dim "
+                f"({proj['latent_dim']}) = {expected}. "
+                f"{dec_name} consumes LatentState.primary().",
+            )
+        # Unknown decoders: no convention to check.
+
+    if problems:
+        raise ValueError(
+            "ModelConfig dimension mismatch detected:\n  - "
+            + "\n  - ".join(problems)
+            + "\nIf you are using custom components that intentionally break "
+              "these conventions, pass skip_validation=True to build_model."
+        )
+
+
+def build_model(cfg: ModelConfig, skip_validation: bool = False) -> ModularLatentWorldModel:
     """Build a model from config. Each component is constructed via its
     registry name + kwargs dict — no component-specific branching."""
+
+    if not skip_validation:
+        _validate_dims(cfg)
 
     encoder = ENCODERS.build(cfg.encoder_name, **cfg.encoder_kwargs)
     latent_projector = LATENT_PROJECTORS.build(cfg.latent_projector_name, **cfg.latent_projector_kwargs)

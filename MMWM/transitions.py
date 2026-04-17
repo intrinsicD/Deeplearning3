@@ -22,7 +22,12 @@ from .helpers import (
     LowRankHyperAdapter,
     RMSNorm,
 )
-from .interfaces import TRANSITION_CORES, ITransitionCore
+from .interfaces import (
+    MEMORY_TRANSITION_HIDDEN_KEY,
+    TRANSITION_CORES,
+    TRANSITION_HIDDEN_KEY,
+    ITransitionCore,
+)
 
 
 @TRANSITION_CORES.register("mlp")
@@ -53,12 +58,12 @@ class GRUTransitionCore(ITransitionCore):
 
     def forward(self, conditioned_input: torch.Tensor, memory_state: MemoryState) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         # Use transition-specific hidden state stored in memory_state.extras
-        hidden_prev = memory_state.extras.get("transition_hidden")
+        hidden_prev = memory_state.extras.get(MEMORY_TRANSITION_HIDDEN_KEY)
         if hidden_prev is None:
             hidden_prev = torch.zeros(conditioned_input.shape[0], self.hidden_dim, device=conditioned_input.device)
         hidden = self.cell(conditioned_input, hidden_prev)
         # Store updated transition hidden for next step via aux
-        return hidden, {"_transition_hidden": hidden}
+        return hidden, {TRANSITION_HIDDEN_KEY: hidden}
 
 
 @TRANSITION_CORES.register("transformer")

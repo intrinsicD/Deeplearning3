@@ -442,6 +442,326 @@ def test_sequence_level_training() -> None:
     assert metrics["sequence_length"] == T
 
 
+# ============================================================
+# Tests for review fixes (claude/review-mmwm-folder-L2YyA)
+# ============================================================
+
+
+def test_mse_raises_on_pred_target_mismatch() -> None:
+    """Review #1: silently returning zero when only one of (pred, target) is None
+    hides a class of bugs where a head drops a role the target still has."""
+    import pytest
+
+    pred = LatentState(
+        z_sem=torch.randn(2, 8),
+        z_dyn=None,  # head dropped this role
+        z_ctrl=torch.randn(2, 8),
+        z_mem=torch.randn(2, 8),
+        extras={},
+    )
+    tgt = LatentState(
+        z_sem=torch.randn(2, 8),
+        z_dyn=torch.randn(2, 8),  # but the target still has it
+        z_ctrl=torch.randn(2, 8),
+        z_mem=torch.randn(2, 8),
+        extras={},
+    )
+    out = ModelOutput(
+        current_latent=pred,
+        predicted_next_latent=pred,
+        target_next_latent=tgt,
+        next_memory=None,  # type: ignore[arg-type]
+        decoder_outputs={},
+        aux={"regularizer_total": torch.tensor(0.0)},
+    )
+    loss_fn = WorldModelLoss()
+    with pytest.raises(ValueError, match="pred"):
+        loss_fn(out, {})
+
+
+def test_mse_zero_when_both_roles_absent() -> None:
+    """Review #1: when both prediction and target genuinely lack a role,
+    returning zero is the correct behavior (role is just disabled)."""
+    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    out = ModelOutput(
+        current_latent=pred,
+        predicted_next_latent=pred,
+        target_next_latent=tgt,
+        next_memory=None,  # type: ignore[arg-type]
+        decoder_outputs={},
+        aux={"regularizer_total": torch.tensor(0.0)},
+    )
+    losses = WorldModelLoss()(out, {})
+    assert losses["latent_dyn_loss"].item() == 0.0
+    assert losses["latent_ctrl_loss"].item() == 0.0
+    assert losses["latent_mem_loss"].item() == 0.0
+
+
+def test_uncertainty_skips_inactive_losses() -> None:
+    """Review #2: with no decoder targets in the batch, modality losses are
+    inactive and must not contribute their +0.5*log_var penalty."""
+    loss_fn = WorldModelLoss(learned_uncertainty=True)
+    losses = loss_fn(_dummy_output(), batch={})
+    # No text/vector/image/audio target in batch and no decoder outputs ->
+    # those log_var keys must be absent from the per-loss diagnostic dict.
+    for inactive in ("text_ce_loss", "vector_recon_loss", "image_recon_loss",
+                     "audio_recon_loss", "contrastive_alignment_loss"):
+        assert f"{inactive}_log_var" not in losses, (
+            f"{inactive} has no signal but its log_var was still recorded "
+            "(meaning it contributed to the total)"
+        )
+    # Active losses must still record their log_var.
+    for active in ("latent_sem_loss", "latent_dyn_loss",
+                   "latent_ctrl_loss", "latent_mem_loss", "regularizer_loss"):
+        assert f"{active}_log_var" in losses
+
+
+def test_effective_weight_upper_clamp() -> None:
+    """Review #18: effective_weight must be clamped from above so a single
+    log_var << 0 cannot dominate the total loss."""
+    loss_fn = WorldModelLoss(
+        learned_uncertainty=True,
+        regularizer_max_weight=2.5,
+    )
+    # Force the regularizer log_var very negative -> exp(-log_var) huge.
+    with torch.no_grad():
+        loss_fn.log_vars["regularizer_loss"].fill_(-10.0)
+    losses = loss_fn(_dummy_output(), batch={})
+    assert losses["regularizer_effective_weight"].item() <= 2.5 + 1e-6
+
+
+def test_text_ce_respects_pad_token_id() -> None:
+    """Review #4: pad tokens should be ignored when computing text CE."""
+    loss_fn = WorldModelLoss(text_pad_token_id=0)
+    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    # All targets are pad (=0). With ignore_index=0 the loss should be NaN-free
+    # zero-elements; PyTorch returns NaN for "all ignored" but with at least
+    # one non-pad token it must be finite. Mix in one real token:
+    text_target = torch.zeros(2, 4, dtype=torch.long)
+    text_target[0, 0] = 5
+    text_logits = torch.randn(2, 4, 32)
+    out = ModelOutput(
+        current_latent=pred,
+        predicted_next_latent=pred,
+        target_next_latent=tgt,
+        next_memory=None,  # type: ignore[arg-type]
+        decoder_outputs={"text_logits": text_logits},
+        aux={"regularizer_total": torch.tensor(0.0)},
+    )
+    losses = loss_fn(out, {"text_target": text_target})
+    assert torch.isfinite(losses["text_ce_loss"])
+    # And without ignore_index, every pad position would also contribute,
+    # generally pushing the loss higher.
+    loss_fn_no_pad = WorldModelLoss()
+    losses_no_pad = loss_fn_no_pad(out, {"text_target": text_target})
+    assert losses["text_ce_loss"].item() != losses_no_pad["text_ce_loss"].item()
+
+
+def test_text_ce_seq_len_mismatch_raises() -> None:
+    """Review #4: silently reshaping mismatched logits/targets is dangerous."""
+    import pytest
+
+    loss_fn = WorldModelLoss()
+    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    out = ModelOutput(
+        current_latent=pred,
+        predicted_next_latent=pred,
+        target_next_latent=tgt,
+        next_memory=None,  # type: ignore[arg-type]
+        decoder_outputs={"text_logits": torch.randn(2, 5, 32)},
+        aux={"regularizer_total": torch.tensor(0.0)},
+    )
+    with pytest.raises(ValueError, match="seq lengths disagree"):
+        loss_fn(out, {"text_target": torch.zeros(2, 4, dtype=torch.long)})
+
+
+def test_text_decoder_pos_embed_overflow_raises() -> None:
+    """Review #5: TextAutoregressiveHead must reject sequences longer than its
+    learned position embedding instead of silently indexing out of range."""
+    import pytest
+
+    from MMWM.decoders import TextAutoregressiveHead
+
+    head = TextAutoregressiveHead(
+        vocab_size=64, latent_dim=16, text_embed_dim=32, hidden_dim=32,
+        num_layers=1, nhead=2, max_seq_len=8,
+    )
+    latent = LatentState(z_sem=torch.randn(1, 16), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    # 1 latent token + 8 prefix tokens = 9 > max_seq_len.
+    with pytest.raises(ValueError, match="max_seq_len"):
+        head(latent, context={"prefix_tokens": torch.zeros(1, 8, dtype=torch.long)})
+
+
+def test_simple_multimodal_encoder_rejects_empty_modalities() -> None:
+    """Review #14: an empty ObservationPacket should fail loud, not silently
+    propagate a zero feature."""
+    import pytest
+
+    from MMWM.encoders import SimpleMultimodalEncoder
+
+    enc = SimpleMultimodalEncoder(
+        text_vocab_size=64, text_embed_dim=16, vector_input_dim=8,
+        image_channels=3, hidden_dim=16,
+    )
+    with pytest.raises(ValueError, match="no modalities"):
+        enc(ObservationPacket(modalities={}))
+
+
+def test_simple_multimodal_encoder_rejects_unknown_modalities() -> None:
+    """Review #14: a packet whose modalities are all unknown to the encoder
+    should also fail rather than producing a zero embedding."""
+    import pytest
+
+    from MMWM.encoders import SimpleMultimodalEncoder
+
+    enc = SimpleMultimodalEncoder(
+        text_vocab_size=64, text_embed_dim=16, vector_input_dim=8,
+        image_channels=3, hidden_dim=16,
+    )
+    # "audio" is not a registered sub-encoder of SimpleMultimodalEncoder.
+    with pytest.raises(ValueError, match="match its registered sub-encoders"):
+        enc(ObservationPacket(modalities={"audio": torch.randn(2, 16)}))
+
+
+def test_build_model_catches_dim_mismatch() -> None:
+    """Review #10: dimension mismatches across components should fail at
+    build time, not deep inside a forward pass."""
+    import pytest
+
+    cfg = _small_model_cfg()
+    # Conditioner.latent_dim must equal 4 * latent_projector.latent_dim.
+    cfg.conditioner_kwargs["latent_dim"] = 99
+    with pytest.raises(ValueError, match="conditioner.latent_dim"):
+        build_model(cfg)
+
+    cfg2 = _small_model_cfg()
+    cfg2.prediction_head_kwargs["hidden_dim"] = 99
+    with pytest.raises(ValueError, match="prediction_head.hidden_dim"):
+        build_model(cfg2)
+
+
+def test_build_model_skip_validation_works() -> None:
+    """Review #10: users with custom components should be able to opt out."""
+    cfg = _small_model_cfg()
+    cfg.conditioner_kwargs["latent_dim"] = 99  # would normally fail
+    # Building with skip_validation=True must not raise at validate time
+    # (it may still fail at forward if dims are truly wrong, but that's the
+    # user's problem once they opt out).
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_model(cfg)
+    # Explicit opt-out proceeds past validation:
+    try:
+        build_model(cfg, skip_validation=True)
+    except ValueError as e:
+        if "ModelConfig dimension mismatch" in str(e):
+            pytest.fail("skip_validation=True should bypass dim validation")
+
+
+def test_transition_aux_reserved_key_raises() -> None:
+    """Review #8: only the documented '_transition_hidden' aux key is allowed;
+    typos that start with '_' must surface instead of silently disappearing."""
+    import pytest
+    import torch.nn as nn
+
+    from MMWM.containers import ObservationPacket
+    from MMWM.interfaces import ITransitionCore, TRANSITION_CORES
+
+    class BadCore(ITransitionCore):
+        def __init__(self, input_dim: int = 64, hidden_dim: int = 64) -> None:
+            super().__init__()
+            self.net = nn.Linear(input_dim, hidden_dim)
+
+        def forward(self, conditioned_input, memory_state):
+            return self.net(conditioned_input), {"_typo_key": torch.tensor(0.0)}
+
+    # Register under a unique name so we don't collide with other tests.
+    name = "bad_core_for_aux_test"
+    if name not in TRANSITION_CORES.names():
+        TRANSITION_CORES.register(name)(BadCore)
+
+    cfg = _small_model_cfg()
+    cfg.transition_core_name = name
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
+    action = torch.randn(2, 8)
+    with pytest.raises(ValueError, match="reserved aux keys"):
+        model(packet, action, obs_tp1=packet)
+
+
+def test_memory_read_default_implementation() -> None:
+    """Review #9: IMemory.read has a default implementation that validates
+    context is not None and returns it."""
+    import pytest
+
+    from MMWM.interfaces import IMemory, MEMORIES
+
+    # All registered memories should inherit the default or override consistently.
+    for mem_name in MEMORIES.names():
+        mem = MEMORIES.build(mem_name, **({"input_dim": 32, "hidden_dim": 16}
+                                          if mem_name != "identity"
+                                          else {"latent_dim": 16}))
+        state = mem.init_state(batch_size=2, device=torch.device("cpu"))
+        # Default read() should return a non-None tensor equal to state.context.
+        out = mem.read(state)
+        assert out is state.context
+
+    # If context is None, read() must raise clearly.
+    from MMWM.containers import MemoryState
+
+    mem = MEMORIES.build("identity", latent_dim=16)
+    with pytest.raises(RuntimeError, match="state.context is None"):
+        mem.read(MemoryState(context=None, hidden=None))
+
+
+def test_checkpoint_save_load_roundtrip() -> None:
+    """Review #19: save/load should round-trip model + optimizer + loss_fn
+    state exactly, including global_step and learned log_vars."""
+    import tempfile
+
+    cfg = _small_model_cfg()
+    model = build_model(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    loss_fn = WorldModelLoss(learned_uncertainty=True)
+    device = torch.device("cpu")
+
+    trainer_a = Trainer(
+        model=model, optimizer=optimizer, loss_fn=loss_fn, device=device,
+        run_dir=tempfile.mkdtemp(prefix="mmwm_ckpt_"), mixed_precision=False,
+    )
+    # Mutate some state so the round-trip is meaningful.
+    trainer_a.global_step = 123
+    trainer_a.best_eval_loss = 0.5
+    with torch.no_grad():
+        trainer_a.loss_fn.log_vars["latent_sem_loss"].fill_(-1.5)
+    ckpt_path = trainer_a.save_checkpoint()
+
+    # Build a fresh trainer B and load.
+    model_b = build_model(cfg)
+    optimizer_b = torch.optim.AdamW(model_b.parameters(), lr=1e-3)
+    loss_fn_b = WorldModelLoss(learned_uncertainty=True)
+    trainer_b = Trainer(
+        model=model_b, optimizer=optimizer_b, loss_fn=loss_fn_b, device=device,
+        run_dir=tempfile.mkdtemp(prefix="mmwm_ckpt_b_"), mixed_precision=False,
+    )
+    trainer_b.load_checkpoint(ckpt_path)
+
+    assert trainer_b.global_step == 123
+    assert trainer_b.best_eval_loss == 0.5
+    # log_vars must round-trip.
+    assert torch.allclose(
+        trainer_b.loss_fn.log_vars["latent_sem_loss"],
+        trainer_a.loss_fn.log_vars["latent_sem_loss"],
+    )
+    # Model parameters must match bit-for-bit.
+    for p_a, p_b in zip(trainer_a.model.parameters(), trainer_b.model.parameters()):
+        assert torch.equal(p_a, p_b)
+
+
 def test_gradient_checkpointing_flag() -> None:
     """Blocker: Gradient checkpointing option on RecurrentAttnRes."""
     cfg = ModelConfig(

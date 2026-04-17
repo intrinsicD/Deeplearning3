@@ -31,6 +31,8 @@ from .interfaces import (
     IPredictionHead,
     IRegularizer,
     ITransitionCore,
+    MEMORY_TRANSITION_HIDDEN_KEY,
+    TRANSITION_HIDDEN_KEY,
 )
 
 
@@ -73,11 +75,22 @@ class ModularLatentWorldModel(nn.Module):
         hidden, aux = self.transition_core(conditioned, memory_state)
 
         # Propagate any internal transition state (e.g. GRU hidden) into memory extras
-        if "_transition_hidden" in aux:
+        if TRANSITION_HIDDEN_KEY in aux:
             memory_state = MemoryState(
                 context=memory_state.context,
                 hidden=memory_state.hidden,
-                extras={**memory_state.extras, "transition_hidden": aux.pop("_transition_hidden")},
+                extras={**memory_state.extras, MEMORY_TRANSITION_HIDDEN_KEY: aux.pop(TRANSITION_HIDDEN_KEY)},
+            )
+
+        # Reserved-key discipline: any leftover "_"-prefixed key is a typo
+        # of the documented transition-hidden contract and would silently
+        # disappear from logging. Surface it now.
+        reserved = [k for k in aux if k.startswith("_")]
+        if reserved:
+            raise ValueError(
+                f"Transition core {type(self.transition_core).__name__} "
+                f"returned reserved aux keys {reserved}; only "
+                f"'{TRANSITION_HIDDEN_KEY}' is defined. See ITransitionCore docstring."
             )
 
         predicted_next = self.prediction_head(hidden, reference=latent)
