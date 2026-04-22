@@ -41,8 +41,8 @@ class HookManager:
                 self.writer.add_scalar(f"{split}/latent/{tag}_z_dyn_norm", float(latent.z_dyn.norm(dim=-1).mean().detach().cpu().item()), step)
             if latent.z_ctrl is not None:
                 self.writer.add_scalar(f"{split}/latent/{tag}_z_ctrl_norm", float(latent.z_ctrl.norm(dim=-1).mean().detach().cpu().item()), step)
-            if latent.z_mem is not None:
-                self.writer.add_scalar(f"{split}/latent/{tag}_z_mem_norm", float(latent.z_mem.norm(dim=-1).mean().detach().cpu().item()), step)
+            if latent.z_ctx is not None:
+                self.writer.add_scalar(f"{split}/latent/{tag}_z_ctx_norm", float(latent.z_ctx.norm(dim=-1).mean().detach().cpu().item()), step)
 
         if step % self.histogram_every == 0:
             self.writer.add_histogram(f"{split}/hist/current_z_sem", current.z_sem.detach().cpu(), step)

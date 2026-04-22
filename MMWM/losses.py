@@ -40,7 +40,7 @@ class LossWeights:
     latent_sem: float = 1.0
     latent_dyn: float = 1.0
     latent_ctrl: float = 0.25
-    latent_mem: float = 0.25
+    latent_ctx: float = 0.25
     regularizer: float = 1.0
     text_ce: float = 1.0
     vector_recon: float = 0.0
@@ -73,7 +73,7 @@ class WorldModelLoss(nn.Module):
                 "latent_sem_loss": nn.Parameter(torch.zeros(())),
                 "latent_dyn_loss": nn.Parameter(torch.zeros(())),
                 "latent_ctrl_loss": nn.Parameter(torch.zeros(())),
-                "latent_mem_loss": nn.Parameter(torch.zeros(())),
+                "latent_ctx_loss": nn.Parameter(torch.zeros(())),
                 "regularizer_loss": nn.Parameter(torch.zeros(())),
                 "text_ce_loss": nn.Parameter(torch.zeros(())),
                 "vector_recon_loss": nn.Parameter(torch.zeros(())),
@@ -145,13 +145,13 @@ class WorldModelLoss(nn.Module):
         losses["latent_ctrl_loss"] = self._mse(
             output.predicted_next_latent.z_ctrl, output.target_next_latent.z_ctrl, fallback_device=base_device,
         )
-        losses["latent_mem_loss"] = self._mse(
-            output.predicted_next_latent.z_mem, output.target_next_latent.z_mem, fallback_device=base_device,
+        losses["latent_ctx_loss"] = self._mse(
+            output.predicted_next_latent.z_ctx, output.target_next_latent.z_ctx, fallback_device=base_device,
         )
         active["latent_sem_loss"] = _role_active(output.predicted_next_latent.z_sem, output.target_next_latent.z_sem)
         active["latent_dyn_loss"] = _role_active(output.predicted_next_latent.z_dyn, output.target_next_latent.z_dyn)
         active["latent_ctrl_loss"] = _role_active(output.predicted_next_latent.z_ctrl, output.target_next_latent.z_ctrl)
-        active["latent_mem_loss"] = _role_active(output.predicted_next_latent.z_mem, output.target_next_latent.z_mem)
+        active["latent_ctx_loss"] = _role_active(output.predicted_next_latent.z_ctx, output.target_next_latent.z_ctx)
 
         losses["regularizer_loss"] = output.aux["regularizer_total"]
         active["regularizer_loss"] = True
@@ -159,7 +159,7 @@ class WorldModelLoss(nn.Module):
         sem_w = self._safe_multiplier(task_multipliers, "latent_sem_loss", losses["latent_sem_loss"].device, losses["latent_sem_loss"].dtype)
         dyn_w = self._safe_multiplier(task_multipliers, "latent_dyn_loss", losses["latent_dyn_loss"].device, losses["latent_dyn_loss"].dtype)
         ctrl_w = self._safe_multiplier(task_multipliers, "latent_ctrl_loss", losses["latent_ctrl_loss"].device, losses["latent_ctrl_loss"].dtype)
-        mem_w = self._safe_multiplier(task_multipliers, "latent_mem_loss", losses["latent_mem_loss"].device, losses["latent_mem_loss"].dtype)
+        ctx_w = self._safe_multiplier(task_multipliers, "latent_ctx_loss", losses["latent_ctx_loss"].device, losses["latent_ctx_loss"].dtype)
         reg_w = self._safe_multiplier(task_multipliers, "regularizer_loss", losses["regularizer_loss"].device, losses["regularizer_loss"].dtype)
         text_w = self._safe_multiplier(task_multipliers, "text_ce_loss", base_device, base_dtype)
         vec_w = self._safe_multiplier(task_multipliers, "vector_recon_loss", base_device, base_dtype)
@@ -243,7 +243,7 @@ class WorldModelLoss(nn.Module):
             "latent_sem_loss": self.weights.latent_sem * sem_w * losses["latent_sem_loss"],
             "latent_dyn_loss": self.weights.latent_dyn * dyn_w * losses["latent_dyn_loss"],
             "latent_ctrl_loss": self.weights.latent_ctrl * ctrl_w * losses["latent_ctrl_loss"],
-            "latent_mem_loss": self.weights.latent_mem * mem_w * losses["latent_mem_loss"],
+            "latent_ctx_loss": self.weights.latent_ctx * ctx_w * losses["latent_ctx_loss"],
             "regularizer_loss": self.weights.regularizer * reg_w * losses["regularizer_loss"],
             "text_ce_loss": self.weights.text_ce * text_w * losses["text_ce_loss"],
             "vector_recon_loss": self.weights.vector_recon * vec_w * losses["vector_recon_loss"],

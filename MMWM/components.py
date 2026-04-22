@@ -1,4 +1,4 @@
-"""Latent projectors, memory modules, action encoders, conditioners, and regularizers."""
+"""Latent projectors, context-aware memory modules, action encoders, conditioners, and regularizers."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class RoleSplitLatentProjector(ILatentProjector):
         self.sem = nn.Linear(input_dim, latent_dim)
         self.dyn = nn.Linear(input_dim, latent_dim)
         self.ctrl = nn.Linear(input_dim, latent_dim)
-        self.mem = nn.Linear(input_dim, latent_dim)
+        self.ctx = nn.Linear(input_dim, latent_dim)
         self.norm = nn.LayerNorm(input_dim) if use_norm else nn.Identity()
 
     def forward(self, encoded: Dict[str, torch.Tensor]) -> LatentState:
@@ -47,7 +47,7 @@ class RoleSplitLatentProjector(ILatentProjector):
             z_sem=self.sem(fused),
             z_dyn=self.dyn(fused),
             z_ctrl=self.ctrl(fused),
-            z_mem=self.mem(fused),
+            z_ctx=self.ctx(fused),
             extras={k: v for k, v in encoded.items()},
         )
 
@@ -98,7 +98,7 @@ class AdaptiveRoleSplitLatentProjector(ILatentProjector):
             z_sem=role_features[0],
             z_dyn=role_features[1],
             z_ctrl=role_features[2],
-            z_mem=role_features[3],
+            z_ctx=role_features[3],
             extras=extras,
         )
 
@@ -119,7 +119,7 @@ class IdentityMemory(IMemory):
 
     def update(self, latent: LatentState, action_repr: torch.Tensor, state: MemoryState) -> MemoryState:
         return MemoryState(
-            context=latent.z_mem if latent.z_mem is not None else latent.z_sem,
+            context=latent.z_ctx if latent.z_ctx is not None else latent.z_sem,
             hidden=state.hidden,
         )
 
@@ -136,8 +136,8 @@ class GRUMemory(IMemory):
         return MemoryState(context=hidden, hidden=hidden)
 
     def update(self, latent: LatentState, action_repr: torch.Tensor, state: MemoryState) -> MemoryState:
-        mem_part = latent.z_mem if latent.z_mem is not None else latent.z_sem
-        x = torch.cat([mem_part, action_repr], dim=-1)
+        ctx_part = latent.z_ctx if latent.z_ctx is not None else latent.z_sem
+        x = torch.cat([ctx_part, action_repr], dim=-1)
         prev = state.hidden
         if prev is None:
             raise RuntimeError("GRUMemory requires state.hidden")
@@ -165,8 +165,8 @@ class MambaSSMMemory(IMemory):
         return MemoryState(context=hidden, hidden=hidden, extras={"memory_type": "mamba_ssm"})
 
     def update(self, latent: LatentState, action_repr: torch.Tensor, state: MemoryState) -> MemoryState:
-        mem_part = latent.z_mem if latent.z_mem is not None else latent.z_sem
-        x = torch.cat([mem_part, action_repr], dim=-1)
+        ctx_part = latent.z_ctx if latent.z_ctx is not None else latent.z_sem
+        x = torch.cat([ctx_part, action_repr], dim=-1)
         prev = state.hidden
         if prev is None:
             raise RuntimeError("MambaSSMMemory requires state.hidden")
@@ -253,7 +253,7 @@ class RoleSplitPredictionHead(IPredictionHead):
         self.sem = nn.Linear(hidden_dim, latent_dim)
         self.dyn = nn.Linear(hidden_dim, latent_dim)
         self.ctrl = nn.Linear(hidden_dim, latent_dim)
-        self.mem = nn.Linear(hidden_dim, latent_dim)
+        self.ctx = nn.Linear(hidden_dim, latent_dim)
         self.uncertainty = nn.Linear(hidden_dim, latent_dim)
 
     def forward(self, hidden: torch.Tensor, reference: LatentState) -> LatentState:
@@ -263,7 +263,7 @@ class RoleSplitPredictionHead(IPredictionHead):
             z_sem=self.sem(hidden),
             z_dyn=self.dyn(hidden) if reference.z_dyn is not None else None,
             z_ctrl=self.ctrl(hidden) if reference.z_ctrl is not None else None,
-            z_mem=self.mem(hidden) if reference.z_mem is not None else None,
+            z_ctx=self.ctx(hidden) if reference.z_ctx is not None else None,
             extras=extras,
         )
 
@@ -311,7 +311,7 @@ class SIGRegLike(IRegularizer):
     def forward(self, latent: LatentState) -> Dict[str, torch.Tensor]:
         losses: Dict[str, torch.Tensor] = {}
         total = torch.zeros((), device=latent.z_sem.device)
-        for name, tensor in [("z_sem", latent.z_sem), ("z_dyn", latent.z_dyn), ("z_ctrl", latent.z_ctrl), ("z_mem", latent.z_mem)]:
+        for name, tensor in [("z_sem", latent.z_sem), ("z_dyn", latent.z_dyn), ("z_ctrl", latent.z_ctrl), ("z_ctx", latent.z_ctx)]:
             if tensor is None:
                 continue
             part = self._apply_reg(tensor, name)
