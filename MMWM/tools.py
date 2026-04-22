@@ -249,7 +249,7 @@ class MemoryReadTool(BaseTool):
             z_sem=packet.state.z_sem,
             z_dyn=packet.state.z_dyn,
             z_ctrl=packet.state.z_ctrl,
-            z_mem=value,
+            z_ctx=value,
             extras=dict(packet.state.extras),
         )
         next_packet = LatentPacket(
@@ -268,7 +268,7 @@ class MemoryWriteTool(BaseTool):
 
     def run(self, packet: LatentPacket, context: ToolContext) -> ToolResult:
         key = context.raw_inputs.get("memory_key", "default")
-        self.memory_bank[key] = packet.state.z_mem if packet.state.z_mem is not None else packet.state.z_sem
+        self.memory_bank[key] = packet.state.z_ctx if packet.state.z_ctx is not None else packet.state.z_sem
         return ToolResult(packet=packet, side_effects={"memory_written": key})
 
 

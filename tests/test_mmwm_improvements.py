@@ -27,14 +27,14 @@ def _dummy_output(batch_size: int = 2, latent_dim: int = 8) -> ModelOutput:
         z_sem=torch.randn(batch_size, latent_dim),
         z_dyn=torch.randn(batch_size, latent_dim),
         z_ctrl=torch.randn(batch_size, latent_dim),
-        z_mem=torch.randn(batch_size, latent_dim),
+        z_ctx=torch.randn(batch_size, latent_dim),
         extras={},
     )
     tgt = LatentState(
         z_sem=torch.randn(batch_size, latent_dim),
         z_dyn=torch.randn(batch_size, latent_dim),
         z_ctrl=torch.randn(batch_size, latent_dim),
-        z_mem=torch.randn(batch_size, latent_dim),
+        z_ctx=torch.randn(batch_size, latent_dim),
         extras={},
     )
     return ModelOutput(
@@ -456,14 +456,14 @@ def test_mse_raises_on_pred_target_mismatch() -> None:
         z_sem=torch.randn(2, 8),
         z_dyn=None,  # head dropped this role
         z_ctrl=torch.randn(2, 8),
-        z_mem=torch.randn(2, 8),
+        z_ctx=torch.randn(2, 8),
         extras={},
     )
     tgt = LatentState(
         z_sem=torch.randn(2, 8),
         z_dyn=torch.randn(2, 8),  # but the target still has it
         z_ctrl=torch.randn(2, 8),
-        z_mem=torch.randn(2, 8),
+        z_ctx=torch.randn(2, 8),
         extras={},
     )
     out = ModelOutput(
@@ -482,8 +482,8 @@ def test_mse_raises_on_pred_target_mismatch() -> None:
 def test_mse_zero_when_both_roles_absent() -> None:
     """Review #1: when both prediction and target genuinely lack a role,
     returning zero is the correct behavior (role is just disabled)."""
-    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
-    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
+    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
     out = ModelOutput(
         current_latent=pred,
         predicted_next_latent=pred,
@@ -495,7 +495,7 @@ def test_mse_zero_when_both_roles_absent() -> None:
     losses = WorldModelLoss()(out, {})
     assert losses["latent_dyn_loss"].item() == 0.0
     assert losses["latent_ctrl_loss"].item() == 0.0
-    assert losses["latent_mem_loss"].item() == 0.0
+    assert losses["latent_ctx_loss"].item() == 0.0
 
 
 def test_uncertainty_skips_inactive_losses() -> None:
@@ -513,7 +513,7 @@ def test_uncertainty_skips_inactive_losses() -> None:
         )
     # Active losses must still record their log_var.
     for active in ("latent_sem_loss", "latent_dyn_loss",
-                   "latent_ctrl_loss", "latent_mem_loss", "regularizer_loss"):
+                   "latent_ctrl_loss", "latent_ctx_loss", "regularizer_loss"):
         assert f"{active}_log_var" in losses
 
 
@@ -534,8 +534,8 @@ def test_effective_weight_upper_clamp() -> None:
 def test_text_ce_respects_pad_token_id() -> None:
     """Review #4: pad tokens should be ignored when computing text CE."""
     loss_fn = WorldModelLoss(text_pad_token_id=0)
-    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
-    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
+    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
     # All targets are pad (=0). With ignore_index=0 the loss should be NaN-free
     # zero-elements; PyTorch returns NaN for "all ignored" but with at least
     # one non-pad token it must be finite. Mix in one real token:
@@ -564,8 +564,8 @@ def test_text_ce_seq_len_mismatch_raises() -> None:
     import pytest
 
     loss_fn = WorldModelLoss()
-    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
-    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    pred = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
+    tgt = LatentState(z_sem=torch.randn(2, 8), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
     out = ModelOutput(
         current_latent=pred,
         predicted_next_latent=pred,
@@ -589,7 +589,7 @@ def test_text_decoder_pos_embed_overflow_raises() -> None:
         vocab_size=64, latent_dim=16, text_embed_dim=32, hidden_dim=32,
         num_layers=1, nhead=2, max_seq_len=8,
     )
-    latent = LatentState(z_sem=torch.randn(1, 16), z_dyn=None, z_ctrl=None, z_mem=None, extras={})
+    latent = LatentState(z_sem=torch.randn(1, 16), z_dyn=None, z_ctrl=None, z_ctx=None, extras={})
     # 1 latent token + 8 prefix tokens = 9 > max_seq_len.
     with pytest.raises(ValueError, match="max_seq_len"):
         head(latent, context={"prefix_tokens": torch.zeros(1, 8, dtype=torch.long)})
@@ -785,3 +785,47 @@ def test_gradient_checkpointing_flag() -> None:
     loss = out.predicted_next_latent.z_sem.sum()
     loss.backward()
     assert any(p.grad is not None for p in model.parameters())
+
+
+def test_latent_state_exposes_z_ctx_not_z_mem() -> None:
+    latent = LatentState(
+        z_sem=torch.randn(2, 8),
+        z_dyn=torch.randn(2, 8),
+        z_ctrl=torch.randn(2, 8),
+        z_ctx=torch.randn(2, 8),
+        extras={},
+    )
+    assert latent.z_ctx is not None
+    assert not hasattr(latent, "z_mem")
+
+
+def test_latent_state_checkpoint_roundtrip_preserves_z_ctx() -> None:
+    latent = LatentState(
+        z_sem=torch.randn(2, 8),
+        z_dyn=torch.randn(2, 8),
+        z_ctrl=torch.randn(2, 8),
+        z_ctx=torch.randn(2, 8),
+        extras={"tag": torch.ones(2, 8)},
+    )
+    restored = LatentState.from_dict(latent.to_dict())
+    assert torch.equal(restored.z_sem, latent.z_sem)
+    assert torch.equal(restored.z_ctx, latent.z_ctx)
+
+
+def test_latent_state_backward_compat_accepts_z_mem_checkpoint() -> None:
+    legacy_payload = {
+        "z_sem": torch.randn(2, 8),
+        "z_dyn": torch.randn(2, 8),
+        "z_ctrl": torch.randn(2, 8),
+        "z_mem": torch.randn(2, 8),
+        "extras": {},
+    }
+    restored = LatentState.from_dict(legacy_payload)
+    assert restored.z_ctx is not None
+    assert torch.equal(restored.z_ctx, legacy_payload["z_mem"])
+
+
+def test_loss_dict_uses_latent_ctx_key() -> None:
+    losses = WorldModelLoss()(_dummy_output(), {})
+    assert "latent_ctx_loss" in losses
+    assert "latent_mem_loss" not in losses

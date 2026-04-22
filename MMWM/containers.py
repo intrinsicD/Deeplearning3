@@ -38,12 +38,16 @@ class LatentState:
     """Role-based latent container.
 
     All tensors are expected to be shaped [B, D].
+
+    `z_ctx` stores a checkpointable/portable latent context used for
+    save/load, resume, and branching workflows. This is distinct from
+    `MemoryState`, which stores live rollout memory.
     """
 
     z_sem: torch.Tensor
     z_dyn: Optional[torch.Tensor] = None
     z_ctrl: Optional[torch.Tensor] = None
-    z_mem: Optional[torch.Tensor] = None
+    z_ctx: Optional[torch.Tensor] = None
     extras: Dict[str, torch.Tensor] = field(default_factory=dict)
 
     def primary(self) -> torch.Tensor:
@@ -52,8 +56,8 @@ class LatentState:
             parts.append(self.z_dyn)
         if self.z_ctrl is not None:
             parts.append(self.z_ctrl)
-        if self.z_mem is not None:
-            parts.append(self.z_mem)
+        if self.z_ctx is not None:
+            parts.append(self.z_ctx)
         return torch.cat(parts, dim=-1)
 
     def detach(self) -> "LatentState":
@@ -61,13 +65,45 @@ class LatentState:
             z_sem=self.z_sem.detach(),
             z_dyn=None if self.z_dyn is None else self.z_dyn.detach(),
             z_ctrl=None if self.z_ctrl is None else self.z_ctrl.detach(),
-            z_mem=None if self.z_mem is None else self.z_mem.detach(),
+            z_ctx=None if self.z_ctx is None else self.z_ctx.detach(),
             extras={k: v.detach() for k, v in self.extras.items()},
+        )
+
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize latent state using stable checkpoint field names."""
+        payload: Dict[str, Any] = {
+            "z_sem": self.z_sem,
+            "z_dyn": self.z_dyn,
+            "z_ctrl": self.z_ctrl,
+            "z_ctx": self.z_ctx,
+            "extras": dict(self.extras),
+        }
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "LatentState":
+        """Deserialize latent state with backward compatibility for `z_mem`.
+
+        Compatibility shim: older checkpoints may store `z_mem` instead of
+        `z_ctx`; we map it into `z_ctx` when needed.
+        """
+        z_ctx = payload.get("z_ctx")
+        if z_ctx is None and "z_mem" in payload:
+            z_ctx = payload["z_mem"]
+        return cls(
+            z_sem=payload["z_sem"],
+            z_dyn=payload.get("z_dyn"),
+            z_ctrl=payload.get("z_ctrl"),
+            z_ctx=z_ctx,
+            extras=dict(payload.get("extras", {})),
         )
 
 
 @dataclass
 class MemoryState:
+    """Live rollout memory state (distinct from checkpointable `z_ctx`)."""
+
     context: Optional[torch.Tensor] = None
     hidden: Optional[Any] = None
     extras: Dict[str, Any] = field(default_factory=dict)

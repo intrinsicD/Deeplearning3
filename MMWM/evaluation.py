@@ -33,7 +33,7 @@ class LatentPredictionMetrics:
             ("sem", predicted.z_sem, target.z_sem),
             ("dyn", predicted.z_dyn, target.z_dyn),
             ("ctrl", predicted.z_ctrl, target.z_ctrl),
-            ("mem", predicted.z_mem, target.z_mem),
+            ("ctx", predicted.z_ctx, target.z_ctx),
         ]:
             if pred_z is None or tgt_z is None:
                 continue
