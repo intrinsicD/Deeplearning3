@@ -240,9 +240,20 @@ class Trainer:
         phase = self._active_phase()
         task_multipliers = phase.task_multipliers if phase is not None else None
 
-        # Determine sequence length from action_seq
+        # Determine transition count from action_seq
         action_seq = batch_sequence["action_seq"].to(self.device)
-        T = action_seq.shape[1]  # T-1 transitions → T = num actions
+        transitions = action_seq.shape[1]
+
+        # Every transition t consumes obs[t] -> obs[t+1], so each provided
+        # modality sequence must have at least transitions + 1 frames.
+        for name, key in [("text", "text_seq"), ("vector", "vector_seq"), ("image", "image_seq")]:
+            if key in batch_sequence:
+                seq_len = int(batch_sequence[key].shape[1])
+                if seq_len < transitions + 1:
+                    raise ValueError(
+                        f"train_sequence_step requires {key}.shape[1] >= action_seq.shape[1] + 1 "
+                        f"for next-step targets, but got {seq_len} vs {transitions + 1}."
+                    )
 
         memory_state: Optional[MemoryState] = None
         accumulated_loss = torch.zeros((), device=self.device)
@@ -250,7 +261,7 @@ class Trainer:
 
         self.optimizer.zero_grad(set_to_none=True)
 
-        for t in range(T):
+        for t in range(transitions):
             # Detach memory at window boundaries for truncated BPTT
             if t > 0 and t % window_length == 0 and memory_state is not None:
                 memory_state = memory_state.detach()
@@ -284,7 +295,7 @@ class Trainer:
             memory_state = output.next_memory
 
         # Average loss over timesteps, then backward
-        avg_loss = accumulated_loss / max(T, 1)
+        avg_loss = accumulated_loss / max(transitions, 1)
         self.scaler.scale(avg_loss).backward()
         if self.grad_clip_norm is not None:
             self.scaler.unscale_(self.optimizer)
@@ -300,7 +311,7 @@ class Trainer:
             for key in step_losses[0]:
                 vals = [sl[key].detach().cpu().item() for sl in step_losses]
                 result[key] = sum(vals) / len(vals)
-        result["sequence_length"] = float(T)
+        result["sequence_length"] = float(transitions)
         if phase is not None:
             result["curriculum_phase"] = float(phase.phase_id)
             self.writer.add_scalar("train/curriculum_phase", phase.phase_id, self.global_step)
@@ -377,6 +388,7 @@ class Trainer:
         epochs: int = 1,
         eval_every_steps: Optional[int] = None,
     ) -> None:
+        eval_iter = iter(eval_loader) if eval_loader is not None else None
         for epoch in range(epochs):
             memory_state: Optional[MemoryState] = None
             for batch in train_loader:
@@ -385,7 +397,13 @@ class Trainer:
                 if memory_state is not None:
                     memory_state = memory_state.detach()
                 if eval_loader is not None and eval_every_steps is not None and self.global_step % eval_every_steps == 0:
-                    eval_batch = next(iter(eval_loader))
+                    if eval_iter is None:
+                        eval_iter = iter(eval_loader)
+                    try:
+                        eval_batch = next(eval_iter)
+                    except StopIteration:
+                        eval_iter = iter(eval_loader)
+                        eval_batch = next(eval_iter)
                     eval_metrics, _ = self.eval_step(eval_batch)
                     eval_loss = eval_metrics.get("total_loss", float("inf"))
                     if eval_loss < self.best_eval_loss:

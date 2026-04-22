@@ -301,6 +301,11 @@ class StructuredMultimodalEncoder(IEncoder):
         self.fuse_proj = MLP([hidden_dim, hidden_dim * 2, hidden_dim])
 
     def forward(self, obs: ObservationPacket) -> Dict[str, torch.Tensor]:
+        if not obs.modalities:
+            raise ValueError(
+                "StructuredMultimodalEncoder.forward received an ObservationPacket "
+                "with no modalities; cannot infer batch size or produce features."
+            )
         device = obs.device()
         per_modality: Dict[str, torch.Tensor] = {}
         fusion_inputs: Dict[str, torch.Tensor] = {}
@@ -330,8 +335,12 @@ class StructuredMultimodalEncoder(IEncoder):
         if len(fusion_inputs) > 0:
             fused = self.cross_modal_fusion(fusion_inputs)
         else:
-            batch_size = next(iter(obs.modalities.values())).shape[0]
-            fused = torch.zeros(batch_size, self.hidden_dim, device=device)
+            known = ["text", "vector", "image"]
+            got = sorted(obs.modalities.keys())
+            raise ValueError(
+                f"StructuredMultimodalEncoder received modalities {got} but none "
+                f"match supported modalities {known}."
+            )
 
         fused = self.fuse_proj(self.fuse_norm(fused))
         per_modality["fused"] = fused
