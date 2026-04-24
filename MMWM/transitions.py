@@ -208,8 +208,9 @@ class RecurrentAttnResTransformerTransitionCore(ITransitionCore):
             should_halt = torch.sigmoid(halt_logit) > self.halt_threshold
             newly_halted = should_halt & (~halted_mask)
             halting_steps = torch.where(newly_halted, torch.full_like(halting_steps, float(step + 1)), halting_steps)
-            halted_mask = halted_mask | should_halt
-            current = torch.where(halted_mask.unsqueeze(-1), current, core_hidden)
+            prev_halted = halted_mask
+            current = torch.where(prev_halted.unsqueeze(-1), current, core_hidden)
+            halted_mask = prev_halted | should_halt
             last_aux = aux
             if bool(halted_mask.all()):
                 break

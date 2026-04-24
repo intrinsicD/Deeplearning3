@@ -121,6 +121,7 @@ class IdentityMemory(IMemory):
         return MemoryState(
             context=latent.z_ctx if latent.z_ctx is not None else latent.z_sem,
             hidden=state.hidden,
+            extras=dict(state.extras),
         )
 
 
@@ -142,7 +143,7 @@ class GRUMemory(IMemory):
         if prev is None:
             raise RuntimeError("GRUMemory requires state.hidden")
         hidden = self.cell(x, prev)
-        return MemoryState(context=hidden, hidden=hidden)
+        return MemoryState(context=hidden, hidden=hidden, extras=dict(state.extras))
 
 
 @MEMORIES.register("mamba_ssm")

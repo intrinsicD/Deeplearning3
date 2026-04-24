@@ -13,9 +13,9 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
 
 from .containers import LatentState, MemoryState, ModelOutput, ObservationPacket
+from .tb import SummaryWriter
 
 
 # ============================================================

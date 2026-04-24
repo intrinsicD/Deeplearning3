@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
 from .containers import MemoryState, ObservationPacket
 from .curriculum import AdaptiveCurriculumScheduler, CurriculumPhase
@@ -18,6 +17,7 @@ from .evaluation import EvaluationSuite
 from .losses import WorldModelLoss
 from .model import ModularLatentWorldModel
 from .monitoring import HookManager
+from .tb import SummaryWriter
 
 
 def build_lr_scheduler(
@@ -49,10 +49,12 @@ class Trainer:
         grad_clip_norm: Optional[float] = 1.0,
         mixed_precision: bool = True,
         lr_scheduler: Optional[LRScheduler] = None,
+        reset_memory_each_batch: bool = True,
     ) -> None:
         self.model = model.to(device)
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+        self.reset_memory_each_batch = reset_memory_each_batch
         self.loss_fn = loss_fn
         self.device = device
         self.run_dir = run_dir
@@ -140,7 +142,7 @@ class Trainer:
     def _to_packet(self, batch: Mapping[str, Any], suffix: str) -> ObservationPacket:
         modalities: Dict[str, torch.Tensor] = {}
         masks: Dict[str, torch.Tensor] = {}
-        for name in ["text", "vector", "image"]:
+        for name in ["text", "vector", "image", "audio"]:
             key = f"{name}_{suffix}"
             if key in batch:
                 modalities[name] = batch[key].to(self.device)
@@ -148,6 +150,32 @@ class Trainer:
             if mask_key in batch:
                 masks[name] = batch[mask_key].to(self.device)
         return ObservationPacket(modalities=modalities, masks=masks, meta={})
+
+    def _apply_reset_mask(self, memory_state: Optional[MemoryState], batch: Mapping[str, Any]) -> Optional[MemoryState]:
+        if memory_state is None:
+            return None
+        reset_mask = batch.get("reset_mask")
+        if reset_mask is None and "done" in batch:
+            reset_mask = batch["done"]
+        if reset_mask is None:
+            return memory_state
+        reset_mask = reset_mask.to(self.device).bool().view(-1)
+        keep = (~reset_mask).to(dtype=torch.float32).view(-1, 1)
+
+        def _mask_value(value: Any) -> Any:
+            if isinstance(value, torch.Tensor) and value.ndim >= 1 and value.shape[0] == keep.shape[0]:
+                return value * keep.to(device=value.device, dtype=value.dtype)
+            if isinstance(value, tuple):
+                return tuple(_mask_value(v) for v in value)
+            if isinstance(value, list):
+                return [_mask_value(v) for v in value]
+            return value
+
+        return MemoryState(
+            context=_mask_value(memory_state.context),
+            hidden=_mask_value(memory_state.hidden),
+            extras={k: _mask_value(v) for k, v in memory_state.extras.items()},
+        )
 
     # ------------------------------------------------------------------
     # Single-step training
@@ -164,6 +192,11 @@ class Trainer:
         decoder_context: Dict[str, Any] = {}
         if "prefix_tokens" in batch:
             decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
+        elif "text_target" in batch:
+            target = batch["text_target"].to(self.device)
+            bos_id = int(batch.get("bos_token_id", 0))
+            bos = torch.full((target.shape[0], 1), bos_id, device=self.device, dtype=target.dtype)
+            decoder_context["prefix_tokens"] = torch.cat([bos, target[:, :-1]], dim=1)
 
         phase = self._active_phase()
         task_multipliers = phase.task_multipliers if phase is not None else None
@@ -214,7 +247,7 @@ class Trainer:
             result["curriculum_phase"] = float(phase.phase_id)
             self.writer.add_scalar("train/curriculum_phase", phase.phase_id, self.global_step)
         self.global_step += 1
-        return result, output.next_memory
+        return result, self._apply_reset_mask(output.next_memory, batch)
 
     # ------------------------------------------------------------------
     # Sequence-level training (BPTT)
@@ -346,6 +379,11 @@ class Trainer:
         decoder_context: Dict[str, Any] = {}
         if "prefix_tokens" in batch:
             decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
+        elif "text_target" in batch:
+            target = batch["text_target"].to(self.device)
+            bos_id = int(batch.get("bos_token_id", 0))
+            bos = torch.full((target.shape[0], 1), bos_id, device=self.device, dtype=target.dtype)
+            decoder_context["prefix_tokens"] = torch.cat([bos, target[:, :-1]], dim=1)
 
         with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
             output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=memory_state, decoder_context=decoder_context)
@@ -375,7 +413,7 @@ class Trainer:
 
         result = {k: float(v.detach().cpu().item()) for k, v in losses.items()}
         result.update(eval_result.all_metrics())
-        return result, output.next_memory
+        return result, self._apply_reset_mask(output.next_memory, batch)
 
     # ------------------------------------------------------------------
     # Full training loop
@@ -392,6 +430,8 @@ class Trainer:
         for epoch in range(epochs):
             memory_state: Optional[MemoryState] = None
             for batch in train_loader:
+                if self.reset_memory_each_batch:
+                    memory_state = None
                 train_metrics, memory_state = self.train_step(batch, memory_state=memory_state)
                 # Detach memory to prevent infinite BPTT across batches
                 if memory_state is not None:
@@ -422,6 +462,10 @@ class Trainer:
         action_t: torch.Tensor,
         prefix_tokens: torch.Tensor,
         steps: int = 16,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        eos_token_id: Optional[int] = None,
+        stop_on_eos: bool = True,
     ) -> List[int]:
         """Autoregressively generate tokens from the causal text decoder."""
         self.model.eval()
@@ -444,12 +488,31 @@ class Trainer:
         generated: List[int] = []
 
         for _ in range(steps):
+            for decoder in self.model.decoders.values():
+                max_seq_len = getattr(decoder, "max_seq_len", None)
+                if max_seq_len is not None and prefix_tokens.shape[1] > (int(max_seq_len) - 1):
+                    raise ValueError(
+                        f"prefix length {prefix_tokens.shape[1]} exceeds decoder limit {int(max_seq_len) - 1}"
+                    )
             outputs = self.model.decode(pred_latent, context={"prefix_tokens": prefix_tokens})
             logits = next(v for k, v in outputs.items() if k.endswith("text_logits"))
-            next_token = int(logits[:, -1, :].argmax(dim=-1).item())
+            step_logits = logits[:, -1, :] / max(temperature, 1e-6)
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(step_logits, descending=True, dim=-1)
+                sorted_probs = torch.softmax(sorted_logits, dim=-1)
+                cdf = sorted_probs.cumsum(dim=-1)
+                to_remove = cdf > top_p
+                to_remove[:, 0] = False
+                sorted_logits = sorted_logits.masked_fill(to_remove, float("-inf"))
+                step_logits = torch.full_like(step_logits, float("-inf"))
+                step_logits.scatter_(dim=-1, index=sorted_indices, src=sorted_logits)
+            probs = torch.softmax(step_logits, dim=-1)
+            next_token = int(torch.multinomial(probs, num_samples=1).item())
             generated.append(next_token)
             next_token_tensor = torch.tensor([[next_token]], device=self.device, dtype=prefix_tokens.dtype)
             prefix_tokens = torch.cat([prefix_tokens, next_token_tensor], dim=1)
+            if eos_token_id is not None and stop_on_eos and next_token == eos_token_id:
+                break
 
         self.hooks.log_inference_trace(generated, self.global_step, split="inference")
         return generated

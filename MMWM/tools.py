@@ -296,10 +296,17 @@ class ToolExecutionEngine:
         current = packet
         for step in range(max_steps):
             route = self.router(current)
-            stop_prob = torch.sigmoid(route["stop_logit"]).mean().item()
-            action_id = int(route["action_logits"].argmax(dim=-1)[0].item())
-            trace.append({"step": step, "stop_prob": stop_prob, "action_id": action_id})
-            if stop_prob > 0.5:
+            stop_prob = torch.sigmoid(route["stop_logit"]).squeeze(-1)  # [B]
+            action_ids = route["action_logits"].argmax(dim=-1)  # [B]
+            stop_all = bool((stop_prob > 0.5).all())
+            action_id = int(action_ids[0].item())
+            trace.append({
+                "step": step,
+                "stop_prob_mean": float(stop_prob.mean().item()),
+                "action_ids": action_ids.detach().cpu().tolist(),
+                "action_id": action_id,
+            })
+            if stop_all:
                 break
             tool_name = self.action_id_to_tool[action_id]
             result = self.registry.call(tool_name, current, context)

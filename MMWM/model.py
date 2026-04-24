@@ -129,7 +129,7 @@ class ModularLatentWorldModel(nn.Module):
             memory_state = self.memory.init_state(batch_size=batch_size, device=current_latent.z_sem.device)
 
         transition = self.transition(current_latent, action_t, memory_state)
-        target_next_latent = self.encode(obs_tp1) if obs_tp1 is not None else None
+        target_next_latent = self.encode(obs_tp1).detach() if obs_tp1 is not None else None
         decoder_outputs = self.decode(transition.next_latent, context=decoder_context)
 
         aux = dict(transition.aux)
