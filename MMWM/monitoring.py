@@ -7,9 +7,9 @@ from typing import Any, Callable, List, Mapping, Optional, Sequence
 
 import torch
 import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
 
 from .containers import ModelOutput
+from .tb import SummaryWriter
 
 
 class HookManager:

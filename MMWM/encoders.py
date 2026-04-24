@@ -217,7 +217,10 @@ class TextTransformerSubEncoder(ModalitySubEncoder):
         positions = torch.arange(T, device=x.device).unsqueeze(0)
         emb = self.input_proj(emb + self.pos_embed(positions))
         causal_mask = self._causal_mask(T, x.device)
-        h = self.transformer(emb, mask=causal_mask)
+        key_padding_mask = None
+        if mask is not None:
+            key_padding_mask = ~mask.bool()
+        h = self.transformer(emb, mask=causal_mask, src_key_padding_mask=key_padding_mask)
         h = self.norm(h)
         if mask is not None:
             mask_f = mask.float().unsqueeze(-1)

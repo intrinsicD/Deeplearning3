@@ -83,6 +83,36 @@ class WorldModelLoss(nn.Module):
             })
 
     @staticmethod
+    def _gaussian_nll(
+        pred: Optional[torch.Tensor],
+        target: Optional[torch.Tensor],
+        logvar: Optional[torch.Tensor],
+        *,
+        fallback_device: torch.device,
+    ) -> torch.Tensor:
+        if pred is None and target is None:
+            return torch.zeros((), device=fallback_device)
+        if pred is None or target is None:
+            missing = "pred" if pred is None else "target"
+            raise ValueError(
+                f"_gaussian_nll received only one of (pred, target); '{missing}' is None."
+            )
+        if logvar is None:
+            return F.mse_loss(pred, target)
+        aligned_logvar = logvar
+        if aligned_logvar.shape != pred.shape:
+            if aligned_logvar.ndim == pred.ndim and aligned_logvar.shape[-1] == pred.shape[-1]:
+                aligned_logvar = aligned_logvar.expand_as(pred)
+            else:
+                raise ValueError(
+                    f"predicted_logvar shape {tuple(aligned_logvar.shape)} does not match "
+                    f"prediction shape {tuple(pred.shape)}"
+                )
+        err2 = (pred - target).pow(2)
+        nll = 0.5 * (err2 * torch.exp(-aligned_logvar) + aligned_logvar)
+        return nll.mean()
+
+    @staticmethod
     def _mse(
         pred: Optional[torch.Tensor],
         target: Optional[torch.Tensor],
@@ -136,8 +166,9 @@ class WorldModelLoss(nn.Module):
             return pred is not None and target is not None
 
         losses: Dict[str, torch.Tensor] = {}
-        losses["latent_sem_loss"] = self._mse(
-            output.predicted_next_latent.z_sem, output.target_next_latent.z_sem, fallback_device=base_device,
+        predicted_logvar = output.predicted_next_latent.extras.get("predicted_logvar")
+        losses["latent_sem_loss"] = self._gaussian_nll(
+            output.predicted_next_latent.z_sem, output.target_next_latent.z_sem, predicted_logvar, fallback_device=base_device,
         )
         losses["latent_dyn_loss"] = self._mse(
             output.predicted_next_latent.z_dyn, output.target_next_latent.z_dyn, fallback_device=base_device,

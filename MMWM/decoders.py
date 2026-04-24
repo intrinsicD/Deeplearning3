@@ -60,6 +60,12 @@ class TextAutoregressiveHead(IDecoder):
         prefix_tokens: torch.Tensor = context["prefix_tokens"]  # [B, T]
         B, T = prefix_tokens.shape
         device = prefix_tokens.device
+        max_prefix = self.max_seq_len - 1
+        if T > max_prefix:
+            raise ValueError(
+                f"TextAutoregressiveHead prefix length {T} exceeds valid max {max_prefix} "
+                f"(max_seq_len={self.max_seq_len}, one slot reserved for latent token)."
+            )
 
         # Latent becomes position 0; token embeddings fill positions 1..T
         latent_token = self.latent_proj(latent.z_sem).unsqueeze(1)  # [B, 1, D]
