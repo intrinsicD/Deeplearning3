@@ -18,8 +18,9 @@ class TextAutoregressiveHead(IDecoder):
 
     The latent is injected as a prefix token in the sequence. A causal
     self-attention transformer then predicts next-token logits at every
-    position, enabling proper autoregressive generation with KV caching.
+    position for autoregressive generation.
     """
+    required_context_keys = ("prefix_tokens",)
 
     def __init__(
         self,

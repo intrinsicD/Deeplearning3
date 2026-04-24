@@ -107,9 +107,20 @@ class ModularLatentWorldModel(nn.Module):
             aux=aux,
         )
 
-    def decode(self, latent: LatentState, context: Optional[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
+    def decode(
+        self,
+        latent: LatentState,
+        context: Optional[Dict[str, Any]] = None,
+        decode_keys: Optional[list[str]] = None,
+    ) -> Dict[str, torch.Tensor]:
         outputs: Dict[str, torch.Tensor] = {}
+        requested = set(decode_keys) if decode_keys is not None else None
         for name, decoder in self.decoders.items():
+            if requested is not None and name not in requested:
+                continue
+            required = getattr(decoder, "required_context_keys", ())
+            if required and (context is None or any(key not in context for key in required)):
+                continue
             dec_out = decoder(latent, context=context)
             for k, v in dec_out.items():
                 outputs[f"{name}.{k}"] = v
@@ -122,6 +133,7 @@ class ModularLatentWorldModel(nn.Module):
         obs_tp1: Optional[ObservationPacket] = None,
         memory_state: Optional[MemoryState] = None,
         decoder_context: Optional[Dict[str, Any]] = None,
+        decode_keys: Optional[list[str]] = None,
     ) -> ModelOutput:
         current_latent = self.encode(obs_t)
         batch_size = current_latent.z_sem.shape[0]
@@ -130,7 +142,7 @@ class ModularLatentWorldModel(nn.Module):
 
         transition = self.transition(current_latent, action_t, memory_state)
         target_next_latent = self.encode(obs_tp1).detach() if obs_tp1 is not None else None
-        decoder_outputs = self.decode(transition.next_latent, context=decoder_context)
+        decoder_outputs = self.decode(transition.next_latent, context=decoder_context, decode_keys=decode_keys)
 
         aux = dict(transition.aux)
         aux.update(self.regularizer(current_latent))

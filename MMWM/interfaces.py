@@ -65,6 +65,17 @@ class ILatentProjector(nn.Module, abc.ABC):
     def forward(self, encoded: Dict[str, torch.Tensor]) -> LatentState:
         raise NotImplementedError
 
+    @property
+    @abc.abstractmethod
+    def role_dims(self) -> Dict[str, int]:
+        """Dimensions for each latent role emitted by this projector."""
+        raise NotImplementedError
+
+    @property
+    def primary_dim(self) -> int:
+        """Total dimension of LatentState.primary()."""
+        return sum(self.role_dims.values())
+
 
 class IMemory(nn.Module, abc.ABC):
     @abc.abstractmethod

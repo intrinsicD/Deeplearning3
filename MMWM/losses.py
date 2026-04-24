@@ -43,7 +43,7 @@ class LossWeights:
     latent_ctx: float = 0.25
     regularizer: float = 1.0
     text_ce: float = 1.0
-    vector_recon: float = 0.0
+    vector_recon: float = 1.0
     image_recon: float = 1.0
     audio_recon: float = 1.0
     contrastive_alignment: float = 1.0

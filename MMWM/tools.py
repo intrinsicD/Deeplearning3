@@ -236,15 +236,21 @@ class TextDecoderTool(BaseTool):
 
 
 class MemoryReadTool(BaseTool):
-    def __init__(self, descriptor: ToolDescriptor, memory_bank: Dict[str, torch.Tensor]) -> None:
+    def __init__(self, descriptor: ToolDescriptor, memory_bank: Dict[str, Any]) -> None:
         super().__init__(descriptor)
         self.memory_bank = memory_bank
 
     def run(self, packet: LatentPacket, context: ToolContext) -> ToolResult:
         key = context.raw_inputs.get("memory_key", "default")
-        value = self.memory_bank.get(key)
+        record = self.memory_bank.get(key)
+        if isinstance(record, dict):
+            value = record.get("value")
+        else:
+            value = record
         if value is None:
             value = torch.zeros_like(packet.state.z_sem)
+        elif isinstance(value, torch.Tensor):
+            value = value.to(device=packet.state.z_sem.device, dtype=packet.state.z_sem.dtype)
         next_state = LatentState(
             z_sem=packet.state.z_sem,
             z_dyn=packet.state.z_dyn,
@@ -262,13 +268,21 @@ class MemoryReadTool(BaseTool):
 
 
 class MemoryWriteTool(BaseTool):
-    def __init__(self, descriptor: ToolDescriptor, memory_bank: Dict[str, torch.Tensor]) -> None:
+    def __init__(self, descriptor: ToolDescriptor, memory_bank: Dict[str, Any]) -> None:
         super().__init__(descriptor)
         self.memory_bank = memory_bank
 
     def run(self, packet: LatentPacket, context: ToolContext) -> ToolResult:
         key = context.raw_inputs.get("memory_key", "default")
-        self.memory_bank[key] = packet.state.z_ctx if packet.state.z_ctx is not None else packet.state.z_sem
+        value = packet.state.z_ctx if packet.state.z_ctx is not None else packet.state.z_sem
+        self.memory_bank[key] = {
+            "value": value.detach().cpu(),
+            "episode_id": context.raw_inputs.get("episode_id"),
+            "step": context.raw_inputs.get("step"),
+            "confidence": (
+                packet.confidence.detach().cpu() if isinstance(packet.confidence, torch.Tensor) else packet.confidence
+            ),
+        }
         return ToolResult(packet=packet, side_effects={"memory_written": key})
 
 
@@ -331,12 +345,12 @@ class ToolExecutionEngine:
 
 
 def build_memory_read_tool(descriptor: ToolDescriptor) -> BaseTool:
-    bank: Dict[str, torch.Tensor] = descriptor.config.setdefault("memory_bank", {})
+    bank: Dict[str, Any] = descriptor.config.setdefault("memory_bank", {})
     return MemoryReadTool(descriptor, bank)
 
 
 def build_memory_write_tool(descriptor: ToolDescriptor) -> BaseTool:
-    bank: Dict[str, torch.Tensor] = descriptor.config.setdefault("memory_bank", {})
+    bank: Dict[str, Any] = descriptor.config.setdefault("memory_bank", {})
     return MemoryWriteTool(descriptor, bank)
 
 
