@@ -177,6 +177,48 @@ class Trainer:
             extras={k: _mask_value(v) for k, v in memory_state.extras.items()},
         )
 
+    @staticmethod
+    def _decoder_name_for_target(target_name: str) -> Optional[str]:
+        mapping = {
+            "text_target": "text_autoregressive_head",
+            "vector_target": "vector_reconstruction",
+            "image_target": "image_reconstruction",
+            "audio_target": "audio_reconstruction",
+        }
+        return mapping.get(target_name)
+
+    def _build_decoder_plan(
+        self,
+        batch: Mapping[str, Any],
+        *,
+        text_target_key: str = "text_target",
+        prefix_tokens_key: str = "prefix_tokens",
+        requested_decode_keys: Optional[Any] = None,
+    ) -> Tuple[Dict[str, Any], Optional[list[str]]]:
+        decoder_context: Dict[str, Any] = {}
+        decode_keys: set[str] = set()
+        if prefix_tokens_key in batch:
+            decoder_context["prefix_tokens"] = batch[prefix_tokens_key].to(self.device)
+            decode_keys.add("text_autoregressive_head")
+        elif text_target_key in batch:
+            target = batch[text_target_key].to(self.device)
+            bos_id = int(batch.get("bos_token_id", 0))
+            bos = torch.full((target.shape[0], 1), bos_id, device=self.device, dtype=target.dtype)
+            decoder_context["prefix_tokens"] = torch.cat([bos, target[:, :-1]], dim=1)
+            decode_keys.add("text_autoregressive_head")
+
+        for target_name in ("vector_target", "image_target", "audio_target"):
+            decoder_name = self._decoder_name_for_target(target_name)
+            if decoder_name is not None and target_name in batch:
+                decode_keys.add(decoder_name)
+
+        if requested_decode_keys is None and "decode_keys" in batch:
+            requested_decode_keys = batch["decode_keys"]
+        if requested_decode_keys is not None:
+            decode_keys = decode_keys.intersection(set(requested_decode_keys)) if decode_keys else set(requested_decode_keys)
+
+        return decoder_context, sorted(decode_keys) if decode_keys else []
+
     # ------------------------------------------------------------------
     # Single-step training
     # ------------------------------------------------------------------
@@ -189,21 +231,21 @@ class Trainer:
         obs_tp1 = self._to_packet(batch, "tp1")
         action = batch["action"].to(self.device)
 
-        decoder_context: Dict[str, Any] = {}
-        if "prefix_tokens" in batch:
-            decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
-        elif "text_target" in batch:
-            target = batch["text_target"].to(self.device)
-            bos_id = int(batch.get("bos_token_id", 0))
-            bos = torch.full((target.shape[0], 1), bos_id, device=self.device, dtype=target.dtype)
-            decoder_context["prefix_tokens"] = torch.cat([bos, target[:, :-1]], dim=1)
+        decoder_context, decode_keys = self._build_decoder_plan(batch)
 
         phase = self._active_phase()
         task_multipliers = phase.task_multipliers if phase is not None else None
 
         self.optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
-            output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=memory_state, decoder_context=decoder_context)
+            output = self.model(
+                obs_t,
+                action,
+                obs_tp1=obs_tp1,
+                memory_state=memory_state,
+                decoder_context=decoder_context,
+                decode_keys=decode_keys,
+            )
             loss_inputs: Dict[str, Any] = {}
             if "text_target" in batch:
                 loss_inputs["text_target"] = batch["text_target"].to(self.device)
@@ -279,7 +321,7 @@ class Trainer:
 
         # Every transition t consumes obs[t] -> obs[t+1], so each provided
         # modality sequence must have at least transitions + 1 frames.
-        for name, key in [("text", "text_seq"), ("vector", "vector_seq"), ("image", "image_seq")]:
+        for name, key in [("text", "text_seq"), ("vector", "vector_seq"), ("image", "image_seq"), ("audio", "audio_seq")]:
             if key in batch_sequence:
                 seq_len = int(batch_sequence[key].shape[1])
                 if seq_len < transitions + 1:
@@ -302,18 +344,49 @@ class Trainer:
             # Build observation packets for timestep t and t+1
             obs_t_mods: Dict[str, torch.Tensor] = {}
             obs_tp1_mods: Dict[str, torch.Tensor] = {}
-            for name, key in [("text", "text_seq"), ("vector", "vector_seq"), ("image", "image_seq")]:
+            obs_t_masks: Dict[str, torch.Tensor] = {}
+            obs_tp1_masks: Dict[str, torch.Tensor] = {}
+            for name, key in [("text", "text_seq"), ("vector", "vector_seq"), ("image", "image_seq"), ("audio", "audio_seq")]:
                 if key in batch_sequence:
                     seq = batch_sequence[key].to(self.device)
                     obs_t_mods[name] = seq[:, t]
                     obs_tp1_mods[name] = seq[:, t + 1]
+                mask_key = f"{name}_mask_seq"
+                if mask_key in batch_sequence:
+                    mask_seq = batch_sequence[mask_key].to(self.device)
+                    obs_t_masks[name] = mask_seq[:, t]
+                    obs_tp1_masks[name] = mask_seq[:, t + 1]
 
-            obs_t = ObservationPacket(modalities=obs_t_mods, masks={}, meta={})
-            obs_tp1 = ObservationPacket(modalities=obs_tp1_mods, masks={}, meta={})
+            obs_t = ObservationPacket(modalities=obs_t_mods, masks=obs_t_masks, meta={})
+            obs_tp1 = ObservationPacket(modalities=obs_tp1_mods, masks=obs_tp1_masks, meta={})
             action = action_seq[:, t]
+            decoder_context: Dict[str, Any] = {}
+            decode_keys: list[str] = []
+            if "prefix_tokens_seq" in batch_sequence:
+                decoder_context["prefix_tokens"] = batch_sequence["prefix_tokens_seq"][:, t].to(self.device)
+                decode_keys.append("text_autoregressive_head")
+            elif "text_target_seq" in batch_sequence:
+                target = batch_sequence["text_target_seq"][:, t + 1].to(self.device)
+                bos_id = int(batch_sequence.get("bos_token_id", 0))
+                bos = torch.full((target.shape[0], 1), bos_id, device=self.device, dtype=target.dtype)
+                decoder_context["prefix_tokens"] = torch.cat([bos, target[:, :-1]], dim=1)
+                decode_keys.append("text_autoregressive_head")
+            if "vector_target_seq" in batch_sequence:
+                decode_keys.append("vector_reconstruction")
+            if "image_target_seq" in batch_sequence:
+                decode_keys.append("image_reconstruction")
+            if "audio_target_seq" in batch_sequence:
+                decode_keys.append("audio_reconstruction")
 
             with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
-                output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=memory_state)
+                output = self.model(
+                    obs_t,
+                    action,
+                    obs_tp1=obs_tp1,
+                    memory_state=memory_state,
+                    decoder_context=decoder_context,
+                    decode_keys=decode_keys,
+                )
                 loss_inputs: Dict[str, Any] = {}
                 if "text_target_seq" in batch_sequence:
                     loss_inputs["text_target"] = batch_sequence["text_target_seq"][:, t + 1].to(self.device)
@@ -321,11 +394,18 @@ class Trainer:
                     loss_inputs["vector_target"] = batch_sequence["vector_target_seq"][:, t + 1].to(self.device)
                 if "image_target_seq" in batch_sequence:
                     loss_inputs["image_target"] = batch_sequence["image_target_seq"][:, t + 1].to(self.device)
+                if "audio_target_seq" in batch_sequence:
+                    loss_inputs["audio_target"] = batch_sequence["audio_target_seq"][:, t + 1].to(self.device)
                 losses = self.loss_fn(output, loss_inputs, task_multipliers=task_multipliers)
                 accumulated_loss = accumulated_loss + losses["total_loss"]
                 step_losses.append(losses)
 
-            memory_state = output.next_memory
+            step_batch: Dict[str, Any] = {}
+            if "reset_mask_seq" in batch_sequence:
+                step_batch["reset_mask"] = batch_sequence["reset_mask_seq"][:, t + 1].to(self.device)
+            elif "done_seq" in batch_sequence:
+                step_batch["done"] = batch_sequence["done_seq"][:, t + 1].to(self.device)
+            memory_state = self._apply_reset_mask(output.next_memory, step_batch)
 
         # Average loss over timesteps, then backward
         avg_loss = accumulated_loss / max(transitions, 1)
@@ -376,17 +456,17 @@ class Trainer:
         obs_tp1 = self._to_packet(batch, "tp1")
         action = batch["action"].to(self.device)
 
-        decoder_context: Dict[str, Any] = {}
-        if "prefix_tokens" in batch:
-            decoder_context["prefix_tokens"] = batch["prefix_tokens"].to(self.device)
-        elif "text_target" in batch:
-            target = batch["text_target"].to(self.device)
-            bos_id = int(batch.get("bos_token_id", 0))
-            bos = torch.full((target.shape[0], 1), bos_id, device=self.device, dtype=target.dtype)
-            decoder_context["prefix_tokens"] = torch.cat([bos, target[:, :-1]], dim=1)
+        decoder_context, decode_keys = self._build_decoder_plan(batch)
 
         with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
-            output = self.model(obs_t, action, obs_tp1=obs_tp1, memory_state=memory_state, decoder_context=decoder_context)
+            output = self.model(
+                obs_t,
+                action,
+                obs_tp1=obs_tp1,
+                memory_state=memory_state,
+                decoder_context=decoder_context,
+                decode_keys=decode_keys,
+            )
             loss_inputs: Dict[str, Any] = {}
             if "text_target" in batch:
                 loss_inputs["text_target"] = batch["text_target"].to(self.device)

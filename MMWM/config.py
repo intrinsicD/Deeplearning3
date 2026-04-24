@@ -276,7 +276,7 @@ def build_tool_ecosystem(
     loader = BinaryToolLoader(device=device, keep_hot=keep_hot_tools)
     registry = ToolRegistrySystem(loader)
 
-    shared_memory_bank: Dict[str, torch.Tensor] = {}
+    shared_memory_bank: Dict[str, Any] = {}
 
     registry.register(
         ToolDescriptor(
@@ -339,7 +339,7 @@ def build_tool_ecosystem(
             alias="decoder.text",
         )
 
-    primary_dim = model.latent_projector.sem.out_features * 4
+    primary_dim = int(model.latent_projector.primary_dim)
     num_actions = 4 if has_text_decoder else 3
     router = LatentRouter(latent_dim=primary_dim, num_actions=num_actions)
     action_id_to_tool = {

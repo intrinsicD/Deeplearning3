@@ -51,6 +51,11 @@ class RoleSplitLatentProjector(ILatentProjector):
             extras={k: v for k, v in encoded.items()},
         )
 
+    @property
+    def role_dims(self) -> Dict[str, int]:
+        latent_dim = int(self.sem.out_features)
+        return {"z_sem": latent_dim, "z_dyn": latent_dim, "z_ctrl": latent_dim, "z_ctx": latent_dim}
+
 
 @LATENT_PROJECTORS.register("adaptive_role_split_mlp")
 class AdaptiveRoleSplitLatentProjector(ILatentProjector):
@@ -101,6 +106,15 @@ class AdaptiveRoleSplitLatentProjector(ILatentProjector):
             z_ctx=role_features[3],
             extras=extras,
         )
+
+    @property
+    def role_dims(self) -> Dict[str, int]:
+        return {
+            "z_sem": int(self.latent_dim),
+            "z_dyn": int(self.latent_dim),
+            "z_ctrl": int(self.latent_dim),
+            "z_ctx": int(self.latent_dim),
+        }
 
 
 # ============================================================
