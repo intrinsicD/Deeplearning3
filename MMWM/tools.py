@@ -299,10 +299,18 @@ class ToolExecutionEngine:
             stop_prob = torch.sigmoid(route["stop_logit"]).squeeze(-1)  # [B]
             action_ids = route["action_logits"].argmax(dim=-1)  # [B]
             stop_all = bool((stop_prob > 0.5).all())
-            action_id = int(action_ids[0].item())
+            unique_action_ids = torch.unique(action_ids)
+            if unique_action_ids.numel() != 1:
+                raise ValueError(
+                    "ToolExecutionEngine received a batched route with different tool actions per sample. "
+                    "Current iterate() executes one tool call per step; use batch size 1 or a per-sample "
+                    "tool execution path."
+                )
+            action_id = int(unique_action_ids.item())
             trace.append({
                 "step": step,
                 "stop_prob_mean": float(stop_prob.mean().item()),
+                "stop_prob": stop_prob.detach().cpu().tolist(),
                 "action_ids": action_ids.detach().cpu().tolist(),
                 "action_id": action_id,
             })
