@@ -2,6 +2,20 @@
 
 This document translates high-impact components already present in this repository into a staged plan for MMWM.
 
+## Status update — April 29, 2026
+
+Several original roadmap items have moved from "integration target" to "implemented, needs empirical validation":
+
+- Kendall-style learned uncertainty weighting exists in `MMWM/losses.py`.
+- Static and adaptive curriculum utilities exist in `MMWM/curriculum.py`.
+- Mamba-inspired memory exists as `mamba_ssm` in `MMWM/components.py`.
+- MoD surprise routing exists as `mod_recurrent_attnres_transformer` in `MMWM/transitions.py`.
+- Slot attention/token merging paths exist in `MMWM/encoders.py`.
+- Audio can now be used as an input modality via `AudioSubEncoder`.
+- A deterministic smoke-training data path exists in `MMWM/data.py`.
+
+The next practical roadmap should prioritize validation and dataset adapters over adding more architecture: D4RL/DMControl/TextWorld-style adapters, loss-decrease smoke tests, rollout evaluation, and a supervised training path for `LatentRouter`.
+
 ## 1) Kendall Uncertainty-Weighted Multi-Task Loss (Highest ROI, lowest risk)
 
 **Source reference:** `omnilatent/training/losses.py`

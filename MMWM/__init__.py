@@ -24,6 +24,7 @@ from .curriculum import (
     default_curriculum_phases,
     relative_curriculum_phases,
 )
+from .data import DeterministicTransitionDataset, collate_transition_batch
 from .evaluation import EvalResult, EvaluationSuite
 from .losses import LossWeights, WorldModelLoss
 from .model import ModularLatentWorldModel
@@ -45,10 +46,12 @@ __all__ = [
     "ToolDescriptor",
     "ToolResult",
     "CurriculumPhase",
+    "DeterministicTransitionDataset",
     "TransitionOutput",
     "WorldModelLoss",
     "build_lr_scheduler",
     "build_model",
+    "collate_transition_batch",
     "build_tool_ecosystem",
     "default_curriculum_phases",
     "relative_curriculum_phases",

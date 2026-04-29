@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deeplearning3 Control Center</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121a2f;
+      --panel-2: #18223b;
+      --text: #edf3ff;
+      --muted: #9fb0d0;
+      --line: rgba(255,255,255,.12);
+      --accent: #67e8f9;
+      --accent-2: #a78bfa;
+      --good: #34d399;
+      --warn: #fbbf24;
+      --bad: #fb7185;
+      --shadow: 0 22px 70px rgba(0,0,0,.35);
+      --radius: 18px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, rgba(103,232,249,.16), transparent 35%),
+                  radial-gradient(circle at top right, rgba(167,139,250,.18), transparent 30%), var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(16px);
+      background: rgba(11,16,32,.78);
+      border-bottom: 1px solid var(--line);
+    }
+    .wrap { max-width: 1440px; margin: 0 auto; padding: 18px 22px; }
+    .hero { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; align-items: center; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 4vw, 48px); letter-spacing: -.04em; }
+    h2 { margin: 0 0 14px; font-size: 22px; }
+    h3 { margin: 0 0 10px; font-size: 16px; color: #dbeafe; }
+    p { color: var(--muted); line-height: 1.55; }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pill { border: 1px solid var(--line); color: #cfe7ff; background: rgba(255,255,255,.05); border-radius: 999px; padding: 7px 11px; font-size: 12px; }
+    .grid { display: grid; gap: 16px; }
+    .cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+    .soft { background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+    main { padding: 20px 0 56px; }
+    nav.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+    .tab-btn, button, .button {
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: rgba(255,255,255,.06);
+      border-radius: 12px;
+      padding: 10px 13px;
+      cursor: pointer;
+      transition: .18s ease;
+      font-weight: 650;
+      text-decoration: none;
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+    }
+    .tab-btn:hover, button:hover, .button:hover { transform: translateY(-1px); border-color: rgba(103,232,249,.55); }
+    .tab-btn.active, .primary { background: linear-gradient(135deg, rgba(103,232,249,.24), rgba(167,139,250,.22)); border-color: rgba(103,232,249,.6); }
+    .danger { border-color: rgba(251,113,133,.45); color: #fecdd3; }
+    .ok { border-color: rgba(52,211,153,.45); color: #bbf7d0; }
+    section.tab { display: none; }
+    section.tab.active { display: block; }
+    label { display: grid; gap: 6px; color: #dbeafe; font-size: 13px; font-weight: 650; }
+    input, select, textarea {
+      width: 100%;
+      color: var(--text);
+      background: rgba(3,7,18,.62);
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 10px 11px;
+      outline: none;
+    }
+    input:focus, select:focus, textarea:focus { border-color: rgba(103,232,249,.7); box-shadow: 0 0 0 3px rgba(103,232,249,.1); }
+    textarea { min-height: 96px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .field-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .field-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .field-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(3,7,18,.78);
+      border: 1px solid var(--line);
+      color: #d1fae5;
+      border-radius: 14px;
+      padding: 14px;
+      overflow: auto;
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .status { display: flex; align-items: center; gap: 10px; }
+    .dot { width: 10px; height: 10px; border-radius: 999px; background: var(--muted); box-shadow: 0 0 0 4px rgba(255,255,255,.04); }
+    .dot.good { background: var(--good); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+    .meter { height: 9px; background: rgba(255,255,255,.08); border-radius: 999px; overflow: hidden; border: 1px solid var(--line); }
+    .meter > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
+    .drop {
+      border: 1px dashed rgba(103,232,249,.5);
+      background: rgba(103,232,249,.05);
+      border-radius: 16px;
+      padding: 22px;
+      text-align: center;
+    }
+    .drop.drag { background: rgba(103,232,249,.14); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 10px 8px; vertical-align: top; }
+    th { color: #bfdbfe; }
+    .small { font-size: 12px; color: var(--muted); }
+    .right { margin-left: auto; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .hidden { display: none !important; }
+    @media (max-width: 980px) { .hero, .cols-2, .cols-3, .cols-4, .field-grid, .field-grid.three, .field-grid.two { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="hero">
+        <div>
+          <h1>Deeplearning3 Control Center</h1>
+          <p>Configure training, register datasets, monitor jobs, generate commands, and run/use-case workflows for <b>MMWM</b>, <b>OmniLatent</b>, <b>HPWM</b>, <b>LGQ</b>, and the <b>Gaussian Encoder</b>.</p>
+          <div class="pill-row">
+            <span class="pill">Static dashboard</span>
+            <span class="pill">Optional local API</span>
+            <span class="pill">Dataset uploader</span>
+            <span class="pill">Command generator</span>
+            <span class="pill">Training status</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="status"><span id="apiDot" class="dot warn"></span><b id="apiLabel">Backend: not connected</b></div>
+          <p class="small">This page works standalone. If you later run a local backend, set its API URL and this page can poll status or send JSON job requests.</p>
+          <div class="field-grid two">
+            <label>API base URL<input id="apiBase" value="http://localhost:8000" /></label>
+            <label>Poll interval seconds<input id="pollSec" type="number" value="3" min="1" /></label>
+          </div>
+          <div class="actions" style="margin-top:12px">
+            <button onclick="checkBackend()">Check backend</button>
+            <button onclick="togglePolling()" id="pollBtn">Start polling</button>
+            <button onclick="simulateTick()">Simulate status</button>
+          </div>
+        </div>
+      </div>
+      <nav class="tabs" id="tabs"></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="tab active" id="overview">
+      <div class="grid cols-3">
+        <div class="card"><h2>1. Prepare</h2><p>Install dependencies, pick a model family, define data shape, then validate with tests.</p><pre id="setupCmd"></pre></div>
+        <div class="card"><h2>2. Train</h2><p>Use generated commands or export JSON config. MMWM supports deterministic smoke data and custom transition batches.</p><div class="meter"><span id="globalProgress"></span></div><p class="small" id="globalStatus">No active job.</p></div>
+        <div class="card"><h2>3. Use</h2><p>Run reconstruction, multimodal translation, latent rollout, benchmarking, evaluation, tokenization, or tool routing from the use-case panel.</p><button class="primary" onclick="activateTab('usecases')">Open use cases</button></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>System checklist</h2>
+        <table>
+          <thead><tr><th>Step</th><th>Command</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>Install editable package</td><td><code>pip install -e ".[dev,all]"</code></td><td>Installs repo, tests, and optional modalities.</td></tr>
+            <tr><td>Run MMWM tests</td><td><code>python -m pytest tests/test_mmwm_improvements.py -q</code></td><td>Validates MMWM hardening paths.</td></tr>
+            <tr><td>Run all tests</td><td><code>python -m pytest tests/ -q</code></td><td>Regression check.</td></tr>
+            <tr><td>TensorBoard</td><td><code>tensorboard --logdir runs</code></td><td>See losses, latents, gradients, and metrics.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab" id="dataset">
+      <div class="grid cols-2">
+        <div class="card">
+          <h2>Dataset / training data</h2>
+          <div class="drop" id="dropZone">
+            <b>Drop files or click to choose</b>
+            <p class="small">Files stay in your browser unless a backend is connected. Use this to inspect names/sizes and generate dataset instructions.</p>
+            <input id="fileInput" type="file" multiple class="hidden" />
+          </div>
+          <div class="field-grid two" style="margin-top:14px">
+            <label>Dataset type
+              <select id="datasetType" onchange="syncDatasetPanel(); renderCommands()">
+                <option value="mmwm_deterministic">MMWM deterministic smoke data</option>
+                <option value="minari">Minari public offline RL dataset → MMWM</option>
+                <option value="mmwm_custom_transition">MMWM custom transition tuples</option>
+                <option value="omni_synthetic">OmniLatent synthetic</option>
+                <option value="omni_video">OmniLatent video directory</option>
+                <option value="coco">COCO captions</option>
+                <option value="hpwm_synthetic">HPWM synthetic video</option>
+                <option value="ssv2">HPWM Something-Something V2</option>
+                <option value="lgq_synthetic">LGQ synthetic images</option>
+                <option value="mnist">Gaussian Encoder MNIST</option>
+              </select>
+            </label>
+            <label>Dataset path or directory<input id="datasetPath" placeholder="/path/to/data or leave blank for synthetic" oninput="renderCommands()" /></label>
+          </div>
+          <div id="minariControls" class="soft" style="margin-top:14px">
+            <h3>Minari dataset controls</h3>
+            <p class="small">Use the backend to list public Minari datasets, download one, then start MMWM vector transition training.</p>
+            <div class="field-grid two">
+              <label>Curated public dataset
+                <select id="minariDatasetSelect" onchange="selectMinariDataset(); renderCommands();">
+                  <option value="">Click “List Minari datasets” or paste an ID below</option>
+                </select>
+              </label>
+              <label>Dataset ID<input id="minariDatasetId" placeholder="Paste Minari dataset id here" oninput="renderCommands()" /></label>
+              <label>Max transitions<input id="minariMaxTransitions" type="number" value="50000" min="100" oninput="renderCommands()" /></label>
+              <label>Download before training<select id="minariDownload" onchange="renderCommands()"><option value="yes">yes</option><option value="no">no</option></select></label>
+            </div>
+            <div class="actions" style="margin-top:12px">
+              <button onclick="loadMinariDatasets()">List Minari datasets</button>
+              <button onclick="downloadMinariDataset()">Download selected dataset</button>
+              <button class="primary" onclick="startJob()">Download + train MMWM</button>
+            </div>
+          </div>
+          <label style="margin-top:12px">Dataset notes / schema
+            <textarea id="datasetNotes" oninput="saveState()" placeholder='Example MMWM item: {"vector_t": [D], "vector_tp1": [D], "action": [A]}'></textarea>
+          </label>
+        </div>
+        <div class="card">
+          <h2>Selected files</h2>
+          <div id="fileList" class="soft"><p class="small">No files selected.</p></div>
+          <div class="actions" style="margin-top:12px">
+            <button onclick="clearFiles()">Clear file list</button>
+            <button onclick="downloadJson('dataset_manifest.json', datasetManifest())">Download manifest</button>
+          </div>
+          <h3 style="margin-top:18px">Expected data formats</h3>
+          <pre id="datasetHelp"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab" id="train">
+      <div class="grid cols-2">
+        <div class="card">
+          <h2>Training controls</h2>
+          <div class="field-grid three">
+            <label>Model family
+              <select id="modelFamily" onchange="syncModelPanel(); renderCommands();">
+                <option value="mmwm">MMWM world model</option>
+                <option value="omnilatent">OmniLatent</option>
+                <option value="hpwm">HPWM</option>
+                <option value="lgq">LGQ</option>
+                <option value="gaussian">Gaussian Encoder</option>
+              </select>
+            </label>
+            <label>Device
+              <select id="device" onchange="renderCommands()"><option value="auto">auto</option><option value="cuda">cuda</option><option value="cpu">cpu</option></select>
+            </label>
+            <label>Run directory<input id="runDir" value="runs/control_center" oninput="renderCommands()" /></label>
+          </div>
+
+          <div id="mmwmPanel" class="model-panel">
+            <h3>MMWM config</h3>
+            <div class="field-grid">
+              <label>Encoder<select id="mmwmEncoder" onchange="renderCommands()"><option>simple_multimodal</option><option>structured_multimodal</option><option>slot_multimodal</option></select></label>
+              <label>Transition<select id="mmwmTransition" onchange="renderCommands()"><option>mlp</option><option>gru</option><option>attnres_transformer</option><option>recurrent_attnres_transformer</option><option>mod_recurrent_attnres_transformer</option></select></label>
+              <label>Memory<select id="mmwmMemory" onchange="renderCommands()"><option>gru</option><option>identity</option><option>mamba_ssm</option></select></label>
+              <label>Per-role latent dim<input id="mmwmLatent" type="number" value="32" min="4" oninput="renderCommands()" /></label>
+              <label>Hidden dim<input id="mmwmHidden" type="number" value="64" min="16" oninput="renderCommands()" /></label>
+              <label>Action dim<input id="mmwmAction" type="number" value="8" min="1" oninput="renderCommands()" /></label>
+              <label>Vector dim<input id="mmwmVector" type="number" value="16" min="1" oninput="renderCommands()" /></label>
+              <label>Audio channels<input id="mmwmAudioChannels" type="number" value="2" min="1" oninput="renderCommands()" /></label>
+            </div>
+          </div>
+
+          <div id="omniPanel" class="model-panel hidden">
+            <h3>OmniLatent config</h3>
+            <div class="field-grid">
+              <label>Mode<select id="omniMode" onchange="renderCommands()"><option value="synthetic">synthetic train.py</option><option value="video">video curriculum</option><option value="coco">COCO captions</option><option value="pc">predictive coding</option></select></label>
+              <label>Hidden dim<input id="omniDim" type="number" value="512" oninput="renderCommands()" /></label>
+              <label>Layers<input id="omniLayers" type="number" value="8" oninput="renderCommands()" /></label>
+              <label>Heads<input id="omniHeads" type="number" value="8" oninput="renderCommands()" /></label>
+            </div>
+          </div>
+
+          <div id="hpwmPanel" class="model-panel hidden">
+            <h3>HPWM config</h3>
+            <div class="field-grid">
+              <label>Steps<input id="hpwmSteps" type="number" value="5000" oninput="renderCommands()" /></label>
+              <label>LR<input id="hpwmLr" value="3e-4" oninput="renderCommands()" /></label>
+              <label>Temporal backend<select id="hpwmBackend" onchange="renderCommands()"><option value="mamba">Mamba</option><option value="transformer">Transformer baseline</option></select></label>
+              <label>Resume checkpoint<input id="hpwmResume" placeholder="checkpoints/hpwm/checkpoint_best.pt" oninput="renderCommands()" /></label>
+            </div>
+          </div>
+
+          <div id="lgqPanel" class="model-panel hidden">
+            <h3>LGQ config</h3>
+            <div class="field-grid">
+              <label>Quantizer<select id="lgqQuantizer" onchange="renderCommands()"><option>lgq</option><option>fsq</option><option>simvq</option></select></label>
+              <label>Steps<input id="lgqSteps" type="number" value="100000" oninput="renderCommands()" /></label>
+              <label>Vocab size<input id="lgqVocab" type="number" value="512" oninput="renderCommands()" /></label>
+              <label>Codebooks<input id="lgqCodebooks" type="number" value="4" oninput="renderCommands()" /></label>
+            </div>
+          </div>
+
+          <div id="gaussianPanel" class="model-panel hidden">
+            <h3>Gaussian Encoder config</h3>
+            <div class="field-grid">
+              <label>Epochs<input id="gaussEpochs" type="number" value="5" oninput="renderCommands()" /></label>
+              <label>Latent dim<input id="gaussLatent" type="number" value="32" oninput="renderCommands()" /></label>
+              <label>LR<input id="gaussLr" value="1e-3" oninput="renderCommands()" /></label>
+              <label>Batch size<input id="gaussBatch" type="number" value="256" oninput="renderCommands()" /></label>
+            </div>
+          </div>
+
+          <h3 style="margin-top:16px">Shared training values</h3>
+          <div class="field-grid">
+            <label>Steps<input id="steps" type="number" value="1000" min="1" oninput="renderCommands()" /></label>
+            <label>Batch size<input id="batchSize" type="number" value="32" min="1" oninput="renderCommands()" /></label>
+            <label>Learning rate<input id="lr" value="3e-4" oninput="renderCommands()" /></label>
+            <label>Mixed precision<select id="amp" onchange="renderCommands()"><option value="yes">yes</option><option value="no">no</option></select></label>
+          </div>
+          <div class="actions" style="margin-top:14px">
+            <button class="primary" onclick="startJob()">Start / send job</button>
+            <button onclick="simulateJob()">Simulate training</button>
+            <button class="danger" onclick="stopJob()">Stop</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Generated command</h2>
+          <pre id="commandOut"></pre>
+          <div class="actions" style="margin-top:12px">
+            <button onclick="copyText('commandOut')">Copy command</button>
+            <button onclick="downloadText('train_command.sh', document.getElementById('commandOut').innerText)">Download .sh</button>
+          </div>
+          <h2 style="margin-top:18px">Generated config JSON</h2>
+          <pre id="configOut"></pre>
+          <div class="actions" style="margin-top:12px">
+            <button onclick="copyText('configOut')">Copy JSON</button>
+            <button onclick="downloadJson('training_config.json', currentConfig())">Download JSON</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab" id="status">
+      <div class="grid cols-4">
+        <div class="card"><h3>State</h3><div class="status"><span id="jobDot" class="dot warn"></span><b id="jobState">idle</b></div></div>
+        <div class="card"><h3>Step</h3><b id="jobStep">0 / 0</b></div>
+        <div class="card"><h3>Loss</h3><b id="jobLoss">—</b></div>
+        <div class="card"><h3>Device</h3><b id="jobDevice">—</b></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h2>Training progress</h2>
+        <div class="meter"><span id="jobProgress"></span></div>
+        <div class="grid cols-2" style="margin-top:16px">
+          <div><h3>Latest metrics</h3><pre id="metricsOut">No metrics yet.</pre></div>
+          <div><h3>Event log</h3><pre id="logOut">Ready.</pre></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab" id="usecases">
+      <div class="grid cols-2">
+        <div class="card">
+          <h2>Use-case launcher</h2>
+          <div class="field-grid two">
+            <label>Use case
+              <select id="useCase" onchange="renderUseCase()">
+                <option value="mmwm_predict">MMWM: one-step latent prediction</option>
+                <option value="mmwm_rollout">MMWM: multi-step rollout</option>
+                <option value="mmwm_tool">MMWM: tool routing</option>
+                <option value="omni_reconstruct">OmniLatent: self reconstruction</option>
+                <option value="omni_translate">OmniLatent: cross-modal translation</option>
+                <option value="omni_file">OmniLatent: file inference</option>
+                <option value="hpwm_eval">HPWM: world-model evaluation</option>
+                <option value="lgq_eval">LGQ: tokenizer evaluation</option>
+                <option value="gauss_recon">Gaussian Encoder: MNIST reconstruction</option>
+                <option value="benchmark">OmniLatent benchmark report</option>
+              </select>
+            </label>
+            <label>Checkpoint<input id="checkpoint" value="checkpoints/checkpoint_final.pt" oninput="renderUseCase()" /></label>
+            <label>Source modality<select id="sourceMod" onchange="renderUseCase()"><option>image</option><option>text</option><option>audio</option><option>video</option><option>vector</option></select></label>
+            <label>Target modality<select id="targetMod" onchange="renderUseCase()"><option>text</option><option>image</option><option>audio</option><option>video</option><option>vector</option></select></label>
+            <label>Input file<input id="inputFilePath" placeholder="photo.jpg / audio.wav / clip.mp4 / prompt.txt" oninput="renderUseCase()" /></label>
+            <label>Output path<input id="outputPath" placeholder="outputs/result" oninput="renderUseCase()" /></label>
+          </div>
+          <label style="margin-top:12px">Prompt / vector / notes<textarea id="usePayload" oninput="renderUseCase()" placeholder="Optional payload or notes for your backend/inference script"></textarea></label>
+          <div class="actions" style="margin-top:12px">
+            <button class="primary" onclick="sendUseCase()">Send to backend</button>
+            <button onclick="renderUseCase()">Refresh command</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Use-case command / payload</h2>
+          <pre id="useCaseOut"></pre>
+          <div class="actions" style="margin-top:12px">
+            <button onclick="copyText('useCaseOut')">Copy</button>
+            <button onclick="downloadText('use_case_command.sh', document.getElementById('useCaseOut').innerText)">Download</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab" id="api">
+      <div class="grid cols-2">
+        <div class="card">
+          <h2>Optional backend contract</h2>
+          <p>This static page can work with a simple FastAPI/Flask backend if you add one later.</p>
+          <table>
+            <thead><tr><th>Endpoint</th><th>Method</th><th>Expected purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>/api/status</code></td><td>GET</td><td>Health check.</td></tr>
+              <tr><td><code>/api/jobs</code></td><td>GET</td><td>Current job status and metrics.</td></tr>
+              <tr><td><code>/api/minari/datasets</code></td><td>GET</td><td>List public Minari datasets.</td></tr>
+              <tr><td><code>/api/minari/download</code></td><td>POST</td><td>Download a selected Minari dataset.</td></tr>
+              <tr><td><code>/api/train/start</code></td><td>POST</td><td>Start training with generated JSON.</td></tr>
+              <tr><td><code>/api/train/stop</code></td><td>POST</td><td>Stop active job.</td></tr>
+              <tr><td><code>/api/usecase/run</code></td><td>POST</td><td>Run inference/use-case payload.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h2>Last API response</h2>
+          <pre id="apiOut">No API calls yet.</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const tabList = [
+      ['overview', 'Overview'], ['dataset', 'Dataset'], ['train', 'Train'], ['status', 'Status'], ['usecases', 'Use cases'], ['api', 'API']
+    ];
+    const state = { files: [], pollTimer: null, simTimer: null, job: {state:'idle', step:0, total:0, loss:null, device:'—', metrics:{}, log:['Ready.']} };
+
+    function $(id) { return document.getElementById(id); }
+    function val(id) { return $(id)?.value ?? ''; }
+    function num(id) { return Number(val(id)); }
+
+    function initTabs() {
+      $('tabs').innerHTML = tabList.map(([id, label]) => `<button class="tab-btn ${id==='overview'?'active':''}" onclick="activateTab('${id}')">${label}</button>`).join('');
+    }
+    function activateTab(id) {
+      document.querySelectorAll('section.tab').forEach(s => s.classList.toggle('active', s.id === id));
+      document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', tabList[i][0] === id));
+    }
+    function syncModelPanel() {
+      const family = val('modelFamily');
+      document.querySelectorAll('.model-panel').forEach(p => p.classList.add('hidden'));
+      const map = {mmwm:'mmwmPanel', omnilatent:'omniPanel', hpwm:'hpwmPanel', lgq:'lgqPanel', gaussian:'gaussianPanel'};
+      $(map[family]).classList.remove('hidden');
+    }
+
+    function datasetManifest() {
+      return {
+        type: val('datasetType'),
+        path: val('datasetPath'),
+        minari_dataset_id: val('minariDatasetId'),
+        max_transitions: num('minariMaxTransitions'),
+        download: val('minariDownload') !== 'no',
+        notes: val('datasetNotes'),
+        files: state.files,
+        generated_at: new Date().toISOString()
+      };
+    }
+
+    function syncDatasetPanel() {
+      const isMinari = val('datasetType') === 'minari';
+      $('minariControls')?.classList.toggle('hidden', !isMinari);
+    }
+
+    function selectMinariDataset() {
+      const selected = val('minariDatasetSelect');
+      if (selected) $('minariDatasetId').value = selected;
+    }
+
+    function currentConfig() {
+      const latent = num('mmwmLatent');
+      const mmwmHidden = num('mmwmHidden');
+      return {
+        model_family: val('modelFamily'),
+        dataset: datasetManifest(),
+        common: {steps: num('steps'), batch_size: num('batchSize'), learning_rate: val('lr'), device: val('device'), amp: val('amp'), run_dir: val('runDir')},
+        mmwm: {
+          encoder: val('mmwmEncoder'), transition: val('mmwmTransition'), memory: val('mmwmMemory'),
+          latent_dim: latent, primary_dim: latent * 4, hidden_dim: mmwmHidden,
+          vector_dim: num('mmwmVector'), action_dim: num('mmwmAction'), audio_channels: num('mmwmAudioChannels')
+        },
+        omnilatent: {mode: val('omniMode'), hidden_dim: num('omniDim'), layers: num('omniLayers'), heads: num('omniHeads')},
+        hpwm: {steps: num('hpwmSteps'), lr: val('hpwmLr'), backend: val('hpwmBackend'), resume: val('hpwmResume')},
+        lgq: {quantizer: val('lgqQuantizer'), steps: num('lgqSteps'), vocab_size: num('lgqVocab'), n_codebooks: num('lgqCodebooks')},
+        gaussian: {epochs: num('gaussEpochs'), latent_dim: num('gaussLatent'), lr: val('gaussLr'), batch_size: num('gaussBatch')}
+      };
+    }
+
+    function renderCommands() {
+      syncDatasetPanel();
+      const cfg = currentConfig();
+      const dPath = cfg.dataset.path;
+      let cmd = '';
+      if (cfg.model_family === 'mmwm') {
+        if (cfg.dataset.type === 'minari') {
+          const datasetId = cfg.dataset.minari_dataset_id || 'PASTE_MINARI_DATASET_ID';
+          const parts = [
+            'python train_mmwm_minari.py',
+            `  --dataset-id "${datasetId}"`,
+            cfg.dataset.download ? '  --download' : null,
+            `  --steps ${cfg.common.steps}`,
+            `  --batch-size ${cfg.common.batch_size}`,
+            `  --lr ${cfg.common.learning_rate}`,
+            `  --latent-dim ${cfg.mmwm.latent_dim}`,
+            `  --hidden-dim ${cfg.mmwm.hidden_dim}`,
+            `  --transition ${cfg.mmwm.transition}`,
+            `  --max-transitions ${cfg.dataset.max_transitions || 50000}`,
+            `  --run-dir "${cfg.common.run_dir}"`,
+          ].filter(Boolean);
+          cmd = parts.join(' \\\n');
+        } else {
+          cmd = `# MMWM currently uses Python API training. Save config JSON from this page, then use it in your runner.\n# Minimal built-in smoke path:\npython - <<'PY'\nimport torch\nfrom torch.utils.data import DataLoader\nfrom MMWM import ModelConfig, WorldModelLoss, build_model, build_lr_scheduler, DeterministicTransitionDataset, collate_transition_batch\nfrom MMWM.trainer import Trainer\n\ndevice = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\ncfg = ModelConfig(\n    encoder_name='${cfg.mmwm.encoder}',\n    encoder_kwargs={'text_vocab_size':256,'text_embed_dim':32,'vector_input_dim':${cfg.mmwm.vector_dim},'image_channels':3,'audio_channels':${cfg.mmwm.audio_channels},'hidden_dim':${cfg.mmwm.hidden_dim}},\n    latent_projector_kwargs={'input_dim':${cfg.mmwm.hidden_dim},'latent_dim':${cfg.mmwm.latent_dim},'use_norm':True},\n    memory_name='${cfg.mmwm.memory}',\n    memory_kwargs={'input_dim':${cfg.mmwm.latent_dim + Math.max(1, cfg.mmwm.latent_dim)},'hidden_dim':${cfg.mmwm.latent_dim}},\n    action_encoder_kwargs={'action_dim':${cfg.mmwm.action_dim},'action_embed_dim':${cfg.mmwm.latent_dim}},\n    conditioner_kwargs={'latent_dim':${cfg.mmwm.primary_dim},'action_dim':${cfg.mmwm.latent_dim},'memory_dim':${cfg.mmwm.latent_dim},'out_dim':${cfg.mmwm.primary_dim}},\n    transition_core_name='${cfg.mmwm.transition}',\n    transition_core_kwargs={'input_dim':${cfg.mmwm.primary_dim},'hidden_dim':${cfg.mmwm.primary_dim}},\n    prediction_head_kwargs={'hidden_dim':${cfg.mmwm.primary_dim},'latent_dim':${cfg.mmwm.latent_dim}},\n    decoder_configs=[('vector_reconstruction', {'latent_dim':${cfg.mmwm.latent_dim}, 'output_dim':${cfg.mmwm.vector_dim}})],\n)\nmodel = build_model(cfg)\ndataset = DeterministicTransitionDataset(length=2048, vector_dim=${cfg.mmwm.vector_dim}, action_dim=${cfg.mmwm.action_dim}, include_audio=True, audio_channels=${cfg.mmwm.audio_channels})\nloader = DataLoader(dataset, batch_size=${cfg.common.batch_size}, shuffle=True, collate_fn=collate_transition_batch)\nopt = torch.optim.AdamW(model.parameters(), lr=${cfg.common.learning_rate})\nsched = build_lr_scheduler(opt, total_steps=${cfg.common.steps})\ntrainer = Trainer(model, opt, WorldModelLoss(learned_uncertainty=True), device, run_dir='${cfg.common.run_dir}', mixed_precision=${cfg.common.amp === 'yes' ? 'device.type == \'cuda\'' : 'False'}, lr_scheduler=sched)\nfor step, batch in enumerate(loader):\n    metrics, _ = trainer.train_step(batch)\n    if step % 20 == 0: print(step, metrics.get('total_loss'))\n    if step >= ${cfg.common.steps}: break\ntrainer.save_checkpoint('${cfg.common.run_dir}/checkpoint_final.pt')\nPY`;
+        }
+      } else if (cfg.model_family === 'omnilatent') {
+        const m = cfg.omnilatent.mode;
+        if (m === 'video') cmd = `python curriculum_train.py --video-dir ${dPath || './videos'} --total-steps ${cfg.common.steps} --dim ${cfg.omnilatent.hidden_dim} --layers ${cfg.omnilatent.layers} --heads ${cfg.omnilatent.heads}`;
+        else if (m === 'coco') cmd = `python train_coco.py --image-dir ${dPath || 'data/train2014'} --annotation-file data/annotations/captions_train2014.json --total-steps ${cfg.common.steps}`;
+        else if (m === 'pc') cmd = `python train_pc.py --inference-steps 20`;
+        else cmd = `python train.py --steps ${cfg.common.steps} --batch-size ${cfg.common.batch_size} --dim ${cfg.omnilatent.hidden_dim} --layers ${cfg.omnilatent.layers} --heads ${cfg.omnilatent.heads}${cfg.common.amp === 'no' ? ' --no-amp' : ''}`;
+      } else if (cfg.model_family === 'hpwm') {
+        cmd = `python -m hpwm.train --steps ${cfg.hpwm.steps} --lr ${cfg.hpwm.lr}${dPath ? ` --ssv2-dir ${dPath}` : ''}${cfg.hpwm.backend === 'transformer' ? ' --no-mamba' : ''}${cfg.hpwm.resume ? ` --resume ${cfg.hpwm.resume}` : ''}`;
+      } else if (cfg.model_family === 'lgq') {
+        cmd = `python -m lgq.train --quantizer ${cfg.lgq.quantizer} --steps ${cfg.lgq.steps} --vocab-size ${cfg.lgq.vocab_size} --n-codebooks ${cfg.lgq.n_codebooks}`;
+      } else {
+        cmd = `python -m gaussian_encoder.train --epochs ${cfg.gaussian.epochs} --latent-dim ${cfg.gaussian.latent_dim} --lr ${cfg.gaussian.lr}`;
+      }
+      $('commandOut').textContent = cmd;
+      $('configOut').textContent = JSON.stringify(cfg, null, 2);
+      renderDatasetHelp();
+      saveState();
+    }
+
+    function renderDatasetHelp() {
+      const type = val('datasetType');
+      const help = {
+        mmwm_deterministic: `Built-in smoke dataset. No files required. Produces vector_t/vector_tp1/action and optional text/image/audio targets.`,
+        minari: `Public offline RL data. Backend lists/downloads Minari dataset IDs, then train_mmwm_minari.py maps observations/actions to vector_t/action/vector_tp1 for MMWM.`,
+        mmwm_custom_transition: `Expected item keys: vector_t, vector_tp1, action. Optional: text_t/text_tp1/prefix_tokens/text_target, image_t/image_tp1/image_target, audio_t/audio_tp1/audio_target.`,
+        omni_synthetic: `No dataset required. Uses train.py synthetic tensors for text/audio/image/video.`,
+        omni_video: `Directory of .mp4/.avi/.mkv/.webm plus optional .txt/.srt transcripts.`,
+        coco: `COCO image directory plus captions annotation JSON.`,
+        hpwm_synthetic: `No dataset required. HPWM synthetic mode.`,
+        ssv2: `Something-Something V2 directory for HPWM.`,
+        lgq_synthetic: `No dataset required. Synthetic structured images.`,
+        mnist: `No dataset path required. MNIST downloads through torchvision.`
+      };
+      $('datasetHelp').textContent = help[type] || '';
+    }
+
+    function renderUseCase() {
+      const ckpt = val('checkpoint'); const source = val('sourceMod'); const target = val('targetMod'); const input = val('inputFilePath'); const out = val('outputPath');
+      const uc = val('useCase');
+      const map = {
+        mmwm_predict: `python mmwm_usecase.py --mode predict --checkpoint ${ckpt} --config-json runs/control_center_backend/usecase_config.json --output outputs/mmwm_predict.json`,
+        mmwm_rollout: `python mmwm_usecase.py --mode rollout --checkpoint ${ckpt} --config-json runs/control_center_backend/usecase_config.json --steps 5 --output outputs/mmwm_rollout.json`,
+        mmwm_tool: `python mmwm_usecase.py --mode tool --checkpoint ${ckpt} --config-json runs/control_center_backend/usecase_config.json --steps 5 --output outputs/mmwm_tool.json`,
+        omni_reconstruct: `python evaluate.py --checkpoint ${ckpt} --mode reconstruct`,
+        omni_translate: `python evaluate.py --checkpoint ${ckpt} --mode translate`,
+        omni_file: `python evaluate.py --checkpoint ${ckpt} --input-file ${input || 'photo.jpg'} --source ${source} --target ${target} --mode file${out ? ` --output-dir ${out}` : ''}`,
+        hpwm_eval: `python -m hpwm.train --eval-only --resume ${ckpt || 'checkpoints/hpwm/checkpoint_best.pt'}`,
+        lgq_eval: `python -m lgq.evaluate --checkpoint ${ckpt || 'checkpoints/lgq/best.pt'}`,
+        gauss_recon: `python -m gaussian_encoder.train --epochs 5 --latent-dim 32`,
+        benchmark: `python benchmark.py --checkpoint ${ckpt} --output report.json`
+      };
+      const payload = {use_case: uc, checkpoint: ckpt, source, target, input_file: input, output_path: out, notes: val('usePayload')};
+      $('useCaseOut').textContent = `${map[uc]}\n\n# JSON payload for optional backend:\n${JSON.stringify(payload, null, 2)}`;
+    }
+
+    function updateStatus() {
+      const j = state.job;
+      const pct = j.total ? Math.min(100, Math.round(100*j.step/j.total)) : 0;
+      $('jobState').textContent = j.state;
+      $('jobStep').textContent = `${j.step} / ${j.total}`;
+      $('jobLoss').textContent = j.loss == null ? '—' : Number(j.loss).toFixed(5);
+      $('jobDevice').textContent = j.device;
+      $('jobProgress').style.width = pct + '%';
+      $('globalProgress').style.width = pct + '%';
+      $('globalStatus').textContent = j.state === 'idle' ? 'No active job.' : `${j.state}: ${pct}%`;
+      $('metricsOut').textContent = JSON.stringify(j.metrics, null, 2);
+      $('logOut').textContent = j.log.slice(-30).join('\n');
+      $('jobDot').className = 'dot ' + (j.state === 'running' ? 'good' : j.state === 'error' ? 'bad' : 'warn');
+    }
+
+    async function loadMinariDatasets() {
+      try {
+        const r = await fetch(val('apiBase') + '/api/minari/datasets', {cache:'no-store'});
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const data = await r.json();
+        const list = (data.curated && data.curated.length ? data.curated : data.datasets) || [];
+        $('minariDatasetSelect').innerHTML = '<option value="">Select a Minari dataset</option>' + list.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+        $('apiDot').className = 'dot good';
+        $('apiLabel').textContent = 'Backend: connected';
+        $('apiOut').textContent = JSON.stringify(data, null, 2);
+        activateTab('dataset');
+      } catch (e) {
+        $('apiDot').className = 'dot warn';
+        $('apiLabel').textContent = 'Backend: not connected';
+        $('apiOut').textContent = 'Could not list Minari datasets. Start the backend with: python server.py\n\n' + e;
+        activateTab('api');
+      }
+    }
+
+    async function downloadMinariDataset() {
+      selectMinariDataset();
+      const datasetId = val('minariDatasetId');
+      if (!datasetId) {
+        $('apiOut').textContent = 'Choose or paste a Minari dataset id first.';
+        activateTab('api');
+        return;
+      }
+      try {
+        const r = await fetch(val('apiBase') + '/api/minari/download', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({dataset_id: datasetId, force_download: false})
+        });
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`);
+        const data = await r.json();
+        $('apiOut').textContent = JSON.stringify(data, null, 2);
+        $('apiDot').className = 'dot good';
+        $('apiLabel').textContent = 'Backend: connected';
+        activateTab('api');
+      } catch (e) {
+        $('apiOut').textContent = 'Download failed. Check dataset id and backend dependencies.\n\n' + e;
+        activateTab('api');
+      }
+    }
+
+    async function checkBackend() {
+      try {
+        const r = await fetch(val('apiBase') + '/api/status', {cache:'no-store'});
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const data = await r.json().catch(() => ({ok:true}));
+        $('apiDot').className = 'dot good'; $('apiLabel').textContent = 'Backend: connected'; $('apiOut').textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        $('apiDot').className = 'dot warn'; $('apiLabel').textContent = 'Backend: not connected'; $('apiOut').textContent = String(e);
+      }
+    }
+    async function pollJobs() {
+      try {
+        const r = await fetch(val('apiBase') + '/api/jobs', {cache:'no-store'});
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const data = await r.json();
+        state.job = {...state.job, ...data};
+        if (!Array.isArray(state.job.log)) state.job.log = [JSON.stringify(data)];
+        updateStatus();
+      } catch (e) { state.job.log.push('Poll failed: ' + e); updateStatus(); }
+    }
+    function togglePolling() {
+      if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; $('pollBtn').textContent = 'Start polling'; return; }
+      pollJobs(); state.pollTimer = setInterval(pollJobs, Math.max(1, num('pollSec')) * 1000); $('pollBtn').textContent = 'Stop polling';
+    }
+    async function startJob() {
+      const payload = currentConfig();
+      try {
+        const r = await fetch(val('apiBase') + '/api/train/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`);
+        const data = await r.json(); $('apiOut').textContent = JSON.stringify(data, null, 2); state.job.log.push('Backend job submitted.');
+      } catch (e) {
+        state.job.log.push('Backend start unavailable: ' + e);
+        if (payload.dataset && payload.dataset.type === 'minari') {
+          $('apiOut').textContent = 'Could not start real Minari training. Check backend, dataset id, and dependencies.\n\n' + e;
+          activateTab('api');
+          updateStatus();
+          return;
+        }
+        simulateJob();
+      }
+      updateStatus(); activateTab('status');
+    }
+    async function stopJob() {
+      clearInterval(state.simTimer); state.simTimer = null; state.job.state = 'stopped'; state.job.log.push('Stop requested.'); updateStatus();
+      try { await fetch(val('apiBase') + '/api/train/stop', {method:'POST'}); } catch {}
+    }
+    function simulateJob() {
+      clearInterval(state.simTimer);
+      state.job = {state:'running', step:0, total:num('steps') || 100, loss:4.0, device: val('device'), metrics:{total_loss:4.0}, log:['Simulated training started.']};
+      updateStatus(); activateTab('status');
+      state.simTimer = setInterval(simulateTick, 900);
+    }
+    function simulateTick() {
+      const j = state.job; if (j.state !== 'running') { j.state = 'running'; j.total = j.total || (num('steps') || 100); }
+      j.step = Math.min(j.total, j.step + Math.max(1, Math.ceil(j.total / 50)));
+      j.loss = Math.max(.02, (j.loss ?? 4) * (0.96 + Math.random()*0.025));
+      j.metrics = {total_loss:j.loss, latent_sem_loss:j.loss*.45, regularizer_loss:j.loss*.05, progress:j.total ? j.step/j.total : 0};
+      j.log.push(`[${new Date().toLocaleTimeString()}] step ${j.step}/${j.total} loss=${j.loss.toFixed(5)}`);
+      if (j.step >= j.total) { j.state = 'finished'; clearInterval(state.simTimer); state.simTimer = null; j.log.push('Simulated training finished.'); }
+      updateStatus();
+    }
+    async function sendUseCase() {
+      const payload = {
+        command: $('useCaseOut').textContent,
+        use_case: val('useCase'),
+        checkpoint: val('checkpoint'),
+        source: val('sourceMod'),
+        target: val('targetMod'),
+        input_file: val('inputFilePath'),
+        output_path: val('outputPath'),
+        notes: val('usePayload'),
+        config: currentConfig()
+      };
+      try {
+        const r = await fetch(val('apiBase') + '/api/usecase/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}: ${await r.text()}`);
+        const data = await r.json();
+        $('apiOut').textContent = JSON.stringify(data, null, 2);
+        state.job = {...state.job, ...data};
+        updateStatus();
+        activateTab('status');
+      } catch(e) { $('apiOut').textContent = 'Could not start use case. Check backend, checkpoint/input paths, and dependencies.\n\n' + e; activateTab('api'); }
+    }
+
+    function copyText(id) { navigator.clipboard.writeText($(id).innerText); }
+    function downloadText(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], {type:'text/plain'})); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
+    function downloadJson(name, obj) { downloadText(name, JSON.stringify(obj, null, 2)); }
+    function saveState() { localStorage.setItem('dl3-dashboard', JSON.stringify({datasetNotes:val('datasetNotes'), files:state.files})); }
+    function restoreState() { try { const s = JSON.parse(localStorage.getItem('dl3-dashboard')||'{}'); if (s.datasetNotes) $('datasetNotes').value = s.datasetNotes; if (s.files) state.files = s.files; } catch {} }
+    function clearFiles() { state.files = []; renderFiles(); saveState(); }
+    function renderFiles() {
+      if (!state.files.length) { $('fileList').innerHTML = '<p class="small">No files selected.</p>'; return; }
+      $('fileList').innerHTML = `<table><thead><tr><th>Name</th><th>Size</th><th>Type</th></tr></thead><tbody>${state.files.map(f => `<tr><td>${escapeHtml(f.name)}</td><td>${formatBytes(f.size)}</td><td>${escapeHtml(f.type || 'unknown')}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function handleFiles(files) { state.files = Array.from(files).map(f => ({name:f.name, size:f.size, type:f.type, lastModified:f.lastModified})); renderFiles(); saveState(); }
+    function formatBytes(n) { if (!n) return '0 B'; const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return `${n.toFixed(i?1:0)} ${u[i]}`; }
+    function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+    function initDrop() {
+      const dz = $('dropZone'), input = $('fileInput');
+      dz.onclick = () => input.click(); input.onchange = e => handleFiles(e.target.files);
+      ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
+      ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
+      dz.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+    }
+
+    function init() {
+      initTabs(); restoreState(); initDrop(); syncModelPanel(); syncDatasetPanel(); renderFiles(); renderCommands(); renderUseCase(); updateStatus();
+      $('setupCmd').textContent = `cd /home/alex/Documents/Deeplearning3\npython -m venv .venv\nsource .venv/bin/activate\npip install -e \".[dev,all]\"\npython -m pytest tests/ -q`;
+      document.querySelectorAll('input, select, textarea').forEach(el => el.addEventListener('change', () => { renderCommands(); renderUseCase(); saveState(); }));
+    }
+    init();
+  </script>
+</body>
+</html>
+

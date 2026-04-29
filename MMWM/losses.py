@@ -97,6 +97,10 @@ class WorldModelLoss(nn.Module):
             raise ValueError(
                 f"_gaussian_nll received only one of (pred, target); '{missing}' is None."
             )
+        if pred.shape != target.shape:
+            raise ValueError(
+                f"_gaussian_nll pred/target shapes disagree: {tuple(pred.shape)} vs {tuple(target.shape)}"
+            )
         if logvar is None:
             return F.mse_loss(pred, target)
         aligned_logvar = logvar
@@ -131,6 +135,14 @@ class WorldModelLoss(nn.Module):
                 "This usually means a prediction head dropped a role that the "
                 "target still has (or vice versa). Check RoleSplit configuration."
             )
+        if pred.shape != target.shape:
+            raise ValueError(f"_mse pred/target shapes disagree: {tuple(pred.shape)} vs {tuple(target.shape)}")
+        return F.mse_loss(pred, target)
+
+    @staticmethod
+    def _mse_exact(pred: torch.Tensor, target: torch.Tensor, name: str) -> torch.Tensor:
+        if pred.shape != target.shape:
+            raise ValueError(f"{name} pred/target shapes disagree: {tuple(pred.shape)} vs {tuple(target.shape)}")
         return F.mse_loss(pred, target)
 
     def _safe_multiplier(
@@ -221,7 +233,7 @@ class WorldModelLoss(nn.Module):
         if "vector_target" in batch and any(key.endswith("vector_recon") for key in output.decoder_outputs):
             vector_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("vector_recon"))
             vector_target = batch["vector_target"]
-            losses["vector_recon_loss"] = F.mse_loss(vector_pred, vector_target)
+            losses["vector_recon_loss"] = self._mse_exact(vector_pred, vector_target, "vector_recon_loss")
             active["vector_recon_loss"] = True
         else:
             losses["vector_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
@@ -232,7 +244,7 @@ class WorldModelLoss(nn.Module):
         if "image_target" in batch and any(key.endswith("image_recon") for key in output.decoder_outputs):
             image_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("image_recon"))
             image_target = batch["image_target"]
-            losses["image_recon_loss"] = F.mse_loss(image_pred, image_target)
+            losses["image_recon_loss"] = self._mse_exact(image_pred, image_target, "image_recon_loss")
             active["image_recon_loss"] = True
         else:
             losses["image_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
@@ -243,7 +255,7 @@ class WorldModelLoss(nn.Module):
         if "audio_target" in batch and any(key.endswith("audio_recon") for key in output.decoder_outputs):
             audio_pred = next(v for k, v in output.decoder_outputs.items() if k.endswith("audio_recon"))
             audio_target = batch["audio_target"]
-            losses["audio_recon_loss"] = F.mse_loss(audio_pred, audio_target)
+            losses["audio_recon_loss"] = self._mse_exact(audio_pred, audio_target, "audio_recon_loss")
             active["audio_recon_loss"] = True
         else:
             losses["audio_recon_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
@@ -270,7 +282,7 @@ class WorldModelLoss(nn.Module):
             losses["contrastive_alignment_loss"] = torch.zeros((), device=base_device, dtype=base_dtype)
             active["contrastive_alignment_loss"] = False
 
-        weighted_losses = {
+        weighted_losses: Dict[str, torch.Tensor] = {
             "latent_sem_loss": self.weights.latent_sem * sem_w * losses["latent_sem_loss"],
             "latent_dyn_loss": self.weights.latent_dyn * dyn_w * losses["latent_dyn_loss"],
             "latent_ctrl_loss": self.weights.latent_ctrl * ctrl_w * losses["latent_ctrl_loss"],
@@ -304,7 +316,9 @@ class WorldModelLoss(nn.Module):
                 if name == "regularizer_loss":
                     losses["regularizer_effective_weight"] = effective_weight.detach()
         else:
-            total = sum(weighted_losses.values())
+            total = torch.zeros((), device=base_device, dtype=base_dtype)
+            for task_loss in weighted_losses.values():
+                total = total + task_loss
 
         losses["total_loss"] = total
         return losses

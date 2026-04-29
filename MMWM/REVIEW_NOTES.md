@@ -1,5 +1,33 @@
 # MMWM Critical Review (April 22, 2026)
 
+## Follow-up hardening pass (April 29, 2026)
+
+1. **Audio is now an input modality, not only a decoder target**
+   - Added a 1-D convolutional `AudioSubEncoder` and wired it into `simple_multimodal`, `structured_multimodal`, and `slot_multimodal` encoders.
+   - `ModelConfig.encoder_kwargs` now includes `audio_channels`.
+   - Remaining caveat: callers must set `audio_channels` to match their waveform/mel tensor channel count.
+
+2. **Recurrent transition cores now tolerate `input_dim != hidden_dim`**
+   - `RecurrentAttnResTransformerTransitionCore` projects once into hidden space and runs its inner core there.
+   - `MoDRecurrentAttnResTransformerTransitionCore` now uses the same projection discipline before light/heavy routing.
+
+3. **Shape bugs are surfaced earlier**
+   - Latent losses and vector/image/audio reconstruction losses now require exact shape equality before MSE/NLL computation.
+   - Evaluation reconstruction metrics now use the same shape discipline.
+
+4. **Padded text evaluation improved**
+   - Text perplexity can ignore padding tokens and returns a finite neutral perplexity when all targets are padding.
+
+5. **Minimal deterministic data path added**
+   - `MMWM.data.DeterministicTransitionDataset` and `collate_transition_batch` provide trainer-compatible, deterministic transition batches for smoke tests and loss-decrease checks.
+
+## Remaining highest-priority risks
+
+- Real dataset adapters are still missing; the deterministic dataset is an integration harness, not a replacement for D4RL/DMControl/TextWorld/video adapters.
+- The `LatentRouter` still has no supervised/RL training path.
+- Decoder outputs are still selected in losses/metrics by suffix matching; this remains acceptable for one decoder per suffix but brittle for production.
+- The audio encoder supports `[B, C, T]` and `[B, T]`; richer 2-D spectrogram conventions should be standardized before large-scale audio training.
+
 ## Fixed known pitfalls
 
 1. **Sequence training off-by-one/data contract ambiguity** (`Trainer.train_sequence_step`)

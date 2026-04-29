@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .containers import LatentState, MemoryState, ModelOutput, ObservationPacket
+from .containers import LatentState, ModelOutput, ObservationPacket
 from .tb import SummaryWriter
 
 
@@ -58,7 +58,13 @@ class ReconstructionMetrics:
     """PSNR and SSIM for images, perplexity for text."""
 
     @staticmethod
+    def _ensure_same_shape(pred: torch.Tensor, target: torch.Tensor, name: str) -> None:
+        if pred.shape != target.shape:
+            raise ValueError(f"{name} pred/target shapes disagree: {tuple(pred.shape)} vs {tuple(target.shape)}")
+
+    @staticmethod
     def psnr(pred: torch.Tensor, target: torch.Tensor, max_val: float = 1.0) -> float:
+        ReconstructionMetrics._ensure_same_shape(pred, target, "psnr")
         mse = F.mse_loss(pred, target).item()
         if mse < 1e-10:
             return 100.0
@@ -67,6 +73,7 @@ class ReconstructionMetrics:
     @staticmethod
     def ssim(pred: torch.Tensor, target: torch.Tensor, window_size: int = 7) -> float:
         """Simplified SSIM for evaluation (channel-averaged)."""
+        ReconstructionMetrics._ensure_same_shape(pred, target, "ssim")
         C1 = 0.01 ** 2
         C2 = 0.03 ** 2
         pad = window_size // 2
@@ -91,12 +98,19 @@ class ReconstructionMetrics:
         return ssim_map.mean().item()
 
     @staticmethod
-    def text_perplexity(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    def text_perplexity(logits: torch.Tensor, targets: torch.Tensor, pad_token_id: Optional[int] = None) -> float:
         """Compute perplexity from logits and target token ids."""
+        if logits.ndim == 3 and logits.size(1) != targets.size(1):
+            raise ValueError(f"text logits/target sequence lengths disagree: {logits.size(1)} vs {targets.size(1)}")
+        ce_kwargs: Dict[str, Any] = {}
+        if pad_token_id is not None:
+            ce_kwargs["ignore_index"] = int(pad_token_id)
+            if not torch.any(targets != int(pad_token_id)):
+                return 1.0
         if logits.ndim == 3:
-            ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+            ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), **ce_kwargs)
         else:
-            ce = F.cross_entropy(logits, targets)
+            ce = F.cross_entropy(logits, targets, **ce_kwargs)
         return math.exp(min(ce.item(), 100.0))
 
     @staticmethod
@@ -112,6 +126,7 @@ class ReconstructionMetrics:
             pred = decoder_outputs[image_key]
             target = batch["image_target"]
             if isinstance(target, torch.Tensor):
+                ReconstructionMetrics._ensure_same_shape(pred, target, "image")
                 metrics["image_psnr"] = ReconstructionMetrics.psnr(pred, target)
                 if pred.shape[-1] >= 7 and pred.shape[-2] >= 7:
                     metrics["image_ssim"] = ReconstructionMetrics.ssim(pred, target)
@@ -123,7 +138,8 @@ class ReconstructionMetrics:
             logits = decoder_outputs[text_key]
             targets = batch["text_target"]
             if isinstance(targets, torch.Tensor):
-                metrics["text_perplexity"] = ReconstructionMetrics.text_perplexity(logits, targets)
+                pad_token_id = batch.get("text_pad_token_id", batch.get("pad_token_id"))
+                metrics["text_perplexity"] = ReconstructionMetrics.text_perplexity(logits, targets, pad_token_id=pad_token_id)
 
         # Vector metrics
         vector_key = next((k for k in decoder_outputs if k.endswith("vector_recon")), None)
@@ -131,6 +147,7 @@ class ReconstructionMetrics:
             pred = decoder_outputs[vector_key]
             target = batch["vector_target"]
             if isinstance(target, torch.Tensor):
+                ReconstructionMetrics._ensure_same_shape(pred, target, "vector")
                 metrics["vector_mse"] = F.mse_loss(pred, target).item()
                 metrics["vector_cosine"] = F.cosine_similarity(pred, target, dim=-1).mean().item()
 
@@ -140,6 +157,7 @@ class ReconstructionMetrics:
             pred = decoder_outputs[audio_key]
             target = batch["audio_target"]
             if isinstance(target, torch.Tensor):
+                ReconstructionMetrics._ensure_same_shape(pred, target, "audio")
                 metrics["audio_mse"] = F.mse_loss(pred, target).item()
 
         return metrics

@@ -12,11 +12,11 @@ from MMWM.curriculum import (
     default_curriculum_phases,
     relative_curriculum_phases,
 )
+from MMWM.data import DeterministicTransitionDataset, collate_transition_batch
 from MMWM.evaluation import (
     EvaluationSuite,
     LatentPredictionMetrics,
     ReconstructionMetrics,
-    RolloutMetrics,
 )
 from MMWM.losses import ContrastiveAlignmentLoss, WorldModelLoss
 from MMWM.trainer import Trainer, build_lr_scheduler
@@ -621,9 +621,9 @@ def test_simple_multimodal_encoder_rejects_unknown_modalities() -> None:
         text_vocab_size=64, text_embed_dim=16, vector_input_dim=8,
         image_channels=3, hidden_dim=16,
     )
-    # "audio" is not a registered sub-encoder of SimpleMultimodalEncoder.
+    # "proprio_extra" is not a registered sub-encoder of SimpleMultimodalEncoder.
     with pytest.raises(ValueError, match="match its registered sub-encoders"):
-        enc(ObservationPacket(modalities={"audio": torch.randn(2, 16)}))
+        enc(ObservationPacket(modalities={"proprio_extra": torch.randn(2, 16)}))
 
 
 def test_build_model_catches_dim_mismatch() -> None:
@@ -698,7 +698,7 @@ def test_memory_read_default_implementation() -> None:
     context is not None and returns it."""
     import pytest
 
-    from MMWM.interfaces import IMemory, MEMORIES
+    from MMWM.interfaces import MEMORIES
 
     # All registered memories should inherit the default or override consistently.
     for mem_name in MEMORIES.names():
@@ -809,23 +809,119 @@ def test_latent_state_checkpoint_roundtrip_preserves_z_ctx() -> None:
     )
     restored = LatentState.from_dict(latent.to_dict())
     assert torch.equal(restored.z_sem, latent.z_sem)
+    assert restored.z_ctx is not None
+    assert latent.z_ctx is not None
     assert torch.equal(restored.z_ctx, latent.z_ctx)
 
 
 def test_latent_state_backward_compat_accepts_z_mem_checkpoint() -> None:
+    legacy_z_mem = torch.randn(2, 8)
     legacy_payload = {
         "z_sem": torch.randn(2, 8),
         "z_dyn": torch.randn(2, 8),
         "z_ctrl": torch.randn(2, 8),
-        "z_mem": torch.randn(2, 8),
+        "z_mem": legacy_z_mem,
         "extras": {},
     }
     restored = LatentState.from_dict(legacy_payload)
     assert restored.z_ctx is not None
-    assert torch.equal(restored.z_ctx, legacy_payload["z_mem"])
+    assert torch.equal(restored.z_ctx, legacy_z_mem)
 
 
 def test_loss_dict_uses_latent_ctx_key() -> None:
     losses = WorldModelLoss()(_dummy_output(), {})
     assert "latent_ctx_loss" in losses
     assert "latent_mem_loss" not in losses
+
+
+def test_audio_input_modality_runs_forward() -> None:
+    """Audio is a first-class input modality, not just a decoder target."""
+    cfg = _small_model_cfg()
+    cfg.encoder_kwargs["audio_channels"] = 2
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"audio": torch.randn(2, 2, 64)})
+    action = torch.randn(2, 8)
+    out = model(packet, action, obs_tp1=packet)
+    assert out.predicted_next_latent.z_sem.shape == (2, 16)
+    assert "audio_feat" in out.current_latent.extras
+
+
+def test_structured_encoder_accepts_audio() -> None:
+    cfg = ModelConfig(
+        encoder_name="structured_multimodal",
+        encoder_kwargs={
+            "text_vocab_size": 256, "text_embed_dim": 32, "text_transformer_layers": 1,
+            "text_nhead": 2, "vector_input_dim": 16, "image_channels": 3,
+            "audio_channels": 2, "hidden_dim": 32, "n_slots": 4, "slot_dim": 16,
+            "slot_iters": 2, "merge_threshold": 0.8, "fusion_nhead": 2,
+        },
+        latent_projector_kwargs={"input_dim": 32, "latent_dim": 16, "use_norm": False},
+        memory_kwargs={"input_dim": 32, "hidden_dim": 16},
+        action_encoder_kwargs={"action_dim": 8, "action_embed_dim": 16},
+        conditioner_kwargs={"latent_dim": 64, "action_dim": 16, "memory_dim": 16, "out_dim": 64},
+        transition_core_name="mlp",
+        transition_core_kwargs={"input_dim": 64, "hidden_dim": 64},
+        prediction_head_kwargs={"hidden_dim": 64, "latent_dim": 16},
+        decoder_configs=[],
+    )
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"audio": torch.randn(2, 2, 64), "vector": torch.randn(2, 16)})
+    out = model(packet, torch.randn(2, 8), obs_tp1=packet)
+    assert "audio_feat" in out.current_latent.extras
+
+
+def test_recurrent_transition_supports_input_hidden_dim_mismatch() -> None:
+    cfg = _small_model_cfg()
+    cfg.conditioner_kwargs["out_dim"] = 32
+    cfg.transition_core_name = "recurrent_attnres_transformer"
+    cfg.transition_core_kwargs = {"input_dim": 32, "hidden_dim": 64, "recurrent_steps": 2}
+    cfg.prediction_head_kwargs["hidden_dim"] = 64
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
+    out = model(packet, torch.randn(2, 8), obs_tp1=packet)
+    assert out.predicted_next_latent.z_sem.shape == (2, 16)
+
+
+def test_mod_recurrent_transition_supports_input_hidden_dim_mismatch() -> None:
+    cfg = _small_model_cfg()
+    cfg.conditioner_kwargs["out_dim"] = 32
+    cfg.transition_core_name = "mod_recurrent_attnres_transformer"
+    cfg.transition_core_kwargs = {"input_dim": 32, "hidden_dim": 64, "recurrent_steps": 2}
+    cfg.prediction_head_kwargs["hidden_dim"] = 64
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={"vector": torch.randn(2, 16)})
+    out = model(packet, torch.randn(2, 8), obs_tp1=packet)
+    assert out.predicted_next_latent.z_sem.shape == (2, 16)
+
+
+def test_reconstruction_loss_shape_mismatch_raises() -> None:
+    import pytest
+
+    loss_fn = WorldModelLoss()
+    output = _dummy_output()
+    output.decoder_outputs["vector_reconstruction.vector_recon"] = torch.randn(2, 8)
+    with pytest.raises(ValueError, match="vector_recon_loss"):
+        loss_fn(output, {"vector_target": torch.randn(2, 9)})
+
+
+def test_text_perplexity_can_ignore_padding() -> None:
+    logits = torch.randn(2, 4, 16)
+    targets = torch.zeros(2, 4, dtype=torch.long)
+    assert ReconstructionMetrics.text_perplexity(logits, targets, pad_token_id=0) == 1.0
+
+
+def test_deterministic_transition_dataset_trainer_batch() -> None:
+    dataset = DeterministicTransitionDataset(length=4, vector_dim=16, action_dim=8, include_audio=True, audio_channels=2)
+    batch = collate_transition_batch([dataset[0], dataset[1]])
+    assert batch["vector_t"].shape == (2, 16)
+    assert batch["audio_t"].shape == (2, 2, 128)
+
+    cfg = _small_model_cfg()
+    cfg.encoder_kwargs["audio_channels"] = 2
+    model = build_model(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = Trainer(model, optimizer, WorldModelLoss(), torch.device("cpu"), mixed_precision=False)
+    metrics, memory = trainer.train_step(batch)
+    assert "total_loss" in metrics
+    assert memory is not None
+

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -62,6 +62,40 @@ class ImageSubEncoder(ModalitySubEncoder):
         self.proj = MLP([128, hidden_dim, hidden_dim])
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.proj(self.conv(x).flatten(1))
+
+
+class AudioSubEncoder(ModalitySubEncoder):
+    """1-D convolutional encoder for waveform or spectrogram-like audio.
+
+    Expected input shape is ``[B, C, T]``. A convenience ``[B, T]`` waveform
+    tensor is accepted and treated as single-channel audio.
+    """
+
+    def __init__(self, channels: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.channels = channels
+        self.conv = nn.Sequential(
+            nn.Conv1d(channels, 32, kernel_size=7, stride=2, padding=3),
+            nn.GELU(),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.GELU(),
+            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.proj = MLP([128, hidden_dim, hidden_dim])
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
+        if x.ndim != 3:
+            raise ValueError(f"AudioSubEncoder expects [B, C, T] or [B, T], got shape {tuple(x.shape)}")
+        if x.shape[1] != self.channels:
+            raise ValueError(
+                f"AudioSubEncoder was configured for {self.channels} channels but received {x.shape[1]}. "
+                "Set encoder_kwargs['audio_channels'] to match your audio tensor."
+            )
         return self.proj(self.conv(x).flatten(1))
 
 
@@ -133,6 +167,7 @@ class SimpleMultimodalEncoder(IEncoder):
         text_embed_dim: int = 256,
         vector_input_dim: int = 128,
         image_channels: int = 3,
+        audio_channels: int = 1,
         hidden_dim: int = 256,
     ) -> None:
         super().__init__()
@@ -142,6 +177,7 @@ class SimpleMultimodalEncoder(IEncoder):
             "text": TextSubEncoder(text_vocab_size, text_embed_dim, hidden_dim),
             "vector": VectorSubEncoder(vector_input_dim, hidden_dim),
             "image": ImageSubEncoder(image_channels, hidden_dim),
+            "audio": AudioSubEncoder(audio_channels, hidden_dim),
         })
         self.modality_gates = nn.ParameterDict({
             name: nn.Parameter(torch.ones(hidden_dim)) for name in self.sub_encoders
@@ -272,6 +308,7 @@ class StructuredMultimodalEncoder(IEncoder):
         text_nhead: int = 4,
         vector_input_dim: int = 128,
         image_channels: int = 3,
+        audio_channels: int = 1,
         hidden_dim: int = 256,
         n_slots: int = 8,
         slot_dim: int = 128,
@@ -288,6 +325,7 @@ class StructuredMultimodalEncoder(IEncoder):
         )
         self.vector_encoder = VectorSubEncoder(vector_input_dim, hidden_dim)
         self.image_encoder = ImageSubEncoder(image_channels, hidden_dim)
+        self.audio_encoder = AudioSubEncoder(audio_channels, hidden_dim)
 
         self.image_tokenizer = nn.Sequential(
             nn.Conv2d(image_channels, slot_dim, kernel_size=7, stride=4, padding=3),
@@ -335,10 +373,15 @@ class StructuredMultimodalEncoder(IEncoder):
             per_modality["image_slots"] = slot_feat
             fusion_inputs["image"] = 0.5 * cnn_feat + 0.5 * slot_feat
 
+        if "audio" in obs.modalities:
+            feat = self.audio_encoder(obs.modalities["audio"], obs.masks.get("audio"))
+            per_modality["audio_feat"] = feat
+            fusion_inputs["audio"] = feat
+
         if len(fusion_inputs) > 0:
             fused = self.cross_modal_fusion(fusion_inputs)
         else:
-            known = ["text", "vector", "image"]
+            known = ["text", "vector", "image", "audio"]
             got = sorted(obs.modalities.keys())
             raise ValueError(
                 f"StructuredMultimodalEncoder received modalities {got} but none "
@@ -360,13 +403,14 @@ class SlotMultimodalEncoder(SimpleMultimodalEncoder):
         text_embed_dim: int = 256,
         vector_input_dim: int = 128,
         image_channels: int = 3,
+        audio_channels: int = 1,
         hidden_dim: int = 256,
         n_slots: int = 8,
         slot_dim: int = 128,
         slot_iters: int = 3,
         merge_threshold: float = 0.9,
     ) -> None:
-        super().__init__(text_vocab_size, text_embed_dim, vector_input_dim, image_channels, hidden_dim)
+        super().__init__(text_vocab_size, text_embed_dim, vector_input_dim, image_channels, audio_channels, hidden_dim)
         self.image_tokenizer = nn.Sequential(
             nn.Conv2d(image_channels, slot_dim, kernel_size=7, stride=4, padding=3),
             nn.GELU(),

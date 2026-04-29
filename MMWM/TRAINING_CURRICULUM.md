@@ -18,6 +18,8 @@ A staged plan for training the Multimodal Latent World Model on real datasets to
 
 ### Critical Gaps (Blockers)
 
+> **April 29, 2026 status correction:** Several items in the original blocker table below have since been implemented: checkpoint save/load, memory propagation through `train_step`, LR scheduling, LayerNorm-based projector normalization, sequence-level BPTT, gradient checkpointing for recurrent transitions, and contrastive alignment loss. A minimal deterministic trainer-compatible dataset now exists in `MMWM/data.py`, and audio is supported as an input modality. The still-active blockers are real dataset adapters, text-action encoding, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
+
 | # | Gap | Location | Severity |
 |---|-----|----------|----------|
 | 1 | **No Dataset/DataLoader** — trainer accepts `DataLoader` but nothing produces the required batch dict format | `trainer.py:167`, `_to_packet():61-71` | BLOCKER |

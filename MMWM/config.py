@@ -8,11 +8,11 @@ passes these kwargs directly to the constructor.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 
-from .containers import LatentPacket, ToolContext, ToolDescriptor
+from .containers import ToolDescriptor
 from .interfaces import (
     DECODERS,
     ENCODERS,
@@ -57,6 +57,7 @@ class ModelConfig:
         "text_embed_dim": 256,
         "vector_input_dim": 128,
         "image_channels": 3,
+        "audio_channels": 1,
         "hidden_dim": 256,
     })
 

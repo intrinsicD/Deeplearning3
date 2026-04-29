@@ -175,6 +175,7 @@ class TestImageDecoderPatchSize:
         image_size = 64  # must be divisible by all patch sizes above
         config = OmniLatentConfig(
             hidden_dim=32,
+            num_heads=4,
             image_size=image_size,
             image_patch_size=patch_size,
             image_channels=3,
@@ -195,7 +196,8 @@ class TestImageDecoderPatchSize:
         """Should raise ValueError for non-power-of-2 patch sizes."""
         config = OmniLatentConfig(
             hidden_dim=32,
-            image_size=64,
+            num_heads=4,
+            image_size=72,
             image_patch_size=12,
             image_channels=3,
         )
@@ -207,6 +209,7 @@ class TestImageDecoderPatchSize:
         for patch_size in [4, 8, 16]:
             config = OmniLatentConfig(
                 hidden_dim=64,
+                num_heads=8,
                 image_size=64,
                 image_patch_size=patch_size,
                 image_channels=3,

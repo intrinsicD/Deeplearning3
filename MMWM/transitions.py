@@ -8,7 +8,7 @@ module, called by ModularLatentWorldModel.transition().
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -168,7 +168,7 @@ class RecurrentAttnResTransformerTransitionCore(ITransitionCore):
     ) -> None:
         super().__init__()
         self.core = AttnResTransformerTransitionCore(
-            input_dim=input_dim,
+            input_dim=hidden_dim,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             nhead=nhead,
@@ -239,8 +239,9 @@ class MoDRecurrentAttnResTransformerTransitionCore(ITransitionCore):
         route_warmup_steps: int = 5000,
     ) -> None:
         super().__init__()
+        self.input_proj = nn.Linear(input_dim, hidden_dim) if input_dim != hidden_dim else nn.Identity()
         self.core = RecurrentAttnResTransformerTransitionCore(
-            input_dim=input_dim,
+            input_dim=hidden_dim,
             hidden_dim=hidden_dim,
             recurrent_steps=recurrent_steps,
         )
@@ -263,10 +264,11 @@ class MoDRecurrentAttnResTransformerTransitionCore(ITransitionCore):
         return self.route_ratio_init - progress * (self.route_ratio_init - self.route_ratio_final)
 
     def forward(self, conditioned_input: torch.Tensor, memory_state: MemoryState) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        hidden_heavy, aux = self.core(conditioned_input, memory_state)
-        hidden_light = conditioned_input + 0.1 * self.light(conditioned_input)
+        current = self.input_proj(conditioned_input)
+        hidden_heavy, aux = self.core(current, memory_state)
+        hidden_light = current + 0.1 * self.light(current)
 
-        surprise = (hidden_heavy - conditioned_input).abs()
+        surprise = (hidden_heavy - current).abs()
         d = surprise.shape[-1]
         k = max(1, int(self._route_ratio() * d))
         _, topk = torch.topk(surprise, k=k, dim=-1)
@@ -275,10 +277,12 @@ class MoDRecurrentAttnResTransformerTransitionCore(ITransitionCore):
 
         hidden = hidden_light + mask * (hidden_heavy - hidden_light)
         self._step += 1
-        aux = dict(aux)
-        aux.update({
+        aux_out: Dict[str, torch.Tensor] = {}
+        for key, value in aux.items():
+            aux_out[str(key)] = value if isinstance(value, torch.Tensor) else torch.as_tensor(value, device=hidden.device)
+        aux_out.update({
             "mod_route_ratio": torch.tensor(self._route_ratio(), device=hidden.device),
             "mod_surprise_mean": surprise.mean(),
             "mod_routed_dims": mask.sum(dim=-1).float().mean(),
         })
-        return hidden, aux
+        return hidden, aux_out
