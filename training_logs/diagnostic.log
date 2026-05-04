@@ -1,0 +1,74 @@
+Training Startup Test
+  PyTorch 2.11.0+cu130
+  CUDA available: False
+
+============================================================
+  OmniLatent (synthetic, tiny config)
+============================================================
+  Device: cpu
+step      1 | loss 10.3829 | lr 0.00e+00 | grad 0.72 | 3.3 steps/s
+step      2 | loss 1.5721 | lr 5.00e-08 | grad 1.39 | 18.1 steps/s
+step      3 | loss 1.9001 | lr 1.00e-07 | grad 1.36 | 27.4 steps/s
+
+Training complete. Final avg loss: 4.6184
+Task distribution: {'text->text': 1, 'image->audio': 1, 'audio->audio': 1}
+  [PASS] OmniLatent (synthetic, tiny config)  (1.2s)  completed 3 steps
+
+============================================================
+  HPWM (synthetic moving shapes)
+============================================================
+  Device: cpu
+/home/user/Deeplearning3/hpwm/components/mod_router.py:70: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.transformer = nn.TransformerEncoder(
+[WARN] Using random DINOv2 fallback - no pretrained weights available.
+       Download DINOv2-S/14 for meaningful features.
+  step 1/3  loss=8.0155
+  step 2/3  loss=7.1430
+  step 3/3  loss=7.0830
+  [PASS] HPWM (synthetic moving shapes)  (0.9s)  completed 3 steps
+
+============================================================
+  LGQ (quantizer=lgq)
+============================================================
+  Device: cpu
+  step 1/3  loss=1.6080  recon=0.7496
+  step 2/3  loss=1.6074  recon=0.7730
+  step 3/3  loss=1.7141  recon=0.8711
+  [PASS] LGQ (quantizer=lgq)  (0.1s)  completed 3 steps
+
+============================================================
+  LGQ (quantizer=fsq)
+============================================================
+  Device: cpu
+  step 1/3  loss=1.1320  recon=0.7388
+  step 2/3  loss=1.2420  recon=0.8596
+  step 3/3  loss=1.0334  recon=0.6725
+  [PASS] LGQ (quantizer=fsq)  (0.1s)  completed 3 steps
+
+============================================================
+  LGQ (quantizer=simvq)
+============================================================
+  Device: cpu
+  step 1/3  loss=1.0534  recon=0.6473
+  step 2/3  loss=1.0445  recon=0.6633
+  step 3/3  loss=0.9901  recon=0.6319
+  [PASS] LGQ (quantizer=simvq)  (0.1s)  completed 3 steps
+
+============================================================
+  GaussianEncoder (synthetic MNIST-like)
+============================================================
+  Device: cpu
+  epoch 1/1  loss=0.08608
+  [PASS] GaussianEncoder (synthetic MNIST-like)  (0.0s)  completed 1 epoch(s)
+
+============================================================
+  SUMMARY
+============================================================
+  ✓ OmniLatent (synthetic, tiny config)      PASS  1.2s
+  ✓ HPWM (synthetic moving shapes)           PASS  0.9s
+  ✓ LGQ (quantizer=lgq)                      PASS  0.1s
+  ✓ LGQ (quantizer=fsq)                      PASS  0.1s
+  ✓ LGQ (quantizer=simvq)                    PASS  0.1s
+  ✓ GaussianEncoder (synthetic MNIST-like)   PASS  0.0s
+
+  6 passed, 0 failed

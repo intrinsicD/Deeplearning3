@@ -1,0 +1,57 @@
+# Per-phase dataset map for OmniLatent curriculum training.
+#
+# Each phase in the curriculum points at one (or several) registered
+# public dataset(s).  The PhaseDataLoader downloads + prepares each
+# dataset on first use, so a run that aborts early never pays the cost
+# of preparing later phases.
+#
+# Modality availability is constrained per phase:
+#   - UCF-101 / Kinetics-400: video only (audio: false)
+#   - VGGSound / AudioSet:    video + audio (a/v aligned)
+#   - MiraData:               video + caption text
+#
+# Train-step task selection happens automatically: the synthetic-style
+# loop picks (src_mod, tgt_mod) from whichever modalities are present
+# in the batch, so a video-only phase trains video_recon, an a/v phase
+# trains the cross-modal pairs, and a captioned phase adds text tasks.
+
+phases:
+  warmup:
+    # Self-reconstruction — only need video, the cheapest dataset.
+    dataset: ucf101
+    split: train
+    audio: false
+    text:  false
+    kwargs: {}
+
+  cross_modal:
+    # Audio<->video alignment — VGGSound has a/v paired clips.
+    dataset: vggsound
+    split: train
+    audio: true
+    text:  false
+    kwargs: {}
+
+  temporal:
+    # Temporal structure across longer clips — Kinetics-400 has 10s clips.
+    dataset: kinetics400
+    split: train
+    audio: false
+    text:  false
+    kwargs: {}
+
+  grounding:
+    # Language grounding — MiraData ships with captions.
+    dataset: miradata
+    split: train
+    audio: false
+    text:  true
+    kwargs: {}
+
+  joint:
+    # All modalities together — concatenate captioned + a/v.
+    dataset: [vggsound, miradata]
+    split: train
+    audio: true
+    text:  true
+    kwargs: {}

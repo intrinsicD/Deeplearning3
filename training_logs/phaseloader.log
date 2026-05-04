@@ -1,0 +1,93 @@
+============================================================
+OmniLatent — Curriculum Training (Learn from Video)
+============================================================
+Device:      cpu
+Compiling model with torch.compile...
+Parameters:  2,778,619 (10.6 MB)
+Hidden dim:  64
+Layers:      2
+Mixed prec:  False
+Curriculum: synthetic per-phase fallback (testing)
+  warmup          -> synthetic_warmup (split=train)
+  cross_modal     -> synthetic_cross_modal (split=train)
+  temporal        -> synthetic_temporal (split=train)
+  grounding       -> synthetic_grounding (split=train)
+  joint           -> synthetic_joint (split=train)
+WARNING: --video-dir not provided, falling back to synthetic data
+Data:        synthetic (10000 samples)
+Phases:      5 (total frac: 1.00)
+  1. warmup               3 steps  ['video_recon', 'audio_recon']
+  2. cross_modal          7 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video']
+  3. temporal             7 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict']
+  4. grounding            4 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  5. joint                7 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'frame_to_audio', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+Total steps: 30
+Save dir:    training_logs/phaseloader_ckpt
+============================================================
+Health:      ON  (calibration=200, plateau=2000, diverge=1.5x for 200 steps)
+
+============================================================
+Phase 1/5: warmup
+  Self-reconstruction — learn to encode/decode each modality
+  Tasks: ['video_recon', 'audio_recon']
+  Steps: 0 -> 3
+  Source: phase-loader[warmup]
+============================================================
+[phase-loader] Preparing dataset for phase 'warmup': synthetic_warmup
+  Saved checkpoint: training_logs/phaseloader_ckpt/checkpoint_step2.pt
+
+============================================================
+Phase 2/5: cross_modal
+  Cross-modal alignment — learn audio<->video correspondence
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video']
+  Steps: 3 -> 10
+  Source: phase-loader[cross_modal]
+============================================================
+[phase-loader] Preparing dataset for phase 'cross_modal': synthetic_cross_modal
+/usr/local/lib/python3.11/dist-packages/torch/_inductor/lowering.py:2212: UserWarning: Torchinductor does not support code generation for complex operators. Performance may be worse than eager.
+  warnings.warn(
+  step      5 | loss 5.0891 | gnorm 0.85 | lr 6.00e-07 | 0.1 it/s | phase=cross_modal task=mixed
+  step     10 | loss 8.5176 | gnorm 0.53 | lr 1.35e-06 | 0.1 it/s | phase=cross_modal task=mixed
+  Saved checkpoint: training_logs/phaseloader_ckpt/checkpoint_step9.pt
+
+============================================================
+Phase 3/5: temporal
+  Temporal prediction — learn temporal structure across timescales
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict']
+  Steps: 10 -> 17
+  Source: phase-loader[temporal]
+============================================================
+[phase-loader] Preparing dataset for phase 'temporal': synthetic_temporal
+W0504 12:39:46.954000 6009 torch/_dynamo/convert_frame.py:1743] [0/8] torch._dynamo hit config.recompile_limit (8)
+W0504 12:39:46.954000 6009 torch/_dynamo/convert_frame.py:1743] [0/8]    function: 'forward' (/home/user/Deeplearning3/omnilatent/model/omnilatent.py:414)
+W0504 12:39:46.954000 6009 torch/_dynamo/convert_frame.py:1743] [0/8]    last reason: 0/7: tensor 'target_data' dtype mismatch. expected Long, actual Float
+W0504 12:39:46.954000 6009 torch/_dynamo/convert_frame.py:1743] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W0504 12:39:46.954000 6009 torch/_dynamo/convert_frame.py:1743] [0/8] To diagnose recompilation issues, see https://docs.pytorch.org/docs/main/user_guide/torch_compiler/compile/programming_model.recompilation.html
+  step     15 | loss 6.8989 | gnorm 1.27 | lr 2.10e-06 | 2.0 it/s | phase=temporal task=mixed
+  Saved checkpoint: training_logs/phaseloader_ckpt/checkpoint_step16.pt
+
+============================================================
+Phase 4/5: grounding
+  Language grounding — learn to describe video/audio in text
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  Steps: 17 -> 21
+  Source: phase-loader[grounding]
+============================================================
+[phase-loader] Preparing dataset for phase 'grounding': synthetic_grounding
+  step     20 | loss 6.3887 | gnorm 0.19 | lr 2.85e-06 | 11.5 it/s | phase=grounding task=mixed
+  Saved checkpoint: training_logs/phaseloader_ckpt/checkpoint_step20.pt
+
+============================================================
+Phase 5/5: joint
+  Joint training — all tasks together
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'frame_to_audio', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  Steps: 21 -> 28
+  Source: phase-loader[joint]
+============================================================
+[phase-loader] Preparing dataset for phase 'joint': synthetic_joint
+  step     25 | loss 7.1729 | gnorm 0.67 | lr 3.60e-06 | 10.4 it/s | phase=joint task=mixed
+  Saved checkpoint: training_logs/phaseloader_ckpt/checkpoint_step27.pt
+  step     30 | loss 14.7477 | gnorm 1.25 | lr 4.35e-06 | 11.6 it/s | phase=joint task=mixed
+  Saved checkpoint: training_logs/phaseloader_ckpt/checkpoint_final.pt
+
+Curriculum training complete.

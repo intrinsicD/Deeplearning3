@@ -1,0 +1,81 @@
+============================================================
+OmniLatent — Curriculum Training (Learn from Video)
+============================================================
+Device:      cpu
+Compiling model with torch.compile...
+Parameters:  5,912,691 (22.6 MB)
+Hidden dim:  128
+Layers:      2
+Mixed prec:  False
+Temporal TX: 241,601 params (0.9 MB)
+Memory:      82,433 params (0.3 MB)
+Data:        synthetic (10000 samples)
+Phases:      5 (total frac: 1.00)
+  1. warmup              10 steps  ['video_recon', 'audio_recon']
+  2. cross_modal         25 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video']
+  3. temporal            25 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict']
+  4. grounding           15 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  5. joint               25 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'frame_to_audio', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+Total steps: 100
+Save dir:    training_logs/curriculum_ckpt
+============================================================
+
+============================================================
+Phase 1/5: warmup
+  Self-reconstruction — learn to encode/decode each modality
+  Tasks: ['video_recon', 'audio_recon']
+  Steps: 0 -> 10
+============================================================
+/usr/local/lib/python3.11/dist-packages/torch/_inductor/lowering.py:2212: UserWarning: Torchinductor does not support code generation for complex operators. Performance may be worse than eager.
+  warnings.warn(
+  step     10 | loss 4.1617 | lr 1.35e-06 | 0.1 it/s | phase=warmup task=mixed
+  Saved checkpoint: training_logs/curriculum_ckpt/checkpoint_step9.pt
+
+============================================================
+Phase 2/5: cross_modal
+  Cross-modal alignment — learn audio<->video correspondence
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video']
+  Steps: 10 -> 35
+============================================================
+W0504 11:27:01.235000 9053 torch/_dynamo/convert_frame.py:1743] [0/8] torch._dynamo hit config.recompile_limit (8)
+W0504 11:27:01.235000 9053 torch/_dynamo/convert_frame.py:1743] [0/8]    function: 'forward' (/home/user/Deeplearning3/omnilatent/model/omnilatent.py:414)
+W0504 11:27:01.235000 9053 torch/_dynamo/convert_frame.py:1743] [0/8]    last reason: 0/7: tensor 'source_data' dtype mismatch. expected Float, actual Long
+W0504 11:27:01.235000 9053 torch/_dynamo/convert_frame.py:1743] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W0504 11:27:01.235000 9053 torch/_dynamo/convert_frame.py:1743] [0/8] To diagnose recompilation issues, see https://docs.pytorch.org/docs/main/user_guide/torch_compiler/compile/programming_model.recompilation.html
+  step     20 | loss 8.7863 | lr 2.85e-06 | 0.2 it/s | phase=cross_modal task=mixed
+  step     30 | loss 6.0346 | lr 4.35e-06 | 9.6 it/s | phase=cross_modal task=mixed
+  Saved checkpoint: training_logs/curriculum_ckpt/checkpoint_step34.pt
+
+============================================================
+Phase 3/5: temporal
+  Temporal prediction — learn temporal structure across timescales
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict']
+  Steps: 35 -> 60
+============================================================
+  step     40 | loss 7.2106 | lr 5.85e-06 | 11.9 it/s | phase=temporal task=mixed
+  step     50 | loss 9.8484 | lr 7.35e-06 | 9.5 it/s | phase=temporal task=mixed
+  step     60 | loss 10.7857 | lr 8.85e-06 | 9.5 it/s | phase=temporal task=mixed
+  Saved checkpoint: training_logs/curriculum_ckpt/checkpoint_step59.pt
+
+============================================================
+Phase 4/5: grounding
+  Language grounding — learn to describe video/audio in text
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  Steps: 60 -> 75
+============================================================
+  step     70 | loss 12.7382 | lr 1.03e-05 | 12.8 it/s | phase=grounding task=mixed
+  Saved checkpoint: training_logs/curriculum_ckpt/checkpoint_step74.pt
+
+============================================================
+Phase 5/5: joint
+  Joint training — all tasks together
+  Tasks: ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'frame_to_audio', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  Steps: 75 -> 100
+============================================================
+  step     80 | loss 3.0934 | lr 1.19e-05 | 13.7 it/s | phase=joint task=mixed
+  step     90 | loss 5.1661 | lr 1.33e-05 | 13.1 it/s | phase=joint task=mixed
+  step    100 | loss 5.8625 | lr 1.48e-05 | 9.2 it/s | phase=joint task=mixed
+  Saved checkpoint: training_logs/curriculum_ckpt/checkpoint_step99.pt
+  Saved checkpoint: training_logs/curriculum_ckpt/checkpoint_final.pt
+
+Curriculum training complete.

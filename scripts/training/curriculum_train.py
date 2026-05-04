@@ -52,10 +52,21 @@ torch.backends.cudnn.allow_tf32 = True
 from omnilatent.config import OmniLatentConfig
 from omnilatent.model.omnilatent import OmniLatentModel
 from omnilatent.model.temporal import TemporalSequenceTransformer, RecurrentMemory
+from omnilatent.training.health import (
+    HealthThresholds,
+    TrainingDiverged,
+    TrainingHealthMonitor,
+)
 from omnilatent.training.losses import (
     MultiModalLoss,
     TemporalContextLoss,
     NextClipPredictionLoss,
+)
+from omnilatent.training.multi_dataset import (
+    PhaseDataLoader,
+    load_phase_specs_from_yaml,
+    make_default_builder,
+    make_synthetic_phase_loader,
 )
 from omnilatent.training.trainer import cosine_schedule
 from omnilatent.utils import count_parameters, param_size_mb, set_seed
@@ -142,16 +153,25 @@ class CurriculumTrainer:
         self,
         model: OmniLatentModel,
         config: OmniLatentConfig,
-        dataloader: DataLoader,
+        dataloader: DataLoader | None = None,
         phases: list[Phase] | None = None,
         total_steps: int = 100_000,
         save_dir: str | None = None,
         temporal_transformer: TemporalSequenceTransformer | None = None,
         recurrent_memory: RecurrentMemory | None = None,
+        phase_loader: PhaseDataLoader | None = None,
+        health_monitor: TrainingHealthMonitor | None = None,
     ) -> None:
         self.model = model
         self.config = config
         self.dataloader = dataloader
+        self.phase_loader = phase_loader
+        self.health_monitor = health_monitor
+        if dataloader is None and phase_loader is None:
+            raise ValueError(
+                "CurriculumTrainer needs either a 'dataloader' or a "
+                "'phase_loader' (or both)."
+            )
         self.phases = phases or DEFAULT_PHASES
         self.total_steps = total_steps
         self.save_dir = Path(save_dir) if save_dir else None
@@ -263,13 +283,15 @@ class CurriculumTrainer:
 
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(
+        gnorm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.config.grad_clip
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return {k: v.item() for k, v in loss_dict.items()}
+        out = {k: v.item() for k, v in loss_dict.items()}
+        out["grad_norm"] = float(gnorm)
+        return out
 
     def _train_step_synthetic(self, batch: dict) -> dict[str, float]:
         """Training step for synthetic multi-modal data."""
@@ -306,13 +328,15 @@ class CurriculumTrainer:
 
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(
+        gnorm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.config.grad_clip
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return {k: v.item() for k, v in loss_dict.items()}
+        out = {k: v.item() for k, v in loss_dict.items()}
+        out["grad_norm"] = float(gnorm)
+        return out
 
     def _train_step_temporal_pairs(self, batch: dict) -> dict[str, float]:
         """Training step for Approach 1: multi-scale temporal pair tasks.
@@ -374,13 +398,15 @@ class CurriculumTrainer:
             all_params += list(self.temporal_transformer.parameters())
         if self.recurrent_memory is not None:
             all_params += list(self.recurrent_memory.parameters())
-        torch.nn.utils.clip_grad_norm_(all_params, self.config.grad_clip)
+        gnorm = torch.nn.utils.clip_grad_norm_(all_params, self.config.grad_clip)
 
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return {k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in loss_result.items()}
+        out = {k: v.item() if isinstance(v, torch.Tensor) else v
+               for k, v in loss_result.items()}
+        out["grad_norm"] = float(gnorm)
+        return out
 
     def _train_step_temporal_sequence(self, batch: dict) -> dict[str, float]:
         """Training step for Approach 2: hierarchical temporal transformer.
@@ -430,14 +456,18 @@ class CurriculumTrainer:
         self.scaler.unscale_(self.optimizer)
 
         # Only clip temporal transformer params (encoder is frozen)
-        torch.nn.utils.clip_grad_norm_(
+        gnorm = torch.nn.utils.clip_grad_norm_(
             self.temporal_transformer.parameters(), self.config.grad_clip
         )
 
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return {"next_clip_loss": loss.item(), "total": loss.item()}
+        return {
+            "next_clip_loss": loss.item(),
+            "total": loss.item(),
+            "grad_norm": float(gnorm),
+        }
 
     def _train_step_memory(self, batch: dict) -> dict[str, float]:
         """Training step for Approach 3: recurrent memory tokens.
@@ -527,12 +557,16 @@ class CurriculumTrainer:
         all_params = list(self.model.parameters()) + list(
             self.recurrent_memory.parameters()
         )
-        torch.nn.utils.clip_grad_norm_(all_params, self.config.grad_clip)
+        gnorm = torch.nn.utils.clip_grad_norm_(all_params, self.config.grad_clip)
 
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return {"memory_recon_loss": avg_loss.item(), "total": avg_loss.item()}
+        return {
+            "memory_recon_loss": avg_loss.item(),
+            "total": avg_loss.item(),
+            "grad_norm": float(gnorm),
+        }
 
     def _is_video_batch(self, batch) -> bool:
         return isinstance(batch, dict) and "source_modality" in batch
@@ -576,6 +610,18 @@ class CurriculumTrainer:
             self.recurrent_memory.load_state_dict(ckpt["recurrent_memory"])
         print(f"Resumed from step {self.global_step}")
 
+    def _next_batch(self, phase: Phase, fallback_iter):
+        """Pull the next batch from the phase loader (if any) or the
+        single global ``DataLoader``.  Returns ``(batch, fallback_iter)``.
+        """
+        if self.phase_loader is not None and self.phase_loader.has_phase(phase.name):
+            return self.phase_loader.next_batch(phase.name), fallback_iter
+        try:
+            return next(fallback_iter), fallback_iter
+        except StopIteration:
+            fallback_iter = iter(self.dataloader)
+            return next(fallback_iter), fallback_iter
+
     def train(self, log_interval: int = 50) -> None:
         """Main curriculum training loop."""
         self.model.train()
@@ -584,72 +630,98 @@ class CurriculumTrainer:
         if self.recurrent_memory is not None:
             self.recurrent_memory.train()
 
-        data_iter = iter(self.dataloader)
+        data_iter = iter(self.dataloader) if self.dataloader is not None else iter(())
         running_loss = 0.0
         t0 = time.time()
         current_phase_idx = -1
 
-        for step in range(self.global_step, self.total_steps):
-            self.global_step = step
-            lr = self._update_lr()
+        try:
+            for step in range(self.global_step, self.total_steps):
+                self.global_step = step
+                lr = self._update_lr()
 
-            # Check for phase transition
-            phase_idx, phase = self._get_current_phase()
-            if phase_idx != current_phase_idx:
-                current_phase_idx = phase_idx
-                phase_start, phase_end = self._phase_boundaries[phase_idx]
-                print()
-                print("=" * 60)
-                print(f"Phase {phase_idx + 1}/{len(self.phases)}: {phase.name}")
-                print(f"  {phase.description}")
-                print(f"  Tasks: {phase.tasks}")
-                print(f"  Steps: {phase_start} -> {phase_end}")
-                print("=" * 60)
+                # Check for phase transition
+                phase_idx, phase = self._get_current_phase()
+                if phase_idx != current_phase_idx:
+                    current_phase_idx = phase_idx
+                    phase_start, phase_end = self._phase_boundaries[phase_idx]
+                    print()
+                    print("=" * 60)
+                    print(f"Phase {phase_idx + 1}/{len(self.phases)}: {phase.name}")
+                    print(f"  {phase.description}")
+                    print(f"  Tasks: {phase.tasks}")
+                    print(f"  Steps: {phase_start} -> {phase_end}")
+                    if self.phase_loader is not None and self.phase_loader.has_phase(phase.name):
+                        print(f"  Source: phase-loader[{phase.name}]")
+                    print("=" * 60)
 
-            # Get batch
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(self.dataloader)
-                batch = next(data_iter)
+                batch, data_iter = self._next_batch(phase, data_iter)
 
-            # Route to appropriate training step based on batch type
-            if self._is_clip_sequence_batch(batch):
-                # Approach 2 & 3: Clip sequence training
-                if self.temporal_transformer is not None and random.random() < 0.5:
-                    losses = self._train_step_temporal_sequence(batch)
-                elif self.recurrent_memory is not None:
-                    losses = self._train_step_memory(batch)
+                # Route to appropriate training step based on batch type
+                if self._is_clip_sequence_batch(batch):
+                    # Approach 2 & 3: Clip sequence training
+                    if self.temporal_transformer is not None and random.random() < 0.5:
+                        losses = self._train_step_temporal_sequence(batch)
+                    elif self.recurrent_memory is not None:
+                        losses = self._train_step_memory(batch)
+                    else:
+                        losses = self._train_step_temporal_sequence(batch)
+                elif self._is_temporal_pair_batch(batch):
+                    losses = self._train_step_temporal_pairs(batch)
+                elif self._is_video_batch(batch):
+                    losses = self._train_step_video(batch)
                 else:
-                    losses = self._train_step_temporal_sequence(batch)
-            elif self._is_temporal_pair_batch(batch):
-                # Approach 1: Temporal pair training
-                losses = self._train_step_temporal_pairs(batch)
-            elif self._is_video_batch(batch):
-                losses = self._train_step_video(batch)
-            else:
-                losses = self._train_step_synthetic(batch)
+                    losses = self._train_step_synthetic(batch)
 
-            running_loss += losses.get("total", 0.0)
+                running_loss += losses.get("total", 0.0)
 
-            if (step + 1) % log_interval == 0:
-                avg_loss = running_loss / log_interval
-                elapsed = time.time() - t0
-                steps_per_sec = log_interval / elapsed
-                task_str = batch.get("task", "mixed") if isinstance(batch, dict) else "mixed"
+                # Health check — may raise TrainingDiverged.
+                if self.health_monitor is not None:
+                    self.health_monitor.update(
+                        step,
+                        losses.get("total", float("nan")),
+                        losses.get("grad_norm", float("nan")),
+                    )
+
+                if (step + 1) % log_interval == 0:
+                    avg_loss = running_loss / log_interval
+                    elapsed = time.time() - t0
+                    steps_per_sec = log_interval / max(elapsed, 1e-9)
+                    task_str = batch.get("task", "mixed") if isinstance(batch, dict) else "mixed"
+                    grad_str = ""
+                    if "grad_norm" in losses:
+                        grad_str = f" gnorm {losses['grad_norm']:.2f} |"
+                    print(
+                        f"  step {step + 1:>6d} | "
+                        f"loss {avg_loss:.4f} |"
+                        f"{grad_str} "
+                        f"lr {lr:.2e} | "
+                        f"{steps_per_sec:.1f} it/s | "
+                        f"phase={phase.name} task={task_str}"
+                    )
+                    running_loss = 0.0
+                    t0 = time.time()
+
+                # Save checkpoint at phase transitions
+                if self.save_dir and step + 1 in [e for _, e in self._phase_boundaries]:
+                    self.save_checkpoint()
+
+        except TrainingDiverged as exc:
+            print()
+            print("=" * 60)
+            print(f"!!! TRAINING ABORTED at step {self.global_step}: {exc}")
+            if self.health_monitor is not None:
+                snap = self.health_monitor.snapshot()
                 print(
-                    f"  step {step + 1:>6d} | "
-                    f"loss {avg_loss:.4f} | "
-                    f"lr {lr:.2e} | "
-                    f"{steps_per_sec:.1f} it/s | "
-                    f"phase={phase.name} task={task_str}"
+                    f"    init_loss={snap.init_loss:.4f}  "
+                    f"ema_short={snap.ema_short:.4f}  "
+                    f"ema_long={snap.ema_long:.4f}  "
+                    f"last_grad={snap.last_grad_norm:g}"
                 )
-                running_loss = 0.0
-                t0 = time.time()
-
-            # Save checkpoint at phase transitions
-            if self.save_dir and step + 1 in [e for _, e in self._phase_boundaries]:
-                self.save_checkpoint()
+            print("=" * 60)
+            if self.save_dir:
+                self.save_checkpoint(self.save_dir / "checkpoint_aborted.pt")
+            raise
 
         # Final checkpoint
         if self.save_dir:
@@ -695,6 +767,36 @@ def parse_args() -> argparse.Namespace:
                     help="Number of layers in temporal transformer")
     p.add_argument("--memory-tokens", type=int, default=8,
                     help="Number of recurrent memory tokens")
+
+    # Multi-dataset curriculum (Pattern C)
+    p.add_argument("--curriculum-config", type=str, default=None,
+                    help="YAML mapping each phase to a registered public dataset. "
+                         "When set, the trainer swaps DataLoaders at phase "
+                         "boundaries. See scripts/training/configs/"
+                         "curriculum_internet.yaml for the schema.")
+    p.add_argument("--data-root", type=str, default="./data",
+                    help="Root directory for downloaded datasets.")
+    p.add_argument("--auto-download", action="store_true",
+                    help="Call each dataset's download() before building the index.")
+    p.add_argument("--limit-clips", type=int, default=None,
+                    help="Cap each dataset's index at this many samples (testing).")
+    p.add_argument("--num-workers", type=int, default=2,
+                    help="DataLoader workers per phase.")
+    p.add_argument("--curriculum-synthetic-fallback", action="store_true",
+                    help="Use a synthetic-data PhaseDataLoader (for testing the "
+                         "phase-swap mechanism without internet datasets).")
+
+    # Health monitor / abort thresholds
+    p.add_argument("--no-health-monitor", action="store_true",
+                    help="Disable the abort-on-pathology training health monitor.")
+    p.add_argument("--health-calibration-steps", type=int, default=200)
+    p.add_argument("--health-plateau-window", type=int, default=2000)
+    p.add_argument("--health-plateau-improvement", type=float, default=0.01)
+    p.add_argument("--health-divergence-factor", type=float, default=1.5)
+    p.add_argument("--health-divergence-persistence", type=int, default=200)
+    p.add_argument("--health-grad-min", type=float, default=1e-8)
+    p.add_argument("--health-grad-max-factor", type=float, default=100.0)
+    p.add_argument("--health-grad-persistence", type=int, default=200)
     return p.parse_args()
 
 
@@ -751,7 +853,34 @@ def main() -> None:
         m_params = count_parameters(recurrent_memory)
         print(f"Memory:      {m_params:,} params ({m_params * 4 / 1024**2:.1f} MB)")
 
-    # Build dataset and dataloader
+    # Build dataset and dataloader.  If --curriculum-config or
+    # --curriculum-synthetic-fallback is given, the per-phase loader
+    # takes precedence; we still build a tiny fallback DataLoader so
+    # the trainer always has something to fall back on.
+    phase_loader = None
+    if args.curriculum_config:
+        phase_specs = load_phase_specs_from_yaml(args.curriculum_config)
+        builder = make_default_builder(
+            config=config,
+            data_root=args.data_root,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            max_samples=args.limit_clips,
+            auto_download=args.auto_download,
+        )
+        phase_loader = PhaseDataLoader(phase_specs, builder)
+        print("Curriculum config: " + args.curriculum_config)
+        print(phase_loader.describe())
+    elif args.curriculum_synthetic_fallback:
+        phase_loader = make_synthetic_phase_loader(
+            config,
+            args.batch_size,
+            phase_names=[p.name for p in DEFAULT_PHASES],
+            length=max(args.batch_size * 16, 256),
+        )
+        print("Curriculum: synthetic per-phase fallback (testing)")
+        print(phase_loader.describe())
+
     if args.video_dir and not args.synthetic:
         from omnilatent.training.video_dataset import (
             VideoWatchingDataset,
@@ -812,6 +941,32 @@ def main() -> None:
     print(f"Save dir:    {args.save_dir}")
     print("=" * 60)
 
+    # Health monitor — abort on severe pathology.
+    health_monitor = None
+    if not args.no_health_monitor:
+        thresholds = HealthThresholds(
+            calibration_steps=args.health_calibration_steps,
+            plateau_window=args.health_plateau_window,
+            plateau_relative_improvement=args.health_plateau_improvement,
+            divergence_factor=args.health_divergence_factor,
+            divergence_persistence=args.health_divergence_persistence,
+            grad_min=args.health_grad_min,
+            grad_max_factor=args.health_grad_max_factor,
+            grad_persistence=args.health_grad_persistence,
+        )
+        health_monitor = TrainingHealthMonitor(
+            clip_norm=config.grad_clip,
+            thresholds=thresholds,
+        )
+        print(
+            f"Health:      ON  (calibration={thresholds.calibration_steps}, "
+            f"plateau={thresholds.plateau_window}, "
+            f"diverge={thresholds.divergence_factor}x for "
+            f"{thresholds.divergence_persistence} steps)"
+        )
+    else:
+        print("Health:      OFF")
+
     # Build trainer
     trainer = CurriculumTrainer(
         model=model,
@@ -822,6 +977,8 @@ def main() -> None:
         save_dir=args.save_dir,
         temporal_transformer=temporal_transformer,
         recurrent_memory=recurrent_memory,
+        phase_loader=phase_loader,
+        health_monitor=health_monitor,
     )
 
     if args.resume:
