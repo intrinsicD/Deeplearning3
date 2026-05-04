@@ -57,8 +57,26 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.scripts]
+omnilatent-train = "scripts.training.train:main"
+omnilatent-train-coco = "scripts.training.train_coco:main"
+omnilatent-train-pc = "scripts.training.train_pc:main"
+omnilatent-auto-train = "scripts.training.auto_train:main"
+omnilatent-curriculum-train = "scripts.training.curriculum_train:main"
+omnilatent-evaluate = "scripts.evaluation.evaluate:main"
+omnilatent-benchmark = "scripts.evaluation.benchmark:main"
+omnilatent-demo = "scripts.evaluation.demo:main"
+omnilatent-mmwm-usecase = "scripts.evaluation.mmwm_usecase:main"
+omnilatent-diagnostics = "scripts.diagnostics.check_training_startup:main"
+omnilatent-server = "apps.control_center.server:main"
+mmwm-train-minari = "scripts.training.train_mmwm_minari:main"
+mmwm-train-av = "scripts.training.train_mmwm_av:main"
+hpwm-train = "scripts.training.train_hpwm:main"
+lgq-train = "scripts.training.train_lgq:main"
+gaussian-encoder-train = "scripts.training.train_gaussian_encoder:main"
+
 [tool.setuptools.packages.find]
-include = ["omnilatent*", "lgq*", "hpwm*", "MMWM*"]
+include = ["omnilatent*", "lgq*", "hpwm*", "MMWM*", "datasets*", "scripts*", "apps*", "gaussian_encoder*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

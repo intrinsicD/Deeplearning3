@@ -4,6 +4,50 @@ All-to-all multimodal AI with **Latent Neural Hooks** — trainable on a single 
 
 Processes **text, native audio, images, and full video** in a unified latent space. Any input modality can produce any output modality (16 combinations).
 
+## Repository structure
+
+```
+omnilatent/           # Main multimodal model: agent, core, data, kb, model, training
+MMWM/                 # Modular Latent World Model (curriculum, transitions, memory)
+hpwm/                 # Hierarchical Predictive World Model (DINO + MoD + slots + Mamba)
+lgq/                  # Learnable Geometric Quantization tokenizer
+gaussian_encoder/     # Gaussian-mixture autoencoder (MNIST demo)
+
+datasets/             # Public-dataset infrastructure
+  ├── adapters/       # Per-model adapters (mmwm, hpwm, lgq, gaussian_encoder)
+  ├── configs/        # YAML configs (per model × dataset)
+  ├── downloaders/    # AudioSet, VGGSound, UCF101, Kinetics, Miradata, ...
+  └── registry.py
+
+scripts/              # Executable entry points
+  ├── training/       # train.py, curriculum_train.py, train_coco.py,
+  │                   # train_pc.py, train_mmwm_{minari,av}.py,
+  │                   # train_hpwm.py, train_lgq.py, train_gaussian_encoder.py,
+  │                   # auto_train.py
+  ├── evaluation/     # evaluate.py, benchmark.py, demo.py, mmwm_usecase.py
+  └── diagnostics/    # check_training_startup.py
+
+apps/                 # User-facing apps
+  └── control_center/ # FastAPI dashboard (server.py + index.html)
+
+tests/                # Pytest suite, partitioned by package
+  ├── omnilatent/     # Most tests (model, agent, hooks, training, kb, ...)
+  ├── mmwm/, hpwm/, lgq/
+  └── integration/    # Cross-package smoke tests
+
+docs/                 # Long-form documentation
+  ├── datasets.md
+  └── mmwm/           # MMWM review notes, roadmap, training curriculum
+
+data/                 # Local dataset cache (torchvision convention; mostly gitignored)
+```
+
+After `pip install -e .` the most common scripts are exposed as console
+commands: `omnilatent-train`, `omnilatent-evaluate`, `omnilatent-benchmark`,
+`omnilatent-demo`, `omnilatent-curriculum-train`, `omnilatent-server`,
+`mmwm-train-minari`, `hpwm-train`, `lgq-train`, `gaussian-encoder-train`, etc.
+The `python -m scripts.<group>.<name>` form also works without installation.
+
 ## Installation
 
 ```bash
@@ -50,7 +94,7 @@ results = model.forward_multimodal(
 ### With synthetic data (verification / benchmarking)
 
 ```bash
-python train.py
+python -m scripts.training.train
 ```
 
 This trains on randomly generated data to verify the full pipeline works. Useful for checking memory usage and speed on your hardware.
@@ -58,16 +102,16 @@ This trains on randomly generated data to verify the full pipeline works. Useful
 ### CLI options
 
 ```bash
-python train.py --help
+python -m scripts.training.train --help
 
 # Smaller model for tighter memory
-python train.py --dim 512 --layers 8 --heads 8
+python -m scripts.training.train --dim 512 --layers 8 --heads 8
 
 # Disable mixed precision
-python train.py --no-amp
+python -m scripts.training.train --no-amp
 
 # Short run
-python train.py --steps 500 --batch-size 2 --log-interval 10
+python -m scripts.training.train --steps 500 --batch-size 2 --log-interval 10
 ```
 
 ### Training with your own data
@@ -250,7 +294,7 @@ videos/
 ### Run curriculum training
 
 ```bash
-python curriculum_train.py --video-dir /path/to/videos
+python -m scripts.training.curriculum_train --video-dir /path/to/videos
 ```
 
 The trainer runs 5 phases automatically:
@@ -266,23 +310,23 @@ The trainer runs 5 phases automatically:
 ### CLI options
 
 ```bash
-python curriculum_train.py --help
+python -m scripts.training.curriculum_train --help
 
 # Quick test run
-python curriculum_train.py --video-dir ./videos --total-steps 500
+python -m scripts.training.curriculum_train --video-dir ./videos --total-steps 500
 
 # Custom model size
-python curriculum_train.py --video-dir ./videos --dim 512 --layers 8 --heads 8
+python -m scripts.training.curriculum_train --video-dir ./videos --dim 512 --layers 8 --heads 8
 
 # Custom phase durations
-python curriculum_train.py --video-dir ./videos \
+python -m scripts.training.curriculum_train --video-dir ./videos \
     --warmup-frac 0.05 --crossmodal-frac 0.30 --temporal-frac 0.30
 
 # Resume from checkpoint
-python curriculum_train.py --video-dir ./videos --resume checkpoints/checkpoint_step50000.pt
+python -m scripts.training.curriculum_train --video-dir ./videos --resume checkpoints/checkpoint_step50000.pt
 
 # Test with synthetic data (no videos needed)
-python curriculum_train.py --synthetic --total-steps 200
+python -m scripts.training.curriculum_train --synthetic --total-steps 200
 ```
 
 ### Use in code
@@ -348,14 +392,14 @@ This repository contains four distinct networks. Below is a detailed description
 
 OmniLatent is the main model. It has four training entry points, each suited to different data and objectives.
 
-#### a) Synthetic data training (`train.py`)
+#### a) Synthetic data training (`scripts/training/train.py`)
 
 Trains on randomly generated tensors for all four modalities. Useful for verifying the pipeline, benchmarking hardware, and debugging.
 
 ```bash
-python train.py                          # default: 768-dim, 12 layers, 100k steps
-python train.py --dim 512 --layers 8 --heads 8 --steps 5000
-python train.py --no-amp --batch-size 2  # disable mixed precision
+python -m scripts.training.train                          # default: 768-dim, 12 layers, 100k steps
+python -m scripts.training.train --dim 512 --layers 8 --heads 8 --steps 5000
+python -m scripts.training.train --no-amp --batch-size 2  # disable mixed precision
 ```
 
 **Training details:**
@@ -367,18 +411,18 @@ python train.py --no-amp --batch-size 2  # disable mixed precision
 - **Gradient clipping:** max norm from config
 - **Task sampling:** each step randomly picks a (source, target) modality pair, giving uniform coverage of all 16 combinations over time
 
-#### b) COCO Captions training (`train_coco.py`)
+#### b) COCO Captions training (`scripts/training/train_coco.py`)
 
 Trains on real image–caption pairs from COCO for text ↔ image translation.
 
 ```bash
-python train_coco.py \
+python -m scripts.training.train_coco \
     --image-dir data/train2014 \
     --annotation-file data/annotations/captions_train2014.json \
     --total-steps 50000
 
 # Resume from checkpoint
-python train_coco.py --image-dir data/train2014 \
+python -m scripts.training.train_coco --image-dir data/train2014 \
     --annotation-file data/annotations/captions_train2014.json \
     --resume checkpoints_coco/checkpoint_step5000.pt
 ```
@@ -391,17 +435,17 @@ python train_coco.py --image-dir data/train2014 \
 - **Loss, optimizer, precision:** same as synthetic training
 - **Checkpoints:** saved every `--save-every` steps (default 5000) to `checkpoints_coco/`
 
-#### c) Curriculum training from video (`curriculum_train.py`)
+#### c) Curriculum training from video (`scripts/training/curriculum_train.py`)
 
 Learns from raw video files. A single video provides free cross-modal supervision (frames, audio, optional transcript) with no manual labelling.
 
 ```bash
-python curriculum_train.py --video-dir /path/to/videos
-python curriculum_train.py --video-dir ./videos --total-steps 500  # quick test
-python curriculum_train.py --synthetic --total-steps 200           # no videos needed
+python -m scripts.training.curriculum_train --video-dir /path/to/videos
+python -m scripts.training.curriculum_train --video-dir ./videos --total-steps 500  # quick test
+python -m scripts.training.curriculum_train --synthetic --total-steps 200           # no videos needed
 
 # With temporal context modules
-python curriculum_train.py --video-dir ./videos \
+python -m scripts.training.curriculum_train --video-dir ./videos \
     --enable-temporal-transformer --enable-memory
 ```
 
@@ -424,16 +468,16 @@ python curriculum_train.py --video-dir ./videos \
 - **Loss:** `MultiModalLoss` + `TemporalContextLoss` (temporal order BCE, temporal distance CE, next-clip MSE+cosine, scene boundary BCE), all with learned uncertainty weighting
 - **Checkpoints:** saved at each phase transition and at the end to `checkpoints/`
 
-#### d) Predictive Coding training (`train_pc.py`)
+#### d) Predictive Coding training (`scripts/training/train_pc.py`)
 
 Trains the OmniLatent backbone using Predictive Coding (Whittington & Bogacz 2017) instead of backpropagation. Each transformer layer becomes a level in a predictive hierarchy with local Hebbian-like weight updates.
 
 ```bash
-python train_pc.py                            # pure predictive coding
-python train_pc.py --blend 0.5               # hybrid: 50% PC + 50% backprop
-python train_pc.py --blend-anneal            # curriculum: backprop → PC
-python train_pc.py --analytical              # memory-efficient O(1) inference
-python train_pc.py --inference-steps 50      # more inference iterations
+python -m scripts.training.train_pc                            # pure predictive coding
+python -m scripts.training.train_pc --blend 0.5               # hybrid: 50% PC + 50% backprop
+python -m scripts.training.train_pc --blend-anneal            # curriculum: backprop → PC
+python -m scripts.training.train_pc --analytical              # memory-efficient O(1) inference
+python -m scripts.training.train_pc --inference-steps 50      # more inference iterations
 ```
 
 **Training details:**
@@ -441,28 +485,28 @@ python train_pc.py --inference-steps 50      # more inference iterations
 - **Blend annealing:** optionally transitions smoothly from backprop to PC over a configurable number of steps
 - **Analytical inference:** uses residual Jacobian approximation for O(1) memory inference
 - **Optimizer:** AdamW (lr=1e-3 by default — higher than standard training because PC updates are local)
-- **Data:** synthetic multi-modal data (same as `train.py`)
+- **Data:** synthetic multi-modal data (same as `scripts/training/train.py`)
 - **Checkpoints:** saved to `checkpoints/pc/`
 
-#### OmniLatent evaluation and inference (`evaluate.py`)
+#### OmniLatent evaluation and inference (`scripts/evaluation/evaluate.py`)
 
 Load a trained checkpoint and probe what the model learned:
 
 ```bash
 # Self-reconstruction quality
-python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode reconstruct
+python -m scripts.evaluation.evaluate --checkpoint checkpoints/checkpoint_final.pt --mode reconstruct
 
 # Cross-modal translation (all 8 key pairs)
-python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode translate
+python -m scripts.evaluation.evaluate --checkpoint checkpoints/checkpoint_final.pt --mode translate
 
 # Latent space alignment analysis (cosine similarity between modality latents)
-python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode latent
+python -m scripts.evaluation.evaluate --checkpoint checkpoints/checkpoint_final.pt --mode latent
 
 # Full evaluation suite (all three modes above)
-python evaluate.py --checkpoint checkpoints/checkpoint_final.pt --mode all
+python -m scripts.evaluation.evaluate --checkpoint checkpoints/checkpoint_final.pt --mode all
 
 # Inference on a real file
-python evaluate.py --checkpoint checkpoints/checkpoint_final.pt \
+python -m scripts.evaluation.evaluate --checkpoint checkpoints/checkpoint_final.pt \
     --input-file photo.jpg --source image --target text --mode file
 ```
 
@@ -495,15 +539,15 @@ with torch.no_grad():
     )
 ```
 
-#### OmniLatent benchmarking (`benchmark.py`)
+#### OmniLatent benchmarking (`scripts/evaluation/benchmark.py`)
 
 Runs a comprehensive diagnostic analysis covering component parameter budgets, per-component timing, encoder information retention (effective rank), backbone per-layer contribution, scaling sensitivity, cross-modal alignment, loss attribution, and hook impact.
 
 ```bash
-python benchmark.py                                              # quick report
-python benchmark.py --dim 768 --layers 12 --heads 12           # custom config
-python benchmark.py --checkpoint checkpoints/checkpoint_final.pt # trained model
-python benchmark.py --output report.json                        # save to file
+python -m scripts.evaluation.benchmark                                              # quick report
+python -m scripts.evaluation.benchmark --dim 768 --layers 12 --heads 12           # custom config
+python -m scripts.evaluation.benchmark --checkpoint checkpoints/checkpoint_final.pt # trained model
+python -m scripts.evaluation.benchmark --output report.json                        # save to file
 ```
 
 ---
@@ -647,7 +691,7 @@ python -m pytest tests/ -v
 ## Running the demo
 
 ```bash
-python demo.py
+python -m scripts.evaluation.demo
 ```
 
 Demonstrates self-reconstruction, cross-modal translation, hook registration, multi-modal forward, and gradient flow verification.

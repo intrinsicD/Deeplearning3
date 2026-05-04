@@ -289,6 +289,10 @@ def train(args: argparse.Namespace) -> None:
     print("Training complete.")
 
 
-if __name__ == "__main__":
+def main() -> None:
     args = parse_args()
     train(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,12 +1,12 @@
 """Train HPWM on a public video dataset.
 
 Usage:
-    python -m datasets.train_scripts.train_hpwm \
+    python -m scripts.training.train_hpwm \
         --dataset kinetics400 \
         --data-dir ./data/kinetics400 \
         --config datasets/configs/hpwm_kinetics400.yaml
 
-    python -m datasets.train_scripts.train_hpwm \
+    python -m scripts.training.train_hpwm \
         --dataset ucf101 --data-dir ./data/ucf101 --synthetic-fallback
 """
 
