@@ -1,0 +1,32 @@
+# MMWM + AVSpeech training config
+model:
+  vector_dim: 16
+  action_dim: 8
+  image_size: 64
+  audio_mel_bins: 80
+  audio_mel_frames: 128
+  text_len: 8
+  vocab_size: 256
+
+training:
+  batch_size: 16
+  total_steps: 50000
+  lr: 3.0e-4
+  grad_clip: 1.0
+  warmup_fraction: 0.05
+  mixed_precision: true
+  run_dir: runs/mmwm_avspeech
+
+dataset:
+  name: avspeech
+  split: train
+  n_frames: 2
+  resolution: 64
+  audio_sr: 16000
+  audio_duration_s: 5.0
+
+adapter:
+  include_text: false
+  include_image: true
+  include_audio: true
+

@@ -1,0 +1,18 @@
+# Gaussian Encoder + VGGSound (grayscale frames as training images)
+model:
+  latent_dim: 32
+  resolution: 28
+  grayscale: true
+
+training:
+  batch_size: 128
+  epochs: 50
+  lr: 1.0e-3
+  run_dir: runs/gaussian_encoder_vggsound
+
+dataset:
+  name: vggsound
+  split: train
+  resolution: 28
+  n_frames: 8
+

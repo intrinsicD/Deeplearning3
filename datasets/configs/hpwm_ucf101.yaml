@@ -1,0 +1,22 @@
+# HPWM + UCF-101 training config
+model:
+  n_slots: 6
+  slot_dim: 256
+  n_frames: 60
+  resolution: 128
+  fps: 2
+  batch_size: 8
+  checkpoint_dir: checkpoints/hpwm_ucf101
+  log_dir: runs/hpwm_ucf101
+
+dataset:
+  name: ucf101
+  split: train
+  n_frames: 60
+  resolution: 128
+
+training:
+  total_steps: 50000
+  lr: 1.0e-4
+  grad_clip: 1.0
+

@@ -1,0 +1,20 @@
+# LGQ + Kinetics-400 training config
+model:
+  channels: 3
+  resolution: 256
+  quantizer: lgq
+  codebook_size: 16384
+  latent_dim: 256
+
+training:
+  batch_size: 32
+  steps: 200000
+  lr: 1.0e-4
+  run_dir: runs/lgq_kinetics400
+
+dataset:
+  name: kinetics400
+  split: train
+  resolution: 256
+  n_frames: 16
+

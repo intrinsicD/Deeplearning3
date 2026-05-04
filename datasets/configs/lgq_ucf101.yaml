@@ -1,0 +1,20 @@
+# LGQ + UCF-101 training config (image reconstruction on video frames)
+model:
+  channels: 3
+  resolution: 256
+  quantizer: lgq
+  codebook_size: 8192
+  latent_dim: 256
+
+training:
+  batch_size: 32
+  steps: 100000
+  lr: 1.0e-4
+  run_dir: runs/lgq_ucf101
+
+dataset:
+  name: ucf101
+  split: train
+  resolution: 256
+  n_frames: 16
+

@@ -1,0 +1,24 @@
+# HPWM + Kinetics-400 training config
+model:
+  n_slots: 8
+  slot_dim: 256
+  n_frames: 120
+  resolution: 128
+  fps: 2
+  batch_size: 4
+  checkpoint_dir: checkpoints/hpwm_kinetics400
+  log_dir: runs/hpwm_kinetics400
+
+dataset:
+  name: kinetics400
+  split: train
+  n_frames: 120
+  resolution: 128
+  audio_sr: 16000
+  audio_duration_s: 10.0
+
+training:
+  total_steps: 100000
+  lr: 1.0e-4
+  grad_clip: 1.0
+
