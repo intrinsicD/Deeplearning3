@@ -6,7 +6,13 @@ import pytest
 import torch
 
 from omnilatent.config import OmniLatentConfig
-from omnilatent.model.hooks import HookManager, LatentNeuralHook
+from omnilatent.model.hooks import (
+    HookManager,
+    LatentNeuralHook,
+    NeuralPort,
+    NeuralPortManager,
+    NeuralPortSpec,
+)
 from omnilatent.model.omnilatent import OmniLatentModel
 from omnilatent.utils import count_parameters
 
@@ -103,6 +109,121 @@ class TestHookManager:
         manager.register_hook(h1)
         manager.register_hook(h2)
         assert len(manager.hooks) == 2
+
+
+class TestNeuralPorts:
+    def test_neural_port_from_spec_behaves_like_hook(self, config: OmniLatentConfig) -> None:
+        spec = NeuralPortSpec(
+            name="kb_retrieval_v1",
+            kind="retrieval",
+            version="1",
+            latent_dim=config.hidden_dim,
+            hook_tokens=4,
+            target_layers=[0, 1],
+            reads=("z_sem", "z_ctx"),
+            writes=("z_ctx",),
+            compatibility_loss={"latent_alignment": True},
+        )
+
+        port = NeuralPort(spec)
+
+        assert isinstance(port, LatentNeuralHook)
+        assert port.name == spec.name
+        assert port.kind == "retrieval"
+        assert port.version == "1"
+        assert port.num_tokens == 4
+        assert port.dim == config.hidden_dim
+        assert port.spec.to_dict()["reads"] == ["z_sem", "z_ctx"]
+
+    def test_neural_port_manager_registers_specs_and_legacy_hooks(
+        self,
+        config: OmniLatentConfig,
+    ) -> None:
+        manager = NeuralPortManager()
+        port = manager.register_port(
+            NeuralPortSpec(
+                name="vision_world_hook",
+                kind="world",
+                latent_dim=config.hidden_dim,
+                hook_tokens=2,
+                target_layers=[0],
+            )
+        )
+        legacy = LatentNeuralHook("legacy", 1, config.hidden_dim, [0])
+        manager.register_hook(legacy)
+
+        assert manager.has_ports()
+        assert manager.hooks["vision_world_hook"] is port
+        assert manager.specs["vision_world_hook"].kind == "world"
+        assert manager.hooks["legacy"] is legacy
+        assert "legacy" not in manager.specs
+
+    def test_freeze_and_unfreeze_port(self, config: OmniLatentConfig) -> None:
+        manager = NeuralPortManager()
+        port = manager.register_port(
+            NeuralPortSpec(
+                name="freezable",
+                kind="test",
+                latent_dim=config.hidden_dim,
+                hook_tokens=2,
+                target_layers=[0],
+            )
+        )
+
+        manager.freeze_port("freezable")
+        assert all(not p.requires_grad for p in port.parameters())
+
+        manager.unfreeze_port("freezable")
+        assert all(p.requires_grad for p in port.parameters())
+
+    def test_gate_values_are_logged_during_forward(self, config: OmniLatentConfig) -> None:
+        manager = NeuralPortManager()
+        manager.register_port(
+            NeuralPortSpec(
+                name="logger",
+                kind="test",
+                latent_dim=config.hidden_dim,
+                hook_tokens=2,
+                target_layers=[0],
+                gate_bias_init=0.0,
+            )
+        )
+        x = torch.randn(2, 5, config.hidden_dim)
+
+        manager.begin_forward(batch_size=2)
+        injected = manager.pre_layer(0, x)
+        restored = manager.post_layer(0, injected)
+
+        assert injected.shape[1] == x.shape[1] + 2
+        assert restored.shape == x.shape
+        assert manager.gate_log()["logger.0"] == pytest.approx(0.5)
+        assert manager.gate_values()["logger"][0] == pytest.approx(0.5)
+
+    def test_remove_and_readd_port_preserves_base_model_weights(
+        self,
+        model: OmniLatentModel,
+        config: OmniLatentConfig,
+    ) -> None:
+        base_before = {name: p.detach().clone() for name, p in model.backbone.named_parameters()}
+        port = NeuralPort(
+            NeuralPortSpec(
+                name="swap_test",
+                kind="compatibility",
+                latent_dim=config.hidden_dim,
+                hook_tokens=2,
+                target_layers=[0],
+            )
+        )
+
+        model.hook_manager.register_port(port)
+        removed = model.hook_manager.remove_port("swap_test")
+        assert removed is port
+        model.hook_manager.register_port(port)
+
+        for name, param in model.backbone.named_parameters():
+            assert torch.equal(param, base_before[name])
+
+        assert model.remove_hook("swap_test") is port
 
 
 class TestHookIntegration:

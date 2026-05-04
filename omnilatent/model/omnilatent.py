@@ -23,7 +23,7 @@ length adaptation.
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -44,8 +44,9 @@ from omnilatent.model.encoders import (
     VideoEncoder,
 )
 from omnilatent.model.hooks import HookManager, LatentNeuralHook
-from omnilatent.model.masking import build_prefix_lm_mask
+from omnilatent.model.masking import apply_token_validity_mask, build_prefix_lm_mask
 from omnilatent.model.reasoning import LatentReasoningModule
+from omnilatent.protocol import ObservationPacket, TargetSpec
 from omnilatent.utils import MODALITY_ID, Modality
 
 
@@ -103,6 +104,10 @@ class OmniLatentModel(nn.Module):
         )
         # Target modality token (separate embedding for the output target)
         self.target_embed = nn.Embedding(len(MODALITY_ID), config.hidden_dim)
+        # Source segment IDs distinguish multiple observed modalities inside a
+        # single fused prefix. Existing single-source forward() does not use
+        # this embedding, preserving legacy behavior.
+        self.source_segment_embed = nn.Embedding(16, config.hidden_dim)
 
         # --- Encoders ---
         self.encoders = nn.ModuleDict({
@@ -207,6 +212,202 @@ class OmniLatentModel(nn.Module):
         tokens = self.modality_embed(tokens, MODALITY_ID[modality])
         return tokens
 
+    def _build_target_tokens(
+        self,
+        target_modality: str,
+        batch_size: int,
+        device: torch.device,
+        target_data: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Build target modality token + target queries/teacher-forced tokens."""
+        if target_modality not in self.decoders:
+            raise ValueError(f"Unsupported target modality: {target_modality}")
+        if target_modality == "text":
+            if target_data is not None:
+                bos = torch.full(
+                    (batch_size, 1), self.config.text_bos_token,
+                    dtype=torch.long, device=device,
+                )
+                tgt_input = torch.cat([bos, target_data[:, :-1]], dim=1)
+                tgt_queries = self.encoders["text"](tgt_input)
+            else:
+                bos = torch.full(
+                    (batch_size, 1), self.config.text_bos_token,
+                    dtype=torch.long, device=device,
+                )
+                tgt_queries = self.encoders["text"](bos)
+        else:
+            tgt_queries = self.target_query_gen(target_modality, batch_size)
+
+        tgt_mod_tok = self.target_embed(
+            torch.tensor(MODALITY_ID[target_modality], device=device)
+        ).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1)
+        return torch.cat([tgt_mod_tok, tgt_queries], dim=1)
+
+    def _normalize_source_mask(
+        self,
+        mask: torch.Tensor | None,
+        encoded_len: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Normalize per-modality masks to include the prepended modality token."""
+        if mask is None:
+            return torch.ones(batch_size, encoded_len, dtype=torch.bool, device=device)
+        mask = mask.to(device=device, dtype=torch.bool)
+        if mask.ndim != 2 or mask.shape[0] != batch_size:
+            raise ValueError(
+                f"ObservationPacket masks must be [B, T], got {tuple(mask.shape)} "
+                f"for batch_size={batch_size}"
+            )
+        if mask.shape[1] == encoded_len:
+            return mask
+        if mask.shape[1] == encoded_len - 1:
+            leading = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
+            return torch.cat([leading, mask], dim=1)
+        raise ValueError(
+            f"Mask length {mask.shape[1]} must match encoded length {encoded_len} "
+            f"or encoded length without modality token {encoded_len - 1}"
+        )
+
+    def _run_prefix_target(
+        self,
+        prefix: torch.Tensor,
+        target_modality: str,
+        target_data: torch.Tensor | None,
+        prefix_valid_mask: torch.Tensor | None = None,
+    ) -> dict[str, Any]:
+        """Shared fused-prefix → target decode path."""
+        B = prefix.shape[0]
+        device = prefix.device
+
+        thought_tokens = None
+        bottleneck_pred = None
+        source_summary = None
+        if self.reasoning is not None:
+            thought_tokens, bottleneck_pred = self.reasoning(prefix)
+            source_summary = prefix.mean(dim=1)
+
+        prefix_parts = [prefix]
+        if thought_tokens is not None:
+            thought_tokens = cast(torch.Tensor, thought_tokens)
+            prefix_parts.append(thought_tokens)
+            if prefix_valid_mask is not None:
+                thought_valid = torch.ones(B, thought_tokens.shape[1], dtype=torch.bool, device=device)
+                prefix_valid_mask = torch.cat([prefix_valid_mask, thought_valid], dim=1)
+        prefix_with_thoughts = torch.cat(prefix_parts, dim=1)
+        prefix_len = prefix_with_thoughts.shape[1]
+
+        tgt_with_mod = self._build_target_tokens(target_modality, B, device, target_data)
+        tgt_len = tgt_with_mod.shape[1]
+        tokens = torch.cat([prefix_with_thoughts, tgt_with_mod], dim=1)
+
+        attn_mask = self._create_attention_mask(prefix_len, tgt_len, target_modality, device)
+        if prefix_valid_mask is not None:
+            target_valid = torch.ones(B, tgt_len, dtype=torch.bool, device=device)
+            valid_tokens = torch.cat([prefix_valid_mask, target_valid], dim=1)
+            attn_mask = apply_token_validity_mask(attn_mask, valid_tokens)
+
+        if self.hook_manager.has_hooks():
+            self.hook_manager.begin_forward(B)
+
+        latent = self.backbone(
+            tokens,
+            attn_mask=attn_mask,
+            hook_manager=self.hook_manager if self.hook_manager.has_hooks() else None,
+            prefix_len=prefix_len,
+        )
+        tgt_latent = latent[:, prefix_len + 1:]
+        output = self.decoders[target_modality](tgt_latent)
+        result = {
+            "latent": latent,
+            "output": output,
+            "target": target_data,
+            "attention_mask": attn_mask,
+            "prefix_len": torch.tensor(prefix_len, device=device),
+        }
+        if bottleneck_pred is not None:
+            result["reasoning_bottleneck"] = bottleneck_pred
+            result["source_summary"] = source_summary
+        return result
+
+    def forward_observation(
+        self,
+        packet: ObservationPacket,
+        target: TargetSpec,
+    ) -> dict[str, Any]:
+        """Forward pass from multiple observed modalities fused in one prefix.
+
+        Layout:
+            ``[source_0 tokens][source_1 tokens]...[thoughts][target token + queries]``
+
+        Each source segment receives a learned source-segment embedding in
+        addition to its modality token. Per-modality masks in
+        ``packet.masks`` are normalized to encoded-token length and applied to
+        the final attention mask.
+        """
+        if not packet.modalities:
+            raise ValueError("ObservationPacket contains no modalities")
+        target_modality = target.modality
+        if target_modality not in self.decoders:
+            raise ValueError(f"Unsupported target modality: {target_modality}")
+
+        prefix_parts: list[torch.Tensor] = []
+        mask_parts: list[torch.Tensor] = []
+        segment_parts: list[torch.Tensor] = []
+        source_modalities: list[str] = []
+        source_lengths: list[int] = []
+        batch_size: int | None = None
+        device: torch.device | None = None
+
+        for segment_idx, (modality, data) in enumerate(packet.modalities.items()):
+            if modality not in self.encoders:
+                raise ValueError(f"Unsupported source modality: {modality}")
+            if batch_size is None:
+                batch_size = data.shape[0]
+                device = data.device
+            elif data.shape[0] != batch_size:
+                raise ValueError("All ObservationPacket modalities must share the same batch size")
+            if device is None:
+                device = data.device
+
+            encoded = self.encode(cast(Modality, modality), data)
+            encoded_device = cast(torch.device, encoded.device)
+            seg_id = segment_idx % self.source_segment_embed.num_embeddings
+            seg = self.source_segment_embed(
+                torch.tensor(seg_id, device=encoded_device)
+            ).view(1, 1, -1)
+            encoded = encoded + seg
+            prefix_parts.append(encoded)
+
+            mask_parts.append(
+                self._normalize_source_mask(
+                    packet.masks.get(modality), encoded.shape[1], data.shape[0], encoded_device,
+                )
+            )
+            segment_parts.append(
+                torch.full((data.shape[0], encoded.shape[1]), seg_id, dtype=torch.long, device=encoded_device)
+            )
+            source_modalities.append(modality)
+            source_lengths.append(encoded.shape[1])
+
+        assert batch_size is not None and device is not None
+        prefix = torch.cat(prefix_parts, dim=1)
+        prefix_valid_mask = torch.cat(mask_parts, dim=1)
+        source_segment_ids = torch.cat(segment_parts, dim=1)
+
+        result = self._run_prefix_target(
+            prefix=prefix,
+            target_modality=target_modality,
+            target_data=target.data,
+            prefix_valid_mask=prefix_valid_mask,
+        )
+        result["source_segment_ids"] = source_segment_ids
+        result["source_valid_mask"] = prefix_valid_mask
+        result["source_modalities"] = source_modalities  # type: ignore[assignment]
+        result["source_lengths"] = source_lengths  # type: ignore[assignment]
+        return result
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -216,7 +417,7 @@ class OmniLatentModel(nn.Module):
         source_data: torch.Tensor,
         target_modality: Modality,
         target_data: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, Any]:
         """Full forward pass for training or inference.
 
         Args:
@@ -248,6 +449,7 @@ class OmniLatentModel(nn.Module):
             thought_tokens, bottleneck_pred = self.reasoning(src_tokens)
             # Source summary for bottleneck loss (detach source side)
             source_summary = src_tokens[:, 1:].mean(dim=1)  # skip modality indicator
+            thought_tokens = cast(torch.Tensor, thought_tokens)
 
         src_len = src_tokens.shape[1]
         # Include thought tokens in prefix length

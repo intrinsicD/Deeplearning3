@@ -1,5 +1,5 @@
 from omnilatent.model.omnilatent import OmniLatentModel
-from omnilatent.model.hooks import LatentNeuralHook
+from omnilatent.model.hooks import HookManager, LatentNeuralHook, NeuralPort, NeuralPortManager, NeuralPortSpec
 from omnilatent.model.masking import (
     HookPolicy,
     build_prefix_lm_mask,
@@ -15,7 +15,11 @@ from omnilatent.model.temporal import (
 
 __all__ = [
     "OmniLatentModel",
+    "HookManager",
     "LatentNeuralHook",
+    "NeuralPort",
+    "NeuralPortManager",
+    "NeuralPortSpec",
     "HookPolicy",
     "build_prefix_lm_mask",
     "expand_mask_for_hooks",

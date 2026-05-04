@@ -25,7 +25,6 @@ Hook policies control how injected hook tokens interact with the mask:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -69,6 +68,38 @@ def build_prefix_lm_mask(
         mask[src_len:, src_len:] = causal
 
     return mask.unsqueeze(0).unsqueeze(0)
+
+
+def apply_token_validity_mask(
+    attn_mask: torch.Tensor,
+    valid_tokens: torch.Tensor,
+) -> torch.Tensor:
+    """Apply batch-specific token validity to an attention mask.
+
+    PyTorch SDPA convention is preserved: ``True`` means the query can attend
+    to the key. Invalid tokens are masked both as keys and queries, which keeps
+    padded source tokens from influencing fused representations.
+
+    Args:
+        attn_mask: bool tensor shaped ``(1|B, 1, N, N)`` or broadcastable over B.
+        valid_tokens: bool tensor shaped ``(B, N)``.
+
+    Returns:
+        bool tensor shaped ``(B, 1, N, N)``.
+    """
+    if valid_tokens.ndim != 2:
+        raise ValueError(f"valid_tokens must be [B, N], got {tuple(valid_tokens.shape)}")
+    if attn_mask.shape[-1] != valid_tokens.shape[1] or attn_mask.shape[-2] != valid_tokens.shape[1]:
+        raise ValueError(
+            "attn_mask and valid_tokens sequence lengths disagree: "
+            f"mask={tuple(attn_mask.shape)}, valid={tuple(valid_tokens.shape)}"
+        )
+    B = valid_tokens.shape[0]
+    mask = attn_mask.expand(B, *attn_mask.shape[1:]).clone()
+    valid = valid_tokens.to(device=mask.device, dtype=torch.bool)
+    mask = mask & valid[:, None, None, :]
+    mask = mask & valid[:, None, :, None]
+    return mask
 
 
 def expand_mask_for_hooks(

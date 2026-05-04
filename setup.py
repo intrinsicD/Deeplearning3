@@ -9,6 +9,7 @@ setup(
     install_requires=[
         "torch>=2.1.0",
         "einops>=0.7.0",
+        "PyYAML>=6.0",
     ],
     extras_require={
         "coco": ["torchvision>=0.16.0", "Pillow>=9.0"],

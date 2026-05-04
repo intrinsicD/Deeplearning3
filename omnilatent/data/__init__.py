@@ -7,6 +7,16 @@ Organized as:
   - registry    — build dataset from config
 """
 
+from omnilatent.data.manifest import DataManifest, SourceSpec
 from omnilatent.data.registry import build_dataset
+from omnilatent.data.sample import MultiModalSample
+from omnilatent.data.streaming import StreamingMultiModalDataset, stream_samples
 
-__all__ = ["build_dataset"]
+__all__ = [
+    "DataManifest",
+    "MultiModalSample",
+    "SourceSpec",
+    "StreamingMultiModalDataset",
+    "build_dataset",
+    "stream_samples",
+]
