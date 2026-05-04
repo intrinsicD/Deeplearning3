@@ -1,12 +1,12 @@
 """Train LGQ on public video datasets (extracts frames as training images).
 
 Usage:
-    python -m datasets.train_scripts.train_lgq \
+    python -m scripts.training.train_lgq \
         --dataset ucf101 \
         --data-dir ./data/ucf101 \
         --config datasets/configs/lgq_ucf101.yaml
 
-    python -m datasets.train_scripts.train_lgq \
+    python -m scripts.training.train_lgq \
         --dataset kinetics400 --data-dir ./data/kinetics400 \
         --quantizer lgq --steps 200000
 """

@@ -1,13 +1,13 @@
 """Train MMWM on a public audiovisual dataset.
 
 Usage:
-    python -m datasets.train_scripts.train_mmwm \
+    python -m scripts.training.train_mmwm_av \
         --dataset vggsound \
         --data-dir ./data/vggsound \
         --config datasets/configs/mmwm_vggsound.yaml
 
     # or use defaults:
-    python -m datasets.train_scripts.train_mmwm --dataset audioset --data-dir ./data/audioset
+    python -m scripts.training.train_mmwm_av --dataset audioset --data-dir ./data/audioset
 """
 
 from __future__ import annotations

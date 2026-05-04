@@ -6,8 +6,8 @@ data, then reports a pass/fail summary.  Avoids torch.compile (slow) and
 internet access (no dataset downloads).
 
 Usage:
-    python test_training_startup.py
-    python test_training_startup.py --verbose
+    python -m scripts.diagnostics.check_training_startup
+    python -m scripts.diagnostics.check_training_startup --verbose
 """
 
 from __future__ import annotations
@@ -330,7 +330,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-if __name__ == "__main__":
+def main() -> None:
     args = parse_args()
 
     print("Training Startup Test")
@@ -339,7 +339,6 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         print(f"  GPU: {torch.cuda.get_device_name()}")
 
-    # Run all tests
     test_omnilatent(steps=args.steps)
     test_hpwm(steps=args.steps)
     for qtype in ("lgq", "fsq", "simvq"):
@@ -347,3 +346,7 @@ if __name__ == "__main__":
     test_gaussian_encoder(epochs=args.epochs)
 
     sys.exit(_print_summary())
+
+
+if __name__ == "__main__":
+    main()

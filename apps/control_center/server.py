@@ -390,10 +390,14 @@ def usecase_run(req: UseCaseRequest) -> Dict[str, Any]:
     return JOB.start(cmd, status_file=None, total_steps=1, kind=f"usecase:{req.use_case}")
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
         import uvicorn
     except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
         raise SystemExit("Install uvicorn with: pip install uvicorn") from exc
     uvicorn.run("apps.control_center.server:app", host="127.0.0.1", port=8000, reload=False)
+
+
+if __name__ == "__main__":
+    main()
 

@@ -5,12 +5,12 @@ the MNIST DataLoader with frames extracted from any registered AV dataset,
 grayscale-converted and resized to 28 × 28.
 
 Usage:
-    python -m datasets.train_scripts.train_gaussian_encoder \
+    python -m scripts.training.train_gaussian_encoder \
         --dataset vggsound \
         --data-dir ./data/vggsound \
         --epochs 50
 
-    python -m datasets.train_scripts.train_gaussian_encoder \
+    python -m scripts.training.train_gaussian_encoder \
         --dataset ucf101 --data-dir ./data/ucf101 --resolution 64 --no-grayscale
 """
 
