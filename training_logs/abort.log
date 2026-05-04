@@ -1,0 +1,58 @@
+============================================================
+OmniLatent — Curriculum Training (Learn from Video)
+============================================================
+Device:      cpu
+Compiling model with torch.compile...
+Parameters:  2,778,619 (10.6 MB)
+Hidden dim:  64
+Layers:      2
+Mixed prec:  False
+Data:        synthetic (10000 samples)
+Phases:      5 (total frac: 1.00)
+  1. warmup              50 steps  ['video_recon', 'audio_recon']
+  2. cross_modal        125 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video']
+  3. temporal           125 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict']
+  4. grounding           75 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+  5. joint              125 steps  ['video_recon', 'audio_recon', 'video_to_audio', 'audio_to_video', 'temporal_predict', 'frame_to_audio', 'temporal_order', 'temporal_distance', 'distant_predict', 'video_to_text', 'audio_to_text']
+Total steps: 500
+Save dir:    training_logs/abort3_ckpt
+============================================================
+Health:      ON  (calibration=5, plateau=2000, diverge=2.0x for 3 steps)
+
+============================================================
+Phase 1/5: warmup
+  Self-reconstruction — learn to encode/decode each modality
+  Tasks: ['video_recon', 'audio_recon']
+  Steps: 0 -> 50
+============================================================
+  step     10 | loss 6.1789 | gnorm 10.57 | lr 4.50e-01 | 0.4 it/s | phase=warmup task=mixed
+W0504 12:42:47.576000 8643 torch/_dynamo/convert_frame.py:1743] [0/8] torch._dynamo hit config.recompile_limit (8)
+W0504 12:42:47.576000 8643 torch/_dynamo/convert_frame.py:1743] [0/8]    function: 'forward' (/home/user/Deeplearning3/omnilatent/model/omnilatent.py:414)
+W0504 12:42:47.576000 8643 torch/_dynamo/convert_frame.py:1743] [0/8]    last reason: 0/7: tensor 'source_data' dtype mismatch. expected Float, actual Long
+W0504 12:42:47.576000 8643 torch/_dynamo/convert_frame.py:1743] [0/8] To log all recompilation reasons, use TORCH_LOGS="recompiles".
+W0504 12:42:47.576000 8643 torch/_dynamo/convert_frame.py:1743] [0/8] To diagnose recompilation issues, see https://docs.pytorch.org/docs/main/user_guide/torch_compiler/compile/programming_model.recompilation.html
+  step     20 | loss 1757.5888 | gnorm 3.07 | lr 9.50e-01 | 2.0 it/s | phase=warmup task=mixed
+  step     30 | loss 6.6022 | gnorm 1.80 | lr 1.45e+00 | 9.3 it/s | phase=warmup task=mixed
+  step     40 | loss 57131.5731 | gnorm 62869.51 | lr 1.95e+00 | 13.2 it/s | phase=warmup task=mixed
+
+============================================================
+!!! TRAINING ABORTED at step 41: loss diverged: 4561.2695 > 20.7823 (= 2.0x init 10.3912) for 3 consecutive steps
+    init_loss=10.3912  ema_short=19321.3346  ema_long=611.9461  last_grad=23218.8
+============================================================
+  Saved checkpoint: training_logs/abort3_ckpt/checkpoint_aborted.pt
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/user/Deeplearning3/scripts/training/curriculum_train.py", line 991, in <module>
+    main()
+  File "/home/user/Deeplearning3/scripts/training/curriculum_train.py", line 987, in main
+    trainer.train(log_interval=args.log_interval)
+  File "/home/user/Deeplearning3/scripts/training/curriculum_train.py", line 680, in train
+    self.health_monitor.update(
+  File "/home/user/Deeplearning3/omnilatent/training/health.py", line 134, in update
+    self._check_divergence(loss)
+  File "/home/user/Deeplearning3/omnilatent/training/health.py", line 191, in _check_divergence
+    self._abort(
+  File "/home/user/Deeplearning3/omnilatent/training/health.py", line 239, in _abort
+    raise TrainingDiverged(reason)
+omnilatent.training.health.TrainingDiverged: loss diverged: 4561.2695 > 20.7823 (= 2.0x init 10.3912) for 3 consecutive steps
