@@ -66,7 +66,10 @@ class GaussianEncoderPlugin(ComponentPlugin):
             from scripts.training.self_improve.eval_registry import (
                 build_gaussian_encoder_probe,
             )
-            probe_set = build_gaussian_encoder_probe()
+            probe_set = build_gaussian_encoder_probe(
+                in_ch=self.in_ch,
+                image_size=self.image_size,
+            )
 
         model = self._trainer.model
         was_training = model.training

@@ -116,7 +116,13 @@ class MMWMPlugin(ComponentPlugin):
         """
         if probe_set is None:
             from scripts.training.self_improve.eval_registry import build_mmwm_probe
-            probe_set = build_mmwm_probe()
+            encoder_kwargs = self.model_config.encoder_kwargs
+            probe_set = build_mmwm_probe(
+                vector_dim=encoder_kwargs.get("vector_input_dim", 128),
+                action_dim=self.model_config.action_encoder_kwargs.get(
+                    "action_dim", 32
+                ),
+            )
 
         model = self._trainer.model
         was_training = model.training

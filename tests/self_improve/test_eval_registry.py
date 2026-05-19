@@ -61,6 +61,42 @@ def test_plugin_evaluate_runs_and_returns_two_metrics(name: str) -> None:
         assert torch.isfinite(torch.tensor(v)), f"{name}: non-finite metric {k}={v}"
 
 
+def test_gaussian_evaluate_uses_plugin_in_ch() -> None:
+    """Default probe must match the instantiated plugin's channel count,
+    not the builder default. Regression: previously hard-coded in_ch=1.
+    """
+    GaussianEncoderPlugin = get_plugin("gaussian_encoder")
+    # The underlying gaussian model has spatial dims (7×7) baked in, so
+    # ``image_size`` is fixed at 28; the failure mode the review flagged
+    # is the channel mismatch when ``in_ch != 1``.
+    plugin = GaussianEncoderPlugin(in_ch=3)
+    report = plugin.evaluate()
+    assert len(report.metrics) >= 2
+    for k, v in report.metrics.items():
+        assert torch.isfinite(torch.tensor(v)), f"non-finite {k}={v}"
+
+
+def test_mmwm_evaluate_uses_plugin_config_dims() -> None:
+    """Default probe dims must come from the plugin's ModelConfig, not from
+    hard-coded builder defaults. Regression: previously crashed on any
+    ModelConfig with non-default vector/action dims.
+    """
+    from MMWM.config import ModelConfig
+
+    MMWMPlugin = get_plugin("mmwm")
+    cfg = ModelConfig()
+    cfg.encoder_kwargs = dict(cfg.encoder_kwargs)
+    cfg.encoder_kwargs["vector_input_dim"] = 64
+    cfg.action_encoder_kwargs = dict(cfg.action_encoder_kwargs)
+    cfg.action_encoder_kwargs["action_dim"] = 16
+
+    plugin = MMWMPlugin(model_config=cfg)
+    report = plugin.evaluate()
+    assert len(report.metrics) >= 2
+    for k, v in report.metrics.items():
+        assert torch.isfinite(torch.tensor(v)), f"non-finite {k}={v}"
+
+
 @pytest.mark.parametrize("name", list(available_plugins()))
 def test_evaluate_is_deterministic_in_eval_mode(name: str) -> None:
     """Same weights + same probe set → identical metrics. This is the
