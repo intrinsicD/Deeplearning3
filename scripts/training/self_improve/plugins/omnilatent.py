@@ -14,6 +14,7 @@ from omnilatent.training.trainer import Trainer as _OmniTrainer
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -96,6 +97,47 @@ class OmniLatentPlugin(ComponentPlugin):
         losses = self._trainer._train_step(batch)
         total = float(losses.get("total", 0.0))
         return StepReport(loss=total, losses={k: float(v) for k, v in losses.items()})
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: image-reconstruction MSE + L1.
+
+        Phase 2 only exercises the image→image autoencoder path; later
+        phases expand to all 16 modality pairs per the design doc §6.1.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import (
+                build_omnilatent_probe,
+            )
+            probe_set = build_omnilatent_probe(
+                image_size=self.config.image_size,
+                image_channels=self.config.image_channels,
+            )
+
+        model = self._trainer.model
+        was_training = model.training
+        model.eval()
+        try:
+            mse_sum = 0.0
+            l1_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                image = batch["image"].to(self.device, non_blocking=True)
+                result = model.reconstruct("image", image)
+                recon = result["output"]
+                mse_sum += float(torch.nn.functional.mse_loss(recon, image).item()) * image.shape[0]
+                l1_sum += float(torch.nn.functional.l1_loss(recon, image).item()) * image.shape[0]
+                n += image.shape[0]
+        finally:
+            model.train(was_training)
+
+        mse = mse_sum / max(n, 1)
+        l1 = l1_sum / max(n, 1)
+        return EvalReport(
+            score=mse,
+            metrics={"image_mse": mse, "image_l1": l1},
+            higher_is_better=False,
+        )
 
     # -- state -------------------------------------------------------------
 

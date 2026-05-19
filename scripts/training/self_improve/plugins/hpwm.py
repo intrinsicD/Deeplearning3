@@ -22,6 +22,7 @@ from hpwm.model import HPWM
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -178,6 +179,47 @@ class HPWMPlugin(ComponentPlugin):
             losses=losses,
             grad_norm=float(grad_norm.detach().cpu().item())
             if isinstance(grad_norm, torch.Tensor) else float(grad_norm),
+        )
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: prediction loss + VQ-VAE reconstruction.
+
+        These are the two losses ``hpwm.evaluate`` treats as primary
+        training signals. The three validation signals from
+        ``hpwm/evaluate.py`` (MoD entropy, slot Jaccard, Mamba retention)
+        are deferred to a later phase that loads them via the upstream
+        ``Evaluator`` class.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import build_hpwm_probe
+            probe_set = build_hpwm_probe(
+                n_frames=self.config.n_frames,
+                resolution=self.config.resolution,
+            )
+
+        was_training = self._model.training
+        self._model.eval()
+        try:
+            pred_sum = 0.0
+            recon_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                frames = batch["frames"].to(self._device, non_blocking=True)
+                out = self._model(frames, None)  # fresh temporal state per probe batch
+                bs = frames.shape[0]
+                pred_sum += float(out["prediction_loss"].item()) * bs
+                recon_sum += float(out["vqvae_recon_loss"].item()) * bs
+                n += bs
+        finally:
+            self._model.train(was_training)
+
+        pred = pred_sum / max(n, 1)
+        recon = recon_sum / max(n, 1)
+        return EvalReport(
+            score=pred,
+            metrics={"prediction_loss": pred, "vqvae_recon_loss": recon},
+            higher_is_better=False,
         )
 
     # -- state -------------------------------------------------------------

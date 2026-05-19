@@ -9,10 +9,12 @@ import torch
 import torch.nn as nn
 
 from lgq.config import LGQConfig
+from lgq.metrics import psnr as _psnr
 from lgq.trainer import LGQTrainer
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -79,6 +81,45 @@ class LGQPlugin(ComponentPlugin):
         losses = self._trainer.step(batch)
         total = losses["total"]
         return StepReport(loss=total, losses=dict(losses))
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: PSNR (primary) + reconstruction MSE.
+
+        PSNR is bounded above and behaves smoothly; MSE catches the
+        degenerate-mean reconstruction case PSNR averaging can mask.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import build_lgq_probe
+            probe_set = build_lgq_probe(
+                resolution=self.config.resolution,
+                in_channels=self.config.in_channels,
+            )
+
+        model = self._trainer.model
+        was_training = model.training
+        model.eval()
+        try:
+            psnr_sum = 0.0
+            mse_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                x = batch.to(self.device, non_blocking=True)
+                out = model(x)
+                recon = out["recon"].clamp(0, 1)
+                psnr_sum += float(_psnr(recon, x).item()) * x.shape[0]
+                mse_sum += float(torch.nn.functional.mse_loss(recon, x).item()) * x.shape[0]
+                n += x.shape[0]
+        finally:
+            model.train(was_training)
+
+        psnr_val = psnr_sum / max(n, 1)
+        mse = mse_sum / max(n, 1)
+        return EvalReport(
+            score=psnr_val,
+            metrics={"psnr": psnr_val, "mse": mse},
+            higher_is_better=True,
+        )
 
     # -- state -------------------------------------------------------------
 

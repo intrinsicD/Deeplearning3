@@ -11,6 +11,7 @@ from gaussian_encoder.trainer import GaussianTrainer
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -55,6 +56,41 @@ class GaussianEncoderPlugin(ComponentPlugin):
         losses = self._trainer.step(batch)
         total = losses["total"]
         return StepReport(loss=total, losses=dict(losses))
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: reconstruction MSE + L1 (uncorrelated enough
+        to detect mode-collapse style reward hacking).
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import (
+                build_gaussian_encoder_probe,
+            )
+            probe_set = build_gaussian_encoder_probe()
+
+        model = self._trainer.model
+        was_training = model.training
+        model.eval()
+        try:
+            mse_sum = 0.0
+            l1_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                x = batch.to(self.device, non_blocking=True)
+                x_hat, _ = model(x)
+                mse_sum += float(torch.nn.functional.mse_loss(x_hat, x).item()) * x.shape[0]
+                l1_sum += float(torch.nn.functional.l1_loss(x_hat, x).item()) * x.shape[0]
+                n += x.shape[0]
+        finally:
+            model.train(was_training)
+
+        mse = mse_sum / max(n, 1)
+        l1 = l1_sum / max(n, 1)
+        return EvalReport(
+            score=mse,
+            metrics={"mse": mse, "l1": l1},
+            higher_is_better=False,
+        )
 
     # -- state -------------------------------------------------------------
 

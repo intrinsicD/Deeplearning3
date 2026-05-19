@@ -21,6 +21,7 @@ from MMWM.trainer import Trainer as _MMWMTrainer
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -104,6 +105,58 @@ class MMWMPlugin(ComponentPlugin):
         total = float(losses.get("total_loss", 0.0))
         clean = {k: float(v) for k, v in losses.items() if isinstance(v, (int, float))}
         return StepReport(loss=total, losses=clean)
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: total world-model loss + latent dynamics loss.
+
+        Phase 2 reuses the same loss function the trainer uses, so the
+        eval signal is faithful to training; later phases swap in
+        multi-step rollout MSE/cosine per the design doc §6.1.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import build_mmwm_probe
+            probe_set = build_mmwm_probe()
+
+        model = self._trainer.model
+        was_training = model.training
+        model.eval()
+        try:
+            total_sum = 0.0
+            dyn_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                obs_t = self._trainer._to_packet(batch, "t")
+                obs_tp1 = self._trainer._to_packet(batch, "tp1")
+                action = batch["action"].to(self._trainer.device)
+                decoder_context, decode_keys = self._trainer._build_decoder_plan(batch)
+                output = model(
+                    obs_t, action,
+                    obs_tp1=obs_tp1,
+                    memory_state=None,
+                    decoder_context=decoder_context,
+                    decode_keys=decode_keys,
+                )
+                loss_inputs: dict[str, Any] = {}
+                for k in ("text_target", "vector_target", "image_target", "audio_target"):
+                    if k in batch:
+                        loss_inputs[k] = batch[k].to(self._trainer.device)
+                losses = self._trainer.loss_fn(output, loss_inputs, task_multipliers=None)
+                bs = action.shape[0]
+                total_sum += float(losses["total_loss"].item()) * bs
+                if "latent_dyn_loss" in losses:
+                    dyn_sum += float(losses["latent_dyn_loss"].item()) * bs
+                n += bs
+        finally:
+            model.train(was_training)
+
+        total = total_sum / max(n, 1)
+        dyn = dyn_sum / max(n, 1)
+        return EvalReport(
+            score=total,
+            metrics={"total_loss": total, "latent_dyn_loss": dyn},
+            higher_is_better=False,
+        )
 
     # -- state -------------------------------------------------------------
 
