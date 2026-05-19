@@ -89,6 +89,14 @@ class HPWMPlugin(ComponentPlugin):
         )
 
         self._model = HPWM(self.config).to(self._device)
+        # Force the lazy DINO backbone to materialize *now* so it
+        # contributes keys to both saved and loaded state dicts. Without
+        # this, an HPWM saved after one forward pass holds ``dino._model.*``
+        # keys that a freshly-constructed plugin silently drops on
+        # ``load_state_dict(..., strict=False)``, breaking faithful
+        # snapshot/rollback (matters for offline fallback DINO and for
+        # any future unfrozen / fine-tuned DINO).
+        self._model.dino._load_model(self._device)
 
         param_groups = self._model.get_param_groups()
         self.optimizer = torch.optim.AdamW(
@@ -175,18 +183,23 @@ class HPWMPlugin(ComponentPlugin):
     # -- state -------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        # Filter out frozen DINO backbone params from the saved state to
-        # match the upstream HPWM checkpoint convention.
-        msd = self._model.state_dict()
+        # Include the full model state (frozen DINO backbone included) so
+        # that snapshot/rollback is bit-faithful. The __init__ above forces
+        # DINO to materialize, so these keys are always present on both
+        # save and (post-construction) load.
         return {
-            "model": msd,
+            "model": self._model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "step_count": self.step_count,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        self._model.load_state_dict(state["model"], strict=False)
+        # Ensure DINO is materialized before load — defensive in case a
+        # caller bypassed __init__ (e.g. unpickled a plugin); the call is
+        # cheap and idempotent after the first invocation.
+        self._model.dino._load_model(self._device)
+        self._model.load_state_dict(state["model"], strict=True)
         if "optimizer" in state:
             self.optimizer.load_state_dict(state["optimizer"])
         if "scheduler" in state:

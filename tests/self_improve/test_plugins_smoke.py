@@ -66,22 +66,19 @@ def _make_plugin(name: str) -> ComponentPlugin:
     return cls()
 
 
-_OPTIONAL_DEPS: dict[str, tuple[str, ...]] = {
-    "hpwm": ("hpwm.model",),       # imports timm/torch.hub lazily; fallback works
-    "mmwm": ("MMWM.model",),
-    "omnilatent": ("omnilatent.model.omnilatent",),
-    "lgq": ("lgq.model",),
-    "gaussian_encoder": ("gaussian_encoder.model",),
-}
-
-
 def _safe_make(name: str) -> ComponentPlugin:
+    """Build a plugin, skipping only on genuine missing-dependency errors.
+
+    A plain ``except Exception`` would hide real construction regressions
+    (shape mismatches, config drift, API breakage) behind a green skip,
+    defeating the purpose of these smoke tests. We narrow the skip to
+    :class:`ImportError` (and subclasses like :class:`ModuleNotFoundError`),
+    so any other failure propagates and fails the test.
+    """
     try:
         return _make_plugin(name)
     except ImportError as exc:  # pragma: no cover - environment specific
         pytest.skip(f"{name}: missing dependency ({exc})")
-    except Exception as exc:  # pragma: no cover - environment specific
-        pytest.skip(f"{name}: could not construct ({exc!r})")
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +131,38 @@ def test_plugin_one_step_changes_params(name: str) -> None:
     assert _params_changed(before, plugin.model), (
         f"{name}: no trainable parameter moved after one step"
     )
+
+
+def test_hpwm_dino_weights_round_trip() -> None:
+    """A fresh HPWMPlugin must absorb DINO-backbone keys from a saved state.
+
+    Regression guard: when DINOBackbone was lazily materialized only on
+    first forward, fresh plugins silently dropped ``dino._model.*`` keys
+    on load (strict=False), so snapshot/rollback was not bit-faithful.
+    """
+    src = _safe_make("hpwm")
+    dst = _safe_make("hpwm")
+
+    # Sanity: both plugins materialize DINO at construction time.
+    src_keys = set(src.state_dict()["model"].keys())
+    dst_keys = set(dst.model.state_dict().keys())
+    dino_keys = {k for k in src_keys if k.startswith("dino._model.")}
+    assert dino_keys, "expected dino._model.* keys in saved state"
+    assert dino_keys.issubset(dst_keys), (
+        "fresh plugin missing DINO keys — load would silently drop them"
+    )
+
+    # Round-trip: dst.load_state_dict(src.state_dict()) must reproduce
+    # the source's DINO weights, not the dst's random fallback init.
+    state = src.state_dict()
+    dst.load_state_dict(state)
+
+    src_msd = src.model.state_dict()
+    dst_msd = dst.model.state_dict()
+    for k in dino_keys:
+        assert torch.equal(src_msd[k], dst_msd[k]), (
+            f"DINO key {k} not faithfully restored"
+        )
 
 
 @pytest.mark.parametrize("name", list(available_plugins()))
