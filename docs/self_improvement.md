@@ -281,7 +281,7 @@ state dict) so duplicate snapshots are free.
 ## 5. Cross-component bootstrapping
 
 The point of co-training is that each model can label data for the
-others. The `PseudoLabelBroker` mediates this so cycles don't form.
+others. The `PseudoLabelBroker` mediates this safely.
 
 | Producer | Consumer | Pseudo-label |
 |---|---|---|
@@ -291,20 +291,80 @@ others. The `PseudoLabelBroker` mediates this so cycles don't form.
 | MMWM (latent) | OmniLatent | Cross-modal anchor latents — InfoNCE alignment target |
 | Gaussian Encoder | LGQ | A second-opinion reconstruction signal for grayscale images (sanity check) |
 
-**Rules to prevent collapse**:
+This table is intentionally cyclic at the *logical* level
+(`HPWM ↔ OmniLatent`, `OmniLatent ↔ MMWM`). Cycles are useful here:
+each component can teach the other something the other lacks
+(HPWM has dynamics, OmniLatent has text; MMWM has multi-step rollouts,
+OmniLatent has cross-modal anchors).
 
-1. **Direction is acyclic.** A graph of `(producer, consumer)` edges is
-   checked at orchestrator startup; cycles are an error.
-2. **Pseudo-labels are versioned.** A consumer trains only on labels
-   produced by a *frozen* snapshot of the producer (vault commit hash).
-   The producer is allowed to keep improving in parallel; the consumer
-   picks up new labels only when its scheduler chooses to refresh.
+### 5.1 Why logical cycles are safe in this design
+
+Under the single-process sequential scheduler from §10.1, only one
+component is mutated per training step. Every pseudo-label a consumer
+reads in step *t* is therefore drawn from a **vault snapshot frozen at
+some earlier step `t − k`**, never from the producer's live weights.
+The synchronous (within-step) producer graph is degenerate by
+construction — at most one writer, others are pure reads — so the
+"no cycles" rejection rule from earlier drafts was overspecified.
+
+What remains dangerous is **asynchronous positive feedback** across
+steps: A teaches B, B's improved labels later teach A, A drifts in a
+direction B reinforces, etc. The four rules below bound that loop.
+
+### 5.2 Rules to prevent collapse
+
+1. **Snapshot-mediated reads (the cycle-breaker).** A consumer trains
+   only on labels produced by a frozen vault commit of the producer.
+   The producer keeps training in parallel; the consumer picks up new
+   labels only when its scheduler chooses to refresh.
+2. **Minimum staleness budget.** A consumer cannot refresh to a
+   producer snapshot newer than `min_stale_steps` (default 1000) since
+   the consumer's own last refresh on that edge. This prevents tight
+   ping-pong loops where A and B chase each other every few steps.
 3. **Confidence-gated.** Each producer attaches a scalar confidence
-   (e.g. softmax entropy for text, codebook perplexity for LGQ, slot
-   binding stability for HPWM). Consumers drop pseudo-labels below
-   threshold.
+   (softmax entropy for text, codebook perplexity for LGQ, slot binding
+   stability for HPWM, latent variance for MMWM). Consumers drop
+   pseudo-labels below a per-edge threshold.
 4. **Real data always mixed in.** Pseudo-label batches are capped at
-   30% of the training mix.
+   30% of the training mix. The remaining 70% is fresh raw data plus
+   replay of real samples — pseudo-labels can never become the
+   majority signal.
+5. **Edge-attribution divergence guard.** Every probe-set evaluation
+   records *which* incoming edges fired since the last eval. If a
+   consumer's probe score regresses beyond `tol` (§4.6) and the
+   regression correlates with a recent refresh on edge `e`, the
+   orchestrator **temporarily severs `e`**, rolls the consumer back,
+   and marks that producer snapshot as "do not propagate" in the vault.
+   Severed edges auto-heal after `N_heal` steps if subsequent probes
+   recover.
+6. **Acyclic-by-construction opt-out.** Users who want the original
+   hard guarantee can pass `--strict-acyclic`. The orchestrator then
+   enforces a topological order on the pseudo-label graph at startup
+   (rejecting the cyclic edges above) and runs with a strict DAG:
+
+   ```
+   Gaussian ──► LGQ ──┬──► HPWM ──► OmniLatent ──► MMWM
+                      └──► MMWM
+   ```
+
+   This costs cross-modal anchoring (MMWM → OmniLatent) and ASR
+   grounding into HPWM, but is provably drift-free without relying on
+   guards 2 and 5.
+
+### 5.3 Startup check
+
+At orchestrator init the broker:
+
+- Builds the producer graph from the active config.
+- If `--strict-acyclic` is set: runs Tarjan's SCC algorithm, rejects on
+  any non-trivial SCC.
+- Otherwise: logs the cycles, verifies every edge in a cycle declares
+  `min_stale_steps`, `confidence_threshold`, and `tol`, and refuses to
+  start if any are missing or below their floor values.
+
+This is the only behavioural change to phase 7 vs. the earlier draft:
+the cycle detector still exists, but its default action is *validate
+the guards on cyclic edges* rather than reject them outright.
 
 ---
 
@@ -503,7 +563,7 @@ Each phase is a self-contained PR that leaves the repo in a working state.
 | 4 | **EWC + SI** | `forgetting/ewc.py`. Wire into OmniLatent/MMWM plugins. | Same two-domain test, this time with EWC; should outperform replay-only on the OmniLatent backbone. |
 | 5 | **Orchestrator + scheduler** | `orchestrator.py`, `scheduler.py`, `data_stream.py`, `cli.py`. Single-component mode only. | End-to-end test: 50 steps on HPWM via the orchestrator matches direct training within tolerance. |
 | 6 | **Multi-component co-training** | Enable all five at once. No pseudo-labels yet. | E2E test: 5 components × 10 steps each, all probes pass. |
-| 7 | **Pseudo-label broker** | `pseudo_labels.py`, integration with LGQ→HPWM, OmniLatent→MMWM, etc. Cycle check at startup. | Test that pseudo-labels actually flow and that the cycle detector rejects a bad config. |
+| 7 | **Pseudo-label broker** | `pseudo_labels.py`, integration with all edges from §5. Snapshot-mediated reads, staleness budget, confidence gating, edge-attribution divergence guard, `--strict-acyclic` opt-out. | Tests: (a) labels flow with cyclic edges enabled and guards firing; (b) `--strict-acyclic` rejects the default cyclic config and accepts the DAG variant; (c) divergence guard severs a synthetically-poisoned edge and auto-heals after recovery. |
 | 8 | **Hook-based capacity expansion** | Plateau detector triggers `LatentNeuralHook` registration on OmniLatent. | Manufactured plateau triggers expansion; new hook trains; backbone weights unchanged. |
 | 9 | **A-GEM + drift budget + rollback hardening** | `forgetting/agem.py`, vault rollback on regression. | Inject a regression-inducing batch; rollback fires; final metrics match pre-regression baseline. |
 | 10 | **Control-center integration** | Endpoints in `apps/control_center/server.py` to launch / monitor / pause a self-improve run. | UI smoke test. |
@@ -546,10 +606,12 @@ The system is built around three claims:
 2. **The repo's `LatentNeuralHook` mechanism is a first-class
    parameter-isolation method** — we get LoRA-style capacity expansion
    for free, with no third-party dependencies.
-3. **Pseudo-label co-training is safe iff the graph is acyclic,
-   confidence-gated, and capped against real data** — these three rules,
-   enforced at orchestrator startup, prevent the failure modes that
-   sink most self-training papers.
+3. **Pseudo-label co-training is safe even with logical cycles**, given
+   snapshot-mediated reads, a minimum staleness budget, confidence
+   gating, a real-data majority cap, and edge-attribution divergence
+   detection. A `--strict-acyclic` mode is available for users who
+   prefer the stronger DAG-only guarantee at the cost of cross-modal
+   anchoring edges.
 
 If all three claims hold, the five models in this repository can run
 indefinitely on a stream of unlabeled video and image data, individually
