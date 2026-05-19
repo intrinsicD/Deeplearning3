@@ -174,6 +174,39 @@ class HPWMPlugin(ComponentPlugin):
                 losses[key] = float(v.detach().cpu().item())
 
         self.step_count += 1
+
+        # --- extra-step replay --------------------------------------------
+        # HPWM owns a temporal state; we *don't* replay through it because
+        # replayed clips have no temporal continuity with the fresh batch.
+        # Run replay with a fresh ``None`` temporal state.
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                r_frames = torch.stack([it.sample for it in items]).to(self._device)
+                self.optimizer.zero_grad(set_to_none=True)
+                r_outputs = self._model(r_frames, None)
+                r_loss = r_outputs["loss"]
+                (self.replay_weight * r_loss).backward()
+                nn.utils.clip_grad_norm_(
+                    self._model.parameters(), cfg.max_grad_norm,
+                )
+                self.optimizer.step()
+                losses["replay/loss"] = float(r_loss.detach().cpu().item())
+
+        # --- buffer insertion --------------------------------------------
+        if self.replay_bank is not None:
+            for i in range(frames.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    frames[i].detach().cpu(),
+                    stored_logits=None,
+                    step=self.step_count,
+                )
+
+        # --- EMA update --------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(self._model)
+
         return StepReport(
             loss=losses.get("loss", float(loss.detach().cpu().item())),
             losses=losses,

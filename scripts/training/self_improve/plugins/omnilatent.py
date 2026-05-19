@@ -94,7 +94,32 @@ class OmniLatentPlugin(ComponentPlugin):
         }
 
     def train_step(self, batch: dict[str, torch.Tensor]) -> StepReport:
-        losses = self._trainer._train_step(batch)
+        losses = dict(self._trainer._train_step(batch))
+
+        # --- extra-step replay --------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rx = {"image": torch.stack([it.sample for it in items])}
+                replay_losses = self._trainer._train_step(rx)
+                for k, v in replay_losses.items():
+                    losses[f"replay/{k}"] = v
+
+        # --- buffer insertion (image-only; later phases handle all modalities)
+        if self.replay_bank is not None and "image" in batch:
+            img = batch["image"]
+            for i in range(img.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    img[i].detach().cpu(),
+                    stored_logits=None,
+                    step=self._trainer.global_step,
+                )
+
+        # --- EMA update ----------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(self._trainer.model)
+
         total = float(losses.get("total", 0.0))
         return StepReport(loss=total, losses={k: float(v) for k, v in losses.items()})
 

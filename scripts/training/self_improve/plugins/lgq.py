@@ -78,9 +78,44 @@ class LGQPlugin(ComponentPlugin):
         return torch.rand(batch_size, cfg.in_channels, cfg.resolution, cfg.resolution)
 
     def train_step(self, batch: torch.Tensor) -> StepReport:
-        losses = self._trainer.step(batch)
-        total = losses["total"]
-        return StepReport(loss=total, losses=dict(losses))
+        """One LGQ training step, optionally extended with replay + EMA update.
+
+        LGQ's :meth:`LGQTrainer.step` is a self-contained
+        generator+discriminator update that internally manages AMP and
+        backward, so we use the simpler **extra-step replay** pattern
+        (a second ``step`` on a replayed mini-batch) rather than fusing
+        gradients into a single backward like ``GaussianEncoderPlugin``.
+        Both are valid forgetting defenses; the fused version is more
+        sample-efficient, the extra-step version is easier to bolt onto
+        a trainer that owns its own optimizer loop.
+        """
+        losses = dict(self._trainer.step(batch))
+
+        # --- replay step ---------------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rx = torch.stack([it.sample for it in items])
+                replay_losses = self._trainer.step(rx)
+                for k, v in replay_losses.items():
+                    losses[f"replay/{k}"] = float(v)
+
+        # --- buffer insertion ---------------------------------------------
+        if self.replay_bank is not None:
+            for i in range(batch.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    batch[i].detach().cpu(),
+                    stored_logits=None,
+                    step=self._trainer.step_count,
+                )
+
+        # --- EMA update ----------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(self._trainer.model)
+
+        total = losses.get("total", 0.0)
+        return StepReport(loss=float(total), losses=losses)
 
     @torch.no_grad()
     def evaluate(self, probe_set: Any | None = None) -> EvalReport:

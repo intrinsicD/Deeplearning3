@@ -53,9 +53,94 @@ class GaussianEncoderPlugin(ComponentPlugin):
         return torch.rand(batch_size, self.in_ch, self.image_size, self.image_size)
 
     def train_step(self, batch: torch.Tensor) -> StepReport:
-        losses = self._trainer.step(batch)
-        total = losses["total"]
-        return StepReport(loss=total, losses=dict(losses))
+        """One optimizer step with optional DER++ replay and EMA distillation.
+
+        Without attached replay/EMA this is bit-identical to
+        :meth:`GaussianTrainer.step`. With them, we:
+
+        1. Run the standard forward + task loss on ``batch``.
+        2. If ``replay_bank`` is attached and non-empty: sample ``k``
+           items, recompute task loss on them, and add a DER++ MSE term
+           between the current recon and the stored insertion-time recon.
+        3. If ``ema_teacher`` is attached: add MSE between the student's
+           recon and the EMA teacher's recon on the same ``batch``.
+        4. One ``backward``/``optimizer.step``.
+        5. Insert ``batch`` back into the replay bank (storing the recon
+           as the DER++ teacher signal) and update the EMA.
+        """
+        model = self._trainer.model
+        optimizer = self._trainer.optimizer
+        device = self._trainer.device
+
+        x = batch.to(device, non_blocking=True)
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+
+        x_hat, _ = model(x)
+        loss_recon = nn.functional.mse_loss(x_hat, x)
+
+        losses: dict[str, float] = {"recon": float(loss_recon.detach().item())}
+        total_loss = loss_recon
+
+        # --- DER++ replay ---------------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rx = torch.stack([it.sample for it in items]).to(device)
+                rx_hat, _ = model(rx)
+                replay_task = nn.functional.mse_loss(rx_hat, rx)
+                total_loss = total_loss + self.replay_weight * replay_task
+                losses["replay_task"] = float(replay_task.detach().item())
+
+                # DER++ consistency: only over items that carry stored
+                # logits (insertion-time recons). Skip otherwise.
+                der_items = [it for it in items if it.stored_logits is not None]
+                if der_items:
+                    rx_d = torch.stack([it.sample for it in der_items]).to(device)
+                    stored = torch.stack(
+                        [it.stored_logits for it in der_items]
+                    ).to(device)
+                    rx_d_hat, _ = model(rx_d)
+                    der = nn.functional.mse_loss(rx_d_hat, stored)
+                    total_loss = total_loss + self.der_weight * der
+                    losses["der_consistency"] = float(der.detach().item())
+
+        # --- EMA distillation ----------------------------------------------
+        # The student forward (``x_hat`` above) was computed before any
+        # swap, so its autograd graph references the original student
+        # parameters. ``swap_into`` mutates ``.data`` in-place but
+        # restores it on exit; the captured graph then backprops against
+        # the restored values. We only need the teacher's *forward*.
+        if self.ema_teacher is not None:
+            with self.ema_teacher.swap_into(model):
+                with torch.no_grad():
+                    teacher_hat, _ = model(x)
+            distill = nn.functional.mse_loss(x_hat, teacher_hat)
+            total_loss = total_loss + self.distill_weight * distill
+            losses["distill"] = float(distill.detach().item())
+
+        total_loss.backward()
+        optimizer.step()
+        self._trainer.step_count += 1
+
+        losses["total"] = float(total_loss.detach().item())
+
+        # --- post-step bookkeeping -----------------------------------------
+        if self.replay_bank is not None:
+            with torch.no_grad():
+                stored_hat, _ = model(x)
+            for i in range(x.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    x[i].detach().cpu(),
+                    stored_logits=stored_hat[i].detach().cpu(),
+                    step=self._trainer.step_count,
+                )
+
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(model)
+
+        return StepReport(loss=losses["total"], losses=losses)
 
     @torch.no_grad()
     def evaluate(self, probe_set: Any | None = None) -> EvalReport:

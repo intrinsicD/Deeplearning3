@@ -10,10 +10,17 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Iterable
+from typing import Any, ClassVar, Iterable, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:  # avoid import cycle at module-load time
+    from scripts.training.self_improve.forgetting.ema import EMATeacher
+    from scripts.training.self_improve.forgetting.replay import (
+        ReplayBank,
+        ReplayItem,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +76,69 @@ class ComponentPlugin(ABC):
 
     #: Stable identifier used in checkpoint paths, configs, and logs.
     name: ClassVar[str] = "unset"
+
+    # ------------------------------------------------------------------
+    # Auxiliary forgetting state (phase 3)
+    # ------------------------------------------------------------------
+    #
+    # These attributes are set by ``attach_replay`` / ``attach_ema`` and
+    # are ``None`` by default — every plugin works without them. When
+    # set, the plugin's ``train_step`` is expected to fold the
+    # corresponding auxiliary loss into the gradient and to keep the
+    # auxiliary state consistent (insert into the replay bank, step the
+    # EMA after the optimizer step).
+
+    replay_bank: "ReplayBank | None" = None
+    ema_teacher: "EMATeacher | None" = None
+    #: Weight on the replay task loss (recompute task loss on a buffered
+    #: batch) and the DER++ logits-consistency term. The defaults follow
+    #: the DER++ paper's mid-range settings.
+    replay_weight: float = 0.5
+    der_weight: float = 0.5
+    #: Weight on the EMA-teacher distillation loss.
+    distill_weight: float = 0.5
+    #: Number of replay samples drawn per training step.
+    replay_batch_size: int = 1
+
+    def attach_replay(
+        self,
+        bank: "ReplayBank",
+        *,
+        weight: float | None = None,
+        der_weight: float | None = None,
+        batch_size: int | None = None,
+    ) -> None:
+        """Wire a shared :class:`ReplayBank` into this plugin.
+
+        After attachment, ``train_step`` will sample from the bank each
+        step, add a replay task loss + DER++ consistency loss, and
+        insert the fresh batch back into the bank.
+        """
+        self.replay_bank = bank
+        if weight is not None:
+            self.replay_weight = float(weight)
+        if der_weight is not None:
+            self.der_weight = float(der_weight)
+        if batch_size is not None:
+            self.replay_batch_size = int(batch_size)
+
+    def attach_ema(
+        self,
+        *,
+        decay: float = 0.999,
+        weight: float | None = None,
+    ) -> None:
+        """Initialize an :class:`EMATeacher` from the current model.
+
+        Must be called *after* the plugin's model has been fully
+        materialized (e.g. after HPWM's lazy DINO load). The teacher
+        starts bit-identical to the student.
+        """
+        from scripts.training.self_improve.forgetting.ema import EMATeacher
+
+        self.ema_teacher = EMATeacher(self.model, decay=decay)
+        if weight is not None:
+            self.distill_weight = float(weight)
 
     # ------------------------------------------------------------------
     # Required surface

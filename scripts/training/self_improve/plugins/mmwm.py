@@ -102,8 +102,35 @@ class MMWMPlugin(ComponentPlugin):
         losses, memory_state = self._trainer.train_step(batch, self._memory_state)
         if not self._trainer.reset_memory_each_batch:
             self._memory_state = memory_state
-        total = float(losses.get("total_loss", 0.0))
         clean = {k: float(v) for k, v in losses.items() if isinstance(v, (int, float))}
+
+        # --- extra-step replay --------------------------------------------
+        # MMWM batches are dicts of multimodal tensors; buffer one item =
+        # one full sample of the batch (CPU-residing dict).
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rbatch = _collate_mmwm_items([it.sample for it in items])
+                r_losses, _ = self._trainer.train_step(rbatch, None)
+                for k, v in r_losses.items():
+                    if isinstance(v, (int, float)):
+                        clean[f"replay/{k}"] = float(v)
+
+        # --- buffer insertion (slice each sample out of the batch) --------
+        if self.replay_bank is not None:
+            for sample in _split_mmwm_batch(batch):
+                self.replay_bank.insert(
+                    self.name,
+                    sample,
+                    stored_logits=None,
+                    step=self._trainer.global_step,
+                )
+
+        # --- EMA update ----------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(self._trainer.model)
+
+        total = float(losses.get("total_loss", 0.0))
         return StepReport(loss=total, losses=clean)
 
     @torch.no_grad()
@@ -181,6 +208,34 @@ class MMWMPlugin(ComponentPlugin):
         if "loss_fn" in state:
             self._trainer.loss_fn.load_state_dict(state["loss_fn"])
         self._trainer.global_step = int(state.get("global_step", 0))
+
+
+def _split_mmwm_batch(batch: dict[str, Any]) -> list[dict[str, Any]]:
+    """Slice an MMWM batch dict into per-sample dicts on CPU."""
+    bsz = batch["action"].shape[0]
+    out = []
+    for i in range(bsz):
+        sample: dict[str, Any] = {}
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                sample[k] = v[i].detach().cpu()
+            else:
+                sample[k] = v
+        out.append(sample)
+    return out
+
+
+def _collate_mmwm_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Re-stack per-sample dicts produced by :func:`_split_mmwm_batch`."""
+    keys = items[0].keys()
+    out: dict[str, Any] = {}
+    for k in keys:
+        vs = [it[k] for it in items]
+        if isinstance(vs[0], torch.Tensor):
+            out[k] = torch.stack(vs)
+        else:
+            out[k] = vs[0]
+    return out
 
 
 __all__ = ["MMWMPlugin"]
