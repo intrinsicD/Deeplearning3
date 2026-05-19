@@ -7,6 +7,7 @@ described in ``docs/self_improvement.md`` §4: experience replay
 rollback gate (§4.6, already in phase 2's vault).
 """
 
+from scripts.training.self_improve.forgetting.agem import AGEMProjector
 from scripts.training.self_improve.forgetting.ema import EMATeacher
 from scripts.training.self_improve.forgetting.ewc import EWCSI
 from scripts.training.self_improve.forgetting.hooks import (
@@ -19,6 +20,7 @@ from scripts.training.self_improve.forgetting.replay import (
 )
 
 __all__ = [
+    "AGEMProjector",
     "EMATeacher",
     "EWCSI",
     "PlateauDetector",
