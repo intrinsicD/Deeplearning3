@@ -31,6 +31,11 @@ from scripts.training.self_improve.plugins.base import (
     EvalReport,
     StepReport,
 )
+from scripts.training.self_improve.pseudo_labels import (
+    EdgeConfig,
+    PseudoLabelBatch,
+    PseudoLabelBroker,
+)
 from scripts.training.self_improve.scheduler import (
     BanditScheduler,
     RoundRobinScheduler,
@@ -44,10 +49,13 @@ __all__ = [
     "DataStream",
     "EMATeacher",
     "EWCSI",
+    "EdgeConfig",
     "EvalRegistry",
     "EvalReport",
     "Orchestrator",
     "ProbeSet",
+    "PseudoLabelBatch",
+    "PseudoLabelBroker",
     "ReplayBank",
     "ReplayItem",
     "RoundRobinScheduler",
