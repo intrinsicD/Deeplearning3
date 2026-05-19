@@ -137,6 +137,38 @@ def test_ema_state_round_trips_through_state_dict(name: str) -> None:
         assert _torch.equal(loaded, expected), f"{name}: EMA param {k!r} drifted"
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 wiring: ``attach_ewc``
+# ---------------------------------------------------------------------------
+
+
+# Phase 4 wires EWC into OmniLatent and MMWM only; other plugins accept
+# ``attach_ewc`` (inherited from base) but their ``train_step`` doesn't
+# invoke ``ewc.consolidate`` / ``ewc.post_step`` yet, so the counters
+# don't advance. Parametrize over only the wired plugins for now.
+_EWC_WIRED_PLUGINS = ("omnilatent", "mmwm")
+
+
+@pytest.mark.parametrize("name", list(_EWC_WIRED_PLUGINS))
+def test_attach_ewc_advances_counters(name: str) -> None:
+    cls = get_plugin(name)
+    try:
+        plugin = cls()
+    except ImportError as exc:  # pragma: no cover - env-specific
+        pytest.skip(f"{name}: missing dependency ({exc})")
+
+    plugin.attach_ewc(fisher_decay=0.9, lam_ewc=1.0, lam_si=1.0)
+    assert plugin.ewc is not None
+    assert plugin.ewc.num_fisher_updates == 0
+    assert plugin.ewc.num_si_updates == 0
+
+    batch = plugin.make_synthetic_batch(batch_size=2)
+    report = plugin.train_step(batch)
+    assert plugin.ewc.num_fisher_updates == 1
+    assert plugin.ewc.num_si_updates == 1
+    assert "ewc/penalty" in report.losses
+
+
 def test_hpwm_lr_scheduler_advances_with_replay() -> None:
     """The replay branch performs a second ``optimizer.step()``; the
     LR scheduler must advance with it. Without this fix, enabling

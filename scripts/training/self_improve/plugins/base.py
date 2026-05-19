@@ -17,6 +17,7 @@ import torch.nn as nn
 
 if TYPE_CHECKING:  # avoid import cycle at module-load time
     from scripts.training.self_improve.forgetting.ema import EMATeacher
+    from scripts.training.self_improve.forgetting.ewc import EWCSI
     from scripts.training.self_improve.forgetting.replay import (
         ReplayBank,
         ReplayItem,
@@ -90,6 +91,7 @@ class ComponentPlugin(ABC):
 
     replay_bank: "ReplayBank | None" = None
     ema_teacher: "EMATeacher | None" = None
+    ewc: "EWCSI | None" = None
     #: Weight on the replay task loss (recompute task loss on a buffered
     #: batch) and the DER++ logits-consistency term. The defaults follow
     #: the DER++ paper's mid-range settings.
@@ -139,6 +141,30 @@ class ComponentPlugin(ABC):
         self.ema_teacher = EMATeacher(self.model, decay=decay)
         if weight is not None:
             self.distill_weight = float(weight)
+
+    def attach_ewc(
+        self,
+        *,
+        fisher_decay: float = 0.95,
+        lam_ewc: float = 1.0,
+        lam_si: float = 1.0,
+    ) -> None:
+        """Initialize the online EWC + SI regularizer from the current model.
+
+        The anchor ``θ*`` starts at the current parameters; ``F`` and
+        ``ω`` start at zero. The plugin's ``train_step`` is responsible
+        for adding ``ewc.penalty(model)`` to the loss before backward,
+        calling ``consolidate(model)`` between backward and step, and
+        calling ``post_step(model)`` after the optimizer step.
+        """
+        from scripts.training.self_improve.forgetting.ewc import EWCSI
+
+        self.ewc = EWCSI(
+            self.model,
+            fisher_decay=fisher_decay,
+            lam_ewc=lam_ewc,
+            lam_si=lam_si,
+        )
 
     # ------------------------------------------------------------------
     # Required surface

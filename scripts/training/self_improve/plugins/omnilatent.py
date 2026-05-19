@@ -93,17 +93,78 @@ class OmniLatentPlugin(ComponentPlugin):
             "image": torch.rand(batch_size, cfg.image_channels, cfg.image_size, cfg.image_size),
         }
 
+    # ------------------------------------------------------------------
+    # Phase 4 helpers
+    # ------------------------------------------------------------------
+
+    def _task_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Single forward + criterion on ``batch`` without optimizer step.
+
+        Mirrors the core of :meth:`omnilatent.training.Trainer._train_step`
+        but skips AMP scaling, contrastive heads (disabled in our tiny
+        config), and metrics logging — the orchestrator owns logging in
+        later phases. Returns a scalar loss with autograd attached.
+        """
+        batch = {k: v.to(self.device) for k, v in batch.items()}
+        available = list(batch.keys())
+        src, tgt = self._trainer.task_sampler.sample(available)
+        result = self._trainer.model(
+            source_modality=src,
+            source_data=batch[src],
+            target_modality=tgt,
+            target_data=batch[tgt],
+        )
+        loss_dict = self._trainer.criterion(
+            {tgt: result["output"]},
+            {tgt: batch[tgt]},
+            None,
+            reasoning_bottleneck=result.get("reasoning_bottleneck"),
+            source_summary=result.get("source_summary"),
+        )
+        return loss_dict["total"]
+
     def train_step(self, batch: dict[str, torch.Tensor]) -> StepReport:
-        losses = dict(self._trainer._train_step(batch))
+        """One training step with optional replay + EMA + EWC/SI.
+
+        When EWC is attached we need to (a) add ``penalty`` to the loss
+        before the optimizer step, and (b) accumulate Fisher from the
+        *task* gradient only. We satisfy (b) by backwarding ``task_loss``
+        first and calling ``consolidate`` before adding the penalty's
+        gradient on top.
+        """
+        model = self._trainer.model
+        optimizer = self._trainer.optimizer
+
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+
+        task_loss = self._task_loss(batch)
+        losses: dict[str, float] = {"total": float(task_loss.detach().item())}
+
+        task_loss.backward()
+        if self.ewc is not None:
+            # Fisher snapshot uses task grads only — call before penalty.
+            self.ewc.consolidate(model)
+            penalty = self.ewc.penalty(model)
+            penalty.backward()
+            losses["ewc/penalty"] = float(penalty.detach().item())
+
+        optimizer.step()
+        if self.ewc is not None:
+            self.ewc.post_step(model)
+
+        self._trainer.global_step += 1
 
         # --- extra-step replay --------------------------------------------
         if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
             items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
             if items:
                 rx = {"image": torch.stack([it.sample for it in items])}
-                replay_losses = self._trainer._train_step(rx)
-                for k, v in replay_losses.items():
-                    losses[f"replay/{k}"] = v
+                optimizer.zero_grad(set_to_none=True)
+                r_loss = self._task_loss(rx)
+                (self.replay_weight * r_loss).backward()
+                optimizer.step()
+                losses["replay/total"] = float(r_loss.detach().item())
 
         # --- buffer insertion (image-only; later phases handle all modalities)
         if self.replay_bank is not None and "image" in batch:
@@ -118,10 +179,9 @@ class OmniLatentPlugin(ComponentPlugin):
 
         # --- EMA update ----------------------------------------------------
         if self.ema_teacher is not None:
-            self.ema_teacher.update(self._trainer.model)
+            self.ema_teacher.update(model)
 
-        total = float(losses.get("total", 0.0))
-        return StepReport(loss=total, losses={k: float(v) for k, v in losses.items()})
+        return StepReport(loss=losses["total"], losses=losses)
 
     @torch.no_grad()
     def evaluate(self, probe_set: Any | None = None) -> EvalReport:

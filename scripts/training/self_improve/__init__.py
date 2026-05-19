@@ -17,6 +17,7 @@ capacity expansion (phase 8), A-GEM (phase 9), control-center wiring
 from scripts.training.self_improve.eval_registry import EvalRegistry, ProbeSet
 from scripts.training.self_improve.forgetting import (
     EMATeacher,
+    EWCSI,
     ReplayBank,
     ReplayItem,
 )
@@ -30,6 +31,7 @@ from scripts.training.self_improve.vault import Snapshot, SnapshotID, Vault
 __all__ = [
     "ComponentPlugin",
     "EMATeacher",
+    "EWCSI",
     "EvalRegistry",
     "EvalReport",
     "ProbeSet",
