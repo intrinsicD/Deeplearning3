@@ -16,6 +16,8 @@ The :class:`Scheduler` ABC keeps both implementations interchangeable.
 
 from __future__ import annotations
 
+import math
+import random
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Sequence
@@ -86,11 +88,16 @@ class BanditScheduler(Scheduler):
     A fixed quota (10%) is always spent on the worst-performing
     component to prevent abandonment.
 
-    Phase 5 ships only the **warmup** behavior (round-robin until each
-    component has at least one eval); full priority bandit lands in
-    phase 6 alongside multi-component co-training. The state shape and
-    record_* methods are final so plugin code doesn't need to change
-    between phases.
+    Implementation:
+
+    - Round-robin warmup until each component has been picked at least
+      ``warmup_rounds`` times.
+    - Post-warmup: with probability ``worst_quota`` (default 10%), pick
+      the worst-performing component (largest ``b_i − s_i`` under the
+      latest eval); otherwise score each candidate by the priority
+      formula and pick argmax.
+    - If no component has been evaluated yet (post-warmup but no evals
+      logged), fall back to round-robin to keep the bandit well-defined.
     """
 
     def __init__(
@@ -103,9 +110,12 @@ class BanditScheduler(Scheduler):
         gamma: float = 0.25,
         worst_quota: float = 0.1,
         eval_every: int = 100,
+        seed: int = 0,
     ) -> None:
         if not components:
             raise ValueError("BanditScheduler requires ≥1 component")
+        if not 0.0 <= worst_quota <= 1.0:
+            raise ValueError(f"worst_quota must be in [0,1]; got {worst_quota}")
         self._components = list(components)
         self.alpha = alpha
         self.beta = beta
@@ -125,18 +135,95 @@ class BanditScheduler(Scheduler):
         self.higher_is_better: dict[str, bool] = {}
         self.total_picks: dict[str, int] = defaultdict(int)
 
+        self._rng = random.Random(seed)
+
     def pick(self) -> str:
         if self._in_warmup():
             name = self._components[self._warmup_idx % len(self._components)]
             self._warmup_idx += 1
             self.total_picks[name] += 1
             return name
-        # Post-warmup: phase 6 fills in the priority formula. For now we
-        # round-robin so existing behavior is well-defined.
-        name = self._components[self._warmup_idx % len(self._components)]
-        self._warmup_idx += 1
+
+        # No eval signal yet → fall back to round-robin.
+        if not self.eval_history:
+            name = self._components[self._warmup_idx % len(self._components)]
+            self._warmup_idx += 1
+            self.total_picks[name] += 1
+            return name
+
+        # 10% (configurable) quota to the worst-performing component.
+        if self._rng.random() < self.worst_quota:
+            name = self._worst_component()
+        else:
+            name = self._highest_priority()
         self.total_picks[name] += 1
         return name
+
+    # ------------------------------------------------------------------
+    # Priority math
+    # ------------------------------------------------------------------
+
+    def _regression_gap(self, c: str) -> float:
+        """``max(0, b_i − s_i)`` under the component's scoring convention.
+
+        For ``higher_is_better=True``, ``b > s`` means a regression. For
+        ``higher_is_better=False``, ``b < s`` means a regression. We
+        emit a positive number when the latest score is worse than the
+        best, zero otherwise.
+        """
+        b = self.best.get(c)
+        s = self.latest.get(c)
+        if b is None or s is None:
+            return 0.0
+        hib = self.higher_is_better.get(c, True)
+        diff = (b - s) if hib else (s - b)
+        return max(0.0, diff)
+
+    def _staleness(self, c: str) -> float:
+        if self.eval_every <= 0:
+            return 0.0
+        return self.steps_since_eval[c] / float(self.eval_every)
+
+    def _uncertainty(self, c: str) -> float:
+        hist = self.eval_history.get(c, [])
+        if len(hist) < 2:
+            return 0.0
+        # Welford-free std of the last ≤ 10 evals.
+        window = hist[-10:]
+        mean = sum(window) / len(window)
+        var = sum((x - mean) ** 2 for x in window) / len(window)
+        return math.sqrt(var)
+
+    def _priority(self, c: str) -> float:
+        return (
+            self.alpha * self._regression_gap(c)
+            + self.beta * self._staleness(c)
+            + self.gamma * self._uncertainty(c)
+        )
+
+    def _highest_priority(self) -> str:
+        return max(self._components, key=self._priority)
+
+    def _worst_component(self) -> str:
+        """Latest-eval worst-performing component under its own convention.
+
+        Components without any eval data are excluded (they wouldn't be
+        useful to "spend an extra slot on" — we have nothing to push
+        them away from). Ties resolve alphabetically.
+        """
+        def _key(c: str) -> tuple[int, float, str]:
+            s = self.latest.get(c)
+            if s is None:
+                # Unranked components compare less than any ranked one.
+                return (0, 0.0, c)
+            hib = self.higher_is_better.get(c, True)
+            # ``max`` over keys: we want the worst (= lowest score under
+            # higher_is_better; highest under lower_is_better). Negate
+            # accordingly so the worst gets the largest sort key.
+            normalized = -s if hib else s
+            return (1, normalized, c)
+
+        return max(self._components, key=_key)
 
     def _in_warmup(self) -> bool:
         if self._warmup_rounds == 0:
