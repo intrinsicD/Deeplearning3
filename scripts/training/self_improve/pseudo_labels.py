@@ -198,28 +198,45 @@ def validate_cyclic_edges_have_guards(
 ) -> None:
     """Default (non-strict) startup check from §5.3.
 
-    Every edge that participates in a cycle must declare
+    Every edge that *participates in a cycle* must declare
     ``min_stale_steps`` and ``confidence_threshold`` at or above the
-    floor values. Edges that participate in *no* cycle skip the check.
+    floor values. Edges that participate in no cycle (including
+    DAG-like *bridge* edges connecting two otherwise-disjoint cycles)
+    skip the check.
+
+    An edge participates in a cycle iff its producer and consumer
+    belong to the *same* strongly-connected component. A previous
+    implementation flattened all cyclic nodes into one set and flagged
+    any edge whose endpoints were both members; that wrongly caught
+    bridges between two separate SCCs and rejected valid configs.
     """
     cycles = detect_cycles(edges)
     if not cycles:
         return
-    cyclic_nodes = {node for cycle in cycles for node in cycle}
+    # Map each node to the index of its SCC (only for nodes that
+    # actually live in a non-trivial SCC). Edges with endpoints in
+    # different SCCs — or with one endpoint not in any cycle — pass.
+    scc_id: dict[str, int] = {}
+    for i, scc in enumerate(cycles):
+        for node in scc:
+            scc_id[node] = i
     bad: list[str] = []
     for e in edges:
-        if e.producer in cyclic_nodes and e.consumer in cyclic_nodes:
-            if e.min_stale_steps < min_stale_steps_floor:
-                bad.append(
-                    f"{e.producer}->{e.consumer}: min_stale_steps="
-                    f"{e.min_stale_steps} < floor {min_stale_steps_floor}"
-                )
-            if e.confidence_threshold < confidence_threshold_floor:
-                bad.append(
-                    f"{e.producer}->{e.consumer}: confidence_threshold="
-                    f"{e.confidence_threshold} < floor "
-                    f"{confidence_threshold_floor}"
-                )
+        p_scc = scc_id.get(e.producer)
+        c_scc = scc_id.get(e.consumer)
+        if p_scc is None or c_scc is None or p_scc != c_scc:
+            continue
+        if e.min_stale_steps < min_stale_steps_floor:
+            bad.append(
+                f"{e.producer}->{e.consumer}: min_stale_steps="
+                f"{e.min_stale_steps} < floor {min_stale_steps_floor}"
+            )
+        if e.confidence_threshold < confidence_threshold_floor:
+            bad.append(
+                f"{e.producer}->{e.consumer}: confidence_threshold="
+                f"{e.confidence_threshold} < floor "
+                f"{confidence_threshold_floor}"
+            )
     if bad:
         raise ValueError(
             "cyclic pseudo-label edges missing required guards:\n  "
@@ -368,6 +385,13 @@ class PseudoLabelBroker:
         staleness budget isn't satisfied yet *don't* refresh — they
         emit labels from their stale snapshot, which is the correct
         thing per §5.2 rule 1.
+
+        Confidence gating drops below-threshold samples; the surviving
+        ``inputs`` / ``labels`` / ``confidences`` triples are
+        size-aligned 1:1, matching the batch contract consumers rely
+        on. An edge whose gating drops *every* sample emits no batch
+        at all (rather than an empty batch) so consumers can skip the
+        empty case uniformly.
         """
         out: list[PseudoLabelBatch] = []
         for (prod, cons), state in self._edges.items():
@@ -378,11 +402,16 @@ class PseudoLabelBroker:
                 # No snapshot available yet — producer hasn't been
                 # vaulted. Skip silently.
                 continue
-            labels, confidences = self._emit_labels(state, raw_inputs)
+            inputs, labels, confidences = self._emit_labels(state, raw_inputs)
+            if not labels:
+                # Every sample was dropped by confidence gating; emit no
+                # batch (consumers expect either size-aligned content or
+                # nothing).
+                continue
             out.append(PseudoLabelBatch(
                 producer=prod,
                 consumer=cons,
-                inputs=raw_inputs,
+                inputs=inputs,
                 labels=labels,
                 confidences=confidences,
                 producer_snapshot=state.snapshot,
@@ -411,7 +440,7 @@ class PseudoLabelBroker:
         self,
         state: _EdgeState,
         raw_inputs: Sequence[Any],
-    ) -> tuple[list[Any], list[float]]:
+    ) -> tuple[list[Any], list[Any], list[float]]:
         """Run the producer (with its snapshot loaded) on ``raw_inputs``.
 
         The producer plugin is restored to its snapshot via
@@ -419,13 +448,19 @@ class PseudoLabelBroker:
         producer is then restored to whatever it was on entry. The
         restore step matters when the orchestrator's main loop is also
         training the producer in parallel.
+
+        Returns ``(inputs, labels, confidences)``, all the same length:
+        the *surviving* inputs after confidence gating, paired with
+        their labels and confidences. Returning the gated inputs (not
+        the full input sequence) preserves the batch contract that
+        consumers expect ``len(inputs) == len(labels)``.
         """
         import torch as _torch
 
         producer_name = state.config.producer
         producer = self._producers.get(producer_name)
         if producer is None:
-            return [], []
+            return [], [], []
         # Snapshot the producer's *current* state so we can restore after.
         # ``state_dict`` returns references to the live param tensors;
         # if we don't clone, ``load_state_dict(snap)`` below mutates
@@ -435,16 +470,18 @@ class PseudoLabelBroker:
         snap = self.vault.load(state.snapshot)
         try:
             producer.load_state_dict(snap.state)
+            inputs: list[Any] = []
             labels: list[Any] = []
             confidences: list[float] = []
             for sample in raw_inputs:
                 label, conf = state.label_fn(sample, producer)
                 if conf >= state.config.confidence_threshold:
+                    inputs.append(sample)
                     labels.append(label)
                     confidences.append(float(conf))
         finally:
             producer.load_state_dict(pre)
-        return labels, confidences
+        return inputs, labels, confidences
 
     # ------------------------------------------------------------------
     # Divergence guard

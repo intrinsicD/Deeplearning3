@@ -184,6 +184,36 @@ def test_validate_cyclic_edges_requires_min_stale_steps() -> None:
         )
 
 
+def test_validate_does_not_flag_bridge_between_two_cycles() -> None:
+    """An edge that connects two *separate* SCCs is itself a bridge,
+    not part of any cycle, and must not be subject to the cyclic-edge
+    guard requirements. Before this fix, the validator flagged any
+    edge whose endpoints both appeared in *any* cycle (across all
+    SCCs), incorrectly rejecting DAG-like bridge edges.
+
+    Graph::
+
+        a <-> b      (cycle 1: SCC {a, b})
+        c <-> d      (cycle 2: SCC {c, d})
+        b -> c       (bridge — not part of any cycle)
+
+    The bridge ``b -> c`` should pass with min_stale_steps=0 even
+    though the floor is high; only the four cyclic edges need guards.
+    """
+    validate_cyclic_edges_have_guards(
+        [
+            EdgeConfig("a", "b", min_stale_steps=1000, confidence_threshold=0.5),
+            EdgeConfig("b", "a", min_stale_steps=1000, confidence_threshold=0.5),
+            EdgeConfig("c", "d", min_stale_steps=1000, confidence_threshold=0.5),
+            EdgeConfig("d", "c", min_stale_steps=1000, confidence_threshold=0.5),
+            # The bridge: low min_stale_steps, but not part of any SCC.
+            EdgeConfig("b", "c", min_stale_steps=0, confidence_threshold=0.0),
+        ],
+        min_stale_steps_floor=100,
+        confidence_threshold_floor=0.1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Snapshot-mediated reads + staleness budget
 # ---------------------------------------------------------------------------
@@ -296,6 +326,54 @@ def test_confidence_gating_drops_low_confidence_labels(tmp_path: Path) -> None:
     # Only confidences >= 0.7 survive.
     assert batch[0].confidences == [0.8, 0.95]
     assert batch[0].labels == [0.8, 0.95]
+
+
+def test_gated_inputs_stay_aligned_with_labels(tmp_path: Path) -> None:
+    """When confidence gating drops some samples, ``inputs`` /
+    ``labels`` / ``confidences`` must stay size-aligned 1:1. Before
+    this fix, ``sample()`` stored the full raw_inputs while
+    ``_emit_labels`` filtered out low-confidence rows — silently
+    pairing wrong (input, label) tuples in downstream consumers and
+    causing shape errors in consumers that trust the batch contract.
+    """
+    broker, vault, prod, _ = _build_broker(tmp_path)
+    vault.save(
+        "prod", prod,
+        EvalReport(score=1.0, metrics={"a": 1.0, "b": 1.0}, higher_is_better=True),
+        step=0,
+    )
+
+    broker.register_edge(
+        EdgeConfig("prod", "cons", min_stale_steps=0, confidence_threshold=0.6),
+        # Label = input * 10; confidence == input.
+        label_fn=lambda s, p: (s * 10, float(s)),
+    )
+    broker.finalize()
+
+    [batch] = broker.sample("cons", [0.1, 0.7, 0.4, 0.9, 0.2])
+    # Only samples with confidence >= 0.6 survive: 0.7, 0.9.
+    assert len(batch.inputs) == len(batch.labels) == len(batch.confidences)
+    assert batch.inputs == [0.7, 0.9]
+    assert batch.labels == [7.0, 9.0]
+    assert batch.confidences == [0.7, 0.9]
+
+
+def test_all_dropped_emits_no_batch(tmp_path: Path) -> None:
+    """If gating drops every sample, the broker emits nothing for
+    that edge — better than emitting an empty batch that consumers
+    have to special-case."""
+    broker, vault, prod, _ = _build_broker(tmp_path)
+    vault.save(
+        "prod", prod,
+        EvalReport(score=1.0, metrics={"a": 1.0, "b": 1.0}, higher_is_better=True),
+        step=0,
+    )
+    broker.register_edge(
+        EdgeConfig("prod", "cons", min_stale_steps=0, confidence_threshold=0.99),
+        label_fn=lambda s, p: (s, 0.1),  # always below threshold
+    )
+    broker.finalize()
+    assert broker.sample("cons", [1, 2, 3]) == []
 
 
 # ---------------------------------------------------------------------------
