@@ -101,14 +101,31 @@ class OmniLatentPlugin(ComponentPlugin):
         """Single forward + criterion on ``batch`` without optimizer step.
 
         Mirrors the core of :meth:`omnilatent.training.Trainer._train_step`
-        but skips AMP scaling, contrastive heads (disabled in our tiny
-        config), and metrics logging — the orchestrator owns logging in
-        later phases. Returns a scalar loss with autograd attached.
+        but skips AMP scaling and metrics logging — the orchestrator
+        owns logging in later phases. Returns a scalar loss with
+        autograd attached.
+
+        Builds the per-modality contrastive latent bundle when the
+        batch has ≥ 2 modalities and ``contrastive_weight > 0`` (the
+        same gate the upstream trainer uses). Without this the
+        contrastive component of the loss silently disappears for any
+        multimodal config — silently changing the optimized objective.
         """
         batch = {k: v.to(self.device) for k, v in batch.items()}
         available = list(batch.keys())
         src, tgt = self._trainer.task_sampler.sample(available)
-        result = self._trainer.model(
+
+        model = self._trainer.model
+        latents: dict[str, torch.Tensor] | None = None
+        if len(available) >= 2 and self.config.contrastive_weight > 0:
+            latents = {}
+            for mod in available:
+                enc = model.encode(mod, batch[mod])
+                # Mean-pool content tokens, skipping the modality
+                # indicator at position 0 (matches upstream).
+                latents[mod] = enc[:, 1:].mean(dim=1)
+
+        result = model(
             source_modality=src,
             source_data=batch[src],
             target_modality=tgt,
@@ -117,7 +134,7 @@ class OmniLatentPlugin(ComponentPlugin):
         loss_dict = self._trainer.criterion(
             {tgt: result["output"]},
             {tgt: batch[tgt]},
-            None,
+            latents,
             reasoning_bottleneck=result.get("reasoning_bottleneck"),
             source_summary=result.get("source_summary"),
         )

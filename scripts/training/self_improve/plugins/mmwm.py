@@ -124,7 +124,16 @@ class MMWMPlugin(ComponentPlugin):
         for k in ("text_target", "vector_target", "image_target", "audio_target"):
             if k in batch:
                 loss_inputs[k] = batch[k].to(trainer.device)
-        losses = trainer.loss_fn(output, loss_inputs, task_multipliers=None)
+        # Preserve curriculum / adaptive-phase task weighting. The
+        # upstream trainer reads ``phase.task_multipliers`` from
+        # ``_active_phase()`` and passes them to the loss; if we leave
+        # ``task_multipliers=None`` we silently optimize a different
+        # objective whenever curriculum is enabled.
+        phase = trainer._active_phase()
+        task_multipliers = phase.task_multipliers if phase is not None else None
+        losses = trainer.loss_fn(
+            output, loss_inputs, task_multipliers=task_multipliers,
+        )
         next_memory = trainer._apply_reset_mask(output.next_memory, batch)
         return losses, next_memory
 

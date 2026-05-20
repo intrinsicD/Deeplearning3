@@ -199,3 +199,105 @@ def test_hpwm_lr_scheduler_advances_with_replay() -> None:
         f"second step (replay active) should advance scheduler by 2; "
         f"got {after_step2 - after_step1}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Objective parity with upstream trainers
+# ---------------------------------------------------------------------------
+
+
+def test_mmwm_plugin_passes_curriculum_task_multipliers() -> None:
+    """The MMWM plugin must respect curriculum / adaptive-phase task
+    multipliers. Without this fix, any configured phase weighting is
+    silently dropped on plugin train steps (the optimized objective
+    diverges from ``MMWM.trainer.Trainer.train_step``).
+    """
+    from unittest.mock import patch
+
+    MMWMPlugin = get_plugin("mmwm")
+    plugin = MMWMPlugin()
+
+    seen: list = []
+    real_loss_fn = plugin._trainer.loss_fn
+
+    def _spy_loss_fn(output, inputs, *, task_multipliers=None, **kwargs):
+        seen.append(task_multipliers)
+        return real_loss_fn(
+            output, inputs, task_multipliers=task_multipliers, **kwargs,
+        )
+
+    class _FakePhase:
+        task_multipliers = {"vector_pred_loss": 2.5, "latent_dyn_loss": 0.5}
+
+    plugin._trainer.loss_fn = _spy_loss_fn
+    with patch.object(plugin._trainer, "_active_phase", return_value=_FakePhase()):
+        plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
+
+    assert len(seen) >= 1, "loss_fn was not called on train_step"
+    assert seen[0] == _FakePhase.task_multipliers, (
+        f"task_multipliers were dropped: got {seen[0]!r}"
+    )
+
+
+def test_omnilatent_plugin_builds_contrastive_latents_when_enabled() -> None:
+    """When the batch has >=2 modalities and contrastive_weight > 0,
+    the OmniLatent plugin must pass per-modality latents to the
+    criterion. Without this the contrastive component is silently
+    dropped — silently changing the optimized objective from the
+    upstream ``Trainer._train_step``.
+    """
+    import torch
+
+    OmniLatentPlugin = get_plugin("omnilatent")
+    plugin = OmniLatentPlugin()
+    # The tiny config sets contrastive_weight=0; flip it on for this test.
+    plugin.config.contrastive_weight = 0.1
+
+    cfg = plugin.config
+    batch = {
+        "image": torch.rand(2, cfg.image_channels, cfg.image_size, cfg.image_size),
+        "audio": torch.rand(2, cfg.audio_n_mels, cfg.audio_max_frames),
+    }
+
+    captured: list = []
+    real_criterion = plugin._trainer.criterion
+
+    def _spy_criterion(predictions, targets, latents, **kwargs):
+        captured.append(latents)
+        return real_criterion(predictions, targets, latents, **kwargs)
+
+    plugin._trainer.criterion = _spy_criterion
+    plugin.train_step(batch)
+
+    assert len(captured) >= 1
+    latents = captured[0]
+    assert latents is not None, (
+        "contrastive latent bundle was dropped despite >=2 modalities "
+        "and contrastive_weight > 0"
+    )
+    assert set(latents.keys()) == {"image", "audio"}
+    assert latents["image"].shape == latents["audio"].shape
+
+
+def test_omnilatent_plugin_skips_contrastive_when_disabled() -> None:
+    """Inverse: when contrastive_weight is 0 (the tiny-config default),
+    no latents are built — matches the upstream gate.
+    """
+    OmniLatentPlugin = get_plugin("omnilatent")
+    plugin = OmniLatentPlugin()
+    assert plugin.config.contrastive_weight == 0.0
+
+    captured: list = []
+    real_criterion = plugin._trainer.criterion
+
+    def _spy_criterion(predictions, targets, latents, **kwargs):
+        captured.append(latents)
+        return real_criterion(predictions, targets, latents, **kwargs)
+
+    plugin._trainer.criterion = _spy_criterion
+    plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
+
+    assert len(captured) >= 1
+    assert captured[0] is None, (
+        f"contrastive latents built even with contrastive_weight=0: {captured[0]}"
+    )
