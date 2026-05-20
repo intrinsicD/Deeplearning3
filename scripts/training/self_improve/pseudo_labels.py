@@ -79,8 +79,12 @@ class PseudoLabelBatch:
     """A batch of labels emitted by a producer for a consumer.
 
     ``inputs`` and ``labels`` are opaque tensors (or batch-dict-likes)
-    sized identically. ``confidences`` is a 1-D float tensor of length
-    ``len(inputs)``.
+    sized identically; ``confidences`` is a 1-D float sequence of the
+    same length. When confidence gating drops some of the raw inputs,
+    ``indices`` records the *original* positions (into the consumer's
+    raw input list) that survived — so the consumer can index its
+    student outputs to align with the surviving labels rather than
+    discarding the whole batch.
     """
 
     producer: str
@@ -89,6 +93,7 @@ class PseudoLabelBatch:
     labels: Any
     confidences: Any
     producer_snapshot: SnapshotID
+    indices: list[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +304,7 @@ class PseudoLabelBroker:
         self.strict_acyclic = bool(strict_acyclic)
         self._edges: dict[tuple[str, str], _EdgeState] = {}
         self._producers: dict[str, ComponentPlugin] = {}
+        self._finalized = False
 
     # ------------------------------------------------------------------
     # Registration
@@ -318,6 +324,12 @@ class PseudoLabelBroker:
         config: EdgeConfig,
         label_fn: LabelFn,
     ) -> None:
+        if self._finalized:
+            raise RuntimeError(
+                "cannot register a new edge after finalize(); the broker's "
+                "graph is frozen at finalization so the cycle / guard "
+                "checks remain authoritative."
+            )
         if config.producer == config.consumer:
             raise ValueError(
                 f"self-edge not allowed: {config.producer}->{config.consumer}"
@@ -331,8 +343,14 @@ class PseudoLabelBroker:
         """Run the startup graph check (cycles / guards).
 
         Call after all edges are registered, before the first
-        :meth:`sample`. The orchestrator wires this in its constructor.
+        :meth:`sample`. The orchestrator wires this in its constructor;
+        tests that drive the broker directly often call it
+        explicitly. Subsequent calls are no-ops (the validation isn't
+        cached but the broker won't re-run it), so it's safe for both
+        owners to call ``finalize`` without coordination.
         """
+        if self._finalized:
+            return
         edges = [s.config for s in self._edges.values()]
         if self.strict_acyclic:
             enforce_acyclic_or_raise(edges)
@@ -343,6 +361,7 @@ class PseudoLabelBroker:
             len(edges),
             self.strict_acyclic,
         )
+        self._finalized = True
 
     # ------------------------------------------------------------------
     # Per-step bookkeeping
@@ -402,7 +421,9 @@ class PseudoLabelBroker:
                 # No snapshot available yet — producer hasn't been
                 # vaulted. Skip silently.
                 continue
-            inputs, labels, confidences = self._emit_labels(state, raw_inputs)
+            inputs, labels, confidences, indices = self._emit_labels(
+                state, raw_inputs,
+            )
             if not labels:
                 # Every sample was dropped by confidence gating; emit no
                 # batch (consumers expect either size-aligned content or
@@ -415,6 +436,7 @@ class PseudoLabelBroker:
                 labels=labels,
                 confidences=confidences,
                 producer_snapshot=state.snapshot,
+                indices=indices,
             ))
         return out
 
@@ -440,7 +462,7 @@ class PseudoLabelBroker:
         self,
         state: _EdgeState,
         raw_inputs: Sequence[Any],
-    ) -> tuple[list[Any], list[Any], list[float]]:
+    ) -> tuple[list[Any], list[Any], list[float], list[int]]:
         """Run the producer (with its snapshot loaded) on ``raw_inputs``.
 
         The producer plugin is restored to its snapshot via
@@ -449,18 +471,21 @@ class PseudoLabelBroker:
         restore step matters when the orchestrator's main loop is also
         training the producer in parallel.
 
-        Returns ``(inputs, labels, confidences)``, all the same length:
-        the *surviving* inputs after confidence gating, paired with
-        their labels and confidences. Returning the gated inputs (not
-        the full input sequence) preserves the batch contract that
-        consumers expect ``len(inputs) == len(labels)``.
+        Returns ``(inputs, labels, confidences, indices)``, all the
+        same length: the *surviving* inputs after confidence gating,
+        paired with their labels, confidences, and their original
+        positions in ``raw_inputs``. The indices let consumers align
+        the surviving label subset against their student outputs even
+        when gating drops *some* (not all) samples — without them,
+        consumers can only safely use the labels when every sample
+        survives.
         """
         import torch as _torch
 
         producer_name = state.config.producer
         producer = self._producers.get(producer_name)
         if producer is None:
-            return [], [], []
+            return [], [], [], []
         # Snapshot the producer's *current* state so we can restore after.
         # ``state_dict`` returns references to the live param tensors;
         # if we don't clone, ``load_state_dict(snap)`` below mutates
@@ -473,15 +498,17 @@ class PseudoLabelBroker:
             inputs: list[Any] = []
             labels: list[Any] = []
             confidences: list[float] = []
-            for sample in raw_inputs:
+            indices: list[int] = []
+            for i, sample in enumerate(raw_inputs):
                 label, conf = state.label_fn(sample, producer)
                 if conf >= state.config.confidence_threshold:
                     inputs.append(sample)
                     labels.append(label)
                     confidences.append(float(conf))
+                    indices.append(i)
         finally:
             producer.load_state_dict(pre)
-        return inputs, labels, confidences
+        return inputs, labels, confidences, indices
 
     # ------------------------------------------------------------------
     # Divergence guard

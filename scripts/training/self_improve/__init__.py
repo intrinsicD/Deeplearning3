@@ -1,29 +1,38 @@
 """Self-improvement (continual self-supervised learning) infrastructure.
 
 See ``docs/self_improvement.md`` for the design. This package implements
-the rollout up through **phase 5**:
+the full 10-phase rollout plus three follow-up extensions:
 
-- Phase 1: plugin scaffolding around the five existing trainers.
-- Phase 2: content-addressed vault + frozen-probe eval registry.
-- Phase 3: DER++ replay buffer + EMA teacher distillation; all five
-  plugins accept ``attach_replay`` / ``attach_ema``.
-- Phase 4: online EWC + Synaptic Intelligence; wired into OmniLatent
-  and MMWM.
-- Phase 5: orchestrator, scheduler, data stream, and CLI for
-  single-component runs.
-
-Pending: multi-component co-training (phase 6), pseudo-label broker
-(phase 7), hook-based capacity expansion (phase 8), A-GEM (phase 9),
-control-center wiring (phase 10).
+- Phases 1–10: plugin scaffolding through control-center integration.
+- Follow-up A: orchestrator-integrated plateau-driven capacity
+  expansion + per-component compute budget (§4.4, §6.2).
+- Follow-up B: fused-DER++ replay across the four "extra-step"
+  plugins (omnilatent, mmwm, hpwm; gaussian_encoder was already
+  fused), plus EWC wiring extended to gaussian_encoder + hpwm. LGQ
+  remains the holdout — its GAN dual-optimizer + AMP step isn't
+  easily restructured around an external backward.
+- Follow-up C: concrete pseudo-label edge plumbing
+  (:mod:`scripts.training.self_improve.edges`), with one wired
+  Gaussian → Gaussian image-recon edge demonstrating the broker
+  end-to-end through the orchestrator. The remaining §5 edges land
+  alongside the dataset adapters.
 """
 
 from scripts.training.self_improve.data_stream import DataStream, SyntheticDataStream
+from scripts.training.self_improve.edges import (
+    PluginPseudoLabelConsumer,
+    apply_pending_labels,
+    gaussian_recon_label_fn,
+    image_consistency_loss,
+)
 from scripts.training.self_improve.eval_registry import EvalRegistry, ProbeSet
 from scripts.training.self_improve.forgetting import (
     EMATeacher,
     EWCSI,
+    PlateauDetector,
     ReplayBank,
     ReplayItem,
+    expand_omnilatent_capacity,
 )
 from scripts.training.self_improve.orchestrator import Orchestrator, RunReport
 from scripts.training.self_improve.plugins.base import (
@@ -53,6 +62,8 @@ __all__ = [
     "EvalRegistry",
     "EvalReport",
     "Orchestrator",
+    "PlateauDetector",
+    "PluginPseudoLabelConsumer",
     "ProbeSet",
     "PseudoLabelBatch",
     "PseudoLabelBroker",
@@ -66,4 +77,8 @@ __all__ = [
     "StepReport",
     "SyntheticDataStream",
     "Vault",
+    "apply_pending_labels",
+    "expand_omnilatent_capacity",
+    "gaussian_recon_label_fn",
+    "image_consistency_loss",
 ]

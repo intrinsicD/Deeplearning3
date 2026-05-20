@@ -97,23 +97,26 @@ class OmniLatentPlugin(ComponentPlugin):
     # Phase 4 helpers
     # ------------------------------------------------------------------
 
-    def _task_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Single forward + criterion on ``batch`` without optimizer step.
+    def _task_forward(
+        self, batch: dict[str, torch.Tensor], *, src: str | None = None, tgt: str | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, str]:
+        """Forward + criterion. Returns (loss, target_output, target_modality).
 
-        Mirrors the core of :meth:`omnilatent.training.Trainer._train_step`
-        but skips AMP scaling and metrics logging — the orchestrator
-        owns logging in later phases. Returns a scalar loss with
-        autograd attached.
+        ``target_output`` is autograd-tracked and is what gets compared
+        against stored DER++ teacher logits on replay. When ``src`` /
+        ``tgt`` are not specified, the task sampler picks them (this is
+        what fresh-batch training uses); replay forwards pass them
+        explicitly so the buffer's stored ``image`` outputs match the
+        target modality every time.
 
         Builds the per-modality contrastive latent bundle when the
         batch has ≥ 2 modalities and ``contrastive_weight > 0`` (the
-        same gate the upstream trainer uses). Without this the
-        contrastive component of the loss silently disappears for any
-        multimodal config — silently changing the optimized objective.
+        same gate the upstream trainer uses).
         """
         batch = {k: v.to(self.device) for k, v in batch.items()}
         available = list(batch.keys())
-        src, tgt = self._trainer.task_sampler.sample(available)
+        if src is None or tgt is None:
+            src, tgt = self._trainer.task_sampler.sample(available)
 
         model = self._trainer.model
         latents: dict[str, torch.Tensor] | None = None
@@ -138,16 +141,30 @@ class OmniLatentPlugin(ComponentPlugin):
             reasoning_bottleneck=result.get("reasoning_bottleneck"),
             source_summary=result.get("source_summary"),
         )
-        return loss_dict["total"]
+        return loss_dict["total"], result["output"], tgt
+
+    def _task_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Backwards-compat wrapper for callers that only want the loss."""
+        loss, _, _ = self._task_forward(batch)
+        return loss
 
     def train_step(self, batch: dict[str, torch.Tensor]) -> StepReport:
-        """One training step with optional replay + EMA + EWC/SI.
+        """One training step with fused DER++ replay + optional EMA + EWC/SI.
 
-        When EWC is attached we need to (a) add ``penalty`` to the loss
-        before the optimizer step, and (b) accumulate Fisher from the
-        *task* gradient only. We satisfy (b) by backwarding ``task_loss``
-        first and calling ``consolidate`` before adding the penalty's
-        gradient on top.
+        Section-B followup restructure: the previous "extra-step
+        replay" path took a second ``optimizer.step()`` on the replay
+        batch. This version folds the replay task loss and the
+        DER++ MSE-consistency term into a single backward pass
+        alongside the main task loss. Total loss layout::
+
+            total = task + replay_weight·replay_task
+                       + der_weight·MSE(current_recon, stored_recon)
+                       + (EWC penalty added by a second backward)
+
+        Buffer storage: the model's image-target output from the
+        current step is stored as the DER teacher signal — the replay
+        forward picks ``image→image`` explicitly so the comparison is
+        well-defined modality-by-modality.
         """
         model = self._trainer.model
         optimizer = self._trainer.optimizer
@@ -155,12 +172,44 @@ class OmniLatentPlugin(ComponentPlugin):
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
-        task_loss = self._task_loss(batch)
-        losses: dict[str, float] = {"total": float(task_loss.detach().item())}
+        task_loss, task_output, task_tgt = self._task_forward(batch)
+        losses: dict[str, float] = {"task": float(task_loss.detach().item())}
+        total_loss = task_loss
 
-        task_loss.backward()
+        # --- Fused DER++ replay -------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rx = {"image": torch.stack([it.sample for it in items]).to(self.device)}
+                r_loss, r_output, _ = self._task_forward(
+                    rx, src="image", tgt="image",
+                )
+                total_loss = total_loss + self.replay_weight * r_loss
+                losses["replay/task"] = float(r_loss.detach().item())
+
+                der_items = [it for it in items if it.stored_logits is not None]
+                if der_items:
+                    # Re-forward through only the DER-tagged subset so
+                    # the MSE has the right batch dim.
+                    rd_inputs = torch.stack(
+                        [it.sample for it in der_items],
+                    ).to(self.device)
+                    _, rd_output, _ = self._task_forward(
+                        {"image": rd_inputs}, src="image", tgt="image",
+                    )
+                    stored = torch.stack(
+                        [it.stored_logits for it in der_items],
+                    ).to(self.device)
+                    der = nn.functional.mse_loss(rd_output, stored)
+                    total_loss = total_loss + self.der_weight * der
+                    losses["der_consistency"] = float(der.detach().item())
+
+        losses["total"] = float(total_loss.detach().item())
+        total_loss.backward()
         if self.ewc is not None:
-            # Fisher snapshot uses task grads only — call before penalty.
+            # Fisher snapshot uses task grads (well: task + replay) only —
+            # call before penalty so the regularizer's gradient doesn't
+            # contaminate Fisher.
             self.ewc.consolidate(model)
             penalty = self.ewc.penalty(model)
             penalty.backward()
@@ -172,25 +221,26 @@ class OmniLatentPlugin(ComponentPlugin):
 
         self._trainer.global_step += 1
 
-        # --- extra-step replay --------------------------------------------
-        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
-            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
-            if items:
-                rx = {"image": torch.stack([it.sample for it in items])}
-                optimizer.zero_grad(set_to_none=True)
-                r_loss = self._task_loss(rx)
-                (self.replay_weight * r_loss).backward()
-                optimizer.step()
-                losses["replay/total"] = float(r_loss.detach().item())
-
         # --- buffer insertion (image-only; later phases handle all modalities)
         if self.replay_bank is not None and "image" in batch:
             img = batch["image"]
+            # If the task forward happened to pick image→image, the
+            # produced output is already on hand; otherwise we run an
+            # extra image→image forward purely for the teacher signal.
+            if task_tgt == "image":
+                stored_recon = task_output.detach()
+            else:
+                with torch.no_grad():
+                    _, stored_recon, _ = self._task_forward(
+                        {"image": img.to(self.device)},
+                        src="image", tgt="image",
+                    )
+                stored_recon = stored_recon.detach()
             for i in range(img.shape[0]):
                 self.replay_bank.insert(
                     self.name,
                     img[i].detach().cpu(),
-                    stored_logits=None,
+                    stored_logits=stored_recon[i].cpu(),
                     step=self._trainer.global_step,
                 )
 
@@ -254,6 +304,9 @@ class OmniLatentPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -266,6 +319,7 @@ class OmniLatentPlugin(ComponentPlugin):
             self._trainer.criterion.load_state_dict(state["criterion"])
         self._trainer.global_step = int(state.get("global_step", 0))
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
     # -- helpers -----------------------------------------------------------
 

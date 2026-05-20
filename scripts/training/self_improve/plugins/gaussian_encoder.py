@@ -9,6 +9,10 @@ import torch.nn as nn
 
 from gaussian_encoder.trainer import GaussianTrainer
 
+from scripts.training.self_improve.edges import (
+    PluginPseudoLabelConsumer,
+    apply_pending_labels,
+)
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
     EvalReport,
@@ -16,7 +20,7 @@ from scripts.training.self_improve.plugins.base import (
 )
 
 
-class GaussianEncoderPlugin(ComponentPlugin):
+class GaussianEncoderPlugin(ComponentPlugin, PluginPseudoLabelConsumer):
     name = "gaussian_encoder"
 
     def __init__(
@@ -119,8 +123,35 @@ class GaussianEncoderPlugin(ComponentPlugin):
             total_loss = total_loss + self.distill_weight * distill
             losses["distill"] = float(distill.detach().item())
 
+        # --- Cross-component pseudo-labels (§5) ----------------------------
+        # The orchestrator drops a list of :class:`PseudoLabelBatch` onto
+        # the plugin's ``_pending_pseudo_labels`` slot before this call.
+        # ``apply_pending_labels`` consumes them and returns a scalar
+        # consistency loss (zero if none queued) plus per-producer log
+        # entries.
+        pseudo_loss, pseudo_log = apply_pending_labels(self, x_hat, x)
+        if pseudo_log:
+            total_loss = total_loss + self.pseudo_weight * pseudo_loss
+            losses.update(pseudo_log)
+            losses["pseudo/total"] = float(pseudo_loss.detach().item())
+
+        # --- Backward / Fisher / step / SI --------------------------------
+        # EWC's Fisher accumulation needs the *task* gradient only, so
+        # we backward the task-side loss first and call ``consolidate``
+        # before adding the regularizer's gradient on top via a second
+        # ``backward`` on the penalty term. The optimizer.step then sees
+        # the full ∇(task + λ·penalty).
         total_loss.backward()
+        if self.ewc is not None:
+            self.ewc.consolidate(model)
+            penalty = self.ewc.penalty(model)
+            penalty.backward()
+            losses["ewc/penalty"] = float(penalty.detach().item())
+            total_loss = total_loss + penalty  # only used for the .total report
+
         optimizer.step()
+        if self.ewc is not None:
+            self.ewc.post_step(model)
         self._trainer.step_count += 1
 
         losses["total"] = float(total_loss.detach().item())
@@ -187,14 +218,20 @@ class GaussianEncoderPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        # Strip EMA before delegating; the underlying GaussianTrainer
-        # doesn't know that key and would mishandle it.
-        trainer_state = {k: v for k, v in state.items() if k != "_ema"}
+        # Strip EMA/EWC before delegating; the underlying GaussianTrainer
+        # doesn't know those keys and would mishandle them.
+        trainer_state = {
+            k: v for k, v in state.items() if k not in ("_ema", "_ewc")
+        }
         self._trainer.load_state_dict(trainer_state)
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
 
 __all__ = ["GaussianEncoderPlugin"]

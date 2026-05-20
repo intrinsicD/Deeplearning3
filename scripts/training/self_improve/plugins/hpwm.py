@@ -141,26 +141,27 @@ class HPWMPlugin(ComponentPlugin):
         return {"frames": frames}
 
     def train_step(self, batch: dict[str, torch.Tensor]) -> StepReport:
+        """One HPWM training step with fused DER++ replay + optional EWC.
+
+        Section-B followup restructure: the previous "extra-step
+        replay" path took a second ``optimizer.step()`` on the replay
+        batch. This version folds the replay task loss and the
+        DER++ logits-consistency term into a single backward pass
+        alongside the main task loss, then takes one ``optimizer.step``.
+        That matches the design-doc default (§4.1 DER++) and halves
+        the per-step optimizer call count on replay-active steps.
+
+        HPWM owns a temporal state across steps; we *don't* replay
+        through it (replayed clips have no temporal continuity with
+        the fresh batch), so the replay forward uses ``None``.
+        """
         cfg = self.config
         frames = batch["frames"].to(self._device, non_blocking=True)
         self._model.train()
 
         outputs = self._model(frames, self._temporal_states)
         loss = outputs["loss"]
-
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
-            self._model.parameters(), cfg.max_grad_norm,
-        )
-        self.optimizer.step()
-        self.scheduler.step()
-
-        # Detach temporal states for next step (truncated BPTT).
-        self._temporal_states = [
-            s.detach() if s is not None else None
-            for s in outputs.get("temporal_states", [])
-        ]
+        total_loss = loss
 
         losses: dict[str, float] = {}
         for key in (
@@ -173,39 +174,77 @@ class HPWMPlugin(ComponentPlugin):
             if isinstance(v, torch.Tensor):
                 losses[key] = float(v.detach().cpu().item())
 
-        self.step_count += 1
-
-        # --- extra-step replay --------------------------------------------
-        # HPWM owns a temporal state; we *don't* replay through it because
-        # replayed clips have no temporal continuity with the fresh batch.
-        # Run replay with a fresh ``None`` temporal state.
+        # --- Fused DER++ replay --------------------------------------------
+        # Sample replayed clips, run them through the model (within the
+        # autograd graph), and add (a) the replay task loss and (b) the
+        # DER++ MSE between current ``pred_logits`` and the stored
+        # insertion-time logits. Everything contributes to the *same*
+        # backward below.
         if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
             items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
             if items:
                 r_frames = torch.stack([it.sample for it in items]).to(self._device)
-                self.optimizer.zero_grad(set_to_none=True)
                 r_outputs = self._model(r_frames, None)
                 r_loss = r_outputs["loss"]
-                (self.replay_weight * r_loss).backward()
-                nn.utils.clip_grad_norm_(
-                    self._model.parameters(), cfg.max_grad_norm,
-                )
-                self.optimizer.step()
-                # Keep the LR scheduler in step with the optimizer: the
-                # replay branch is a real parameter update, so without
-                # this the cosine/warmup schedule would lag the actual
-                # optimizer step count whenever replay is active and
-                # train at systematically higher LRs than configured.
-                self.scheduler.step()
+                total_loss = total_loss + self.replay_weight * r_loss
                 losses["replay/loss"] = float(r_loss.detach().cpu().item())
 
+                der_items = [it for it in items if it.stored_logits is not None]
+                if der_items:
+                    # Re-forward through only the DER-tagged subset and
+                    # pull the (still-tracked) ``pred_logits`` from that
+                    # forward to MSE against the stored detached logits.
+                    rd_frames = torch.stack(
+                        [it.sample for it in der_items],
+                    ).to(self._device)
+                    rd_outputs = self._model(rd_frames, None)
+                    rd_logits = rd_outputs["pred_logits"]
+                    stored = torch.stack(
+                        [it.stored_logits for it in der_items],
+                    ).to(self._device)
+                    der = nn.functional.mse_loss(rd_logits, stored)
+                    total_loss = total_loss + self.der_weight * der
+                    losses["der_consistency"] = float(der.detach().cpu().item())
+
+        # --- Backward / Fisher / clip / step / SI -------------------------
+        self.optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        if self.ewc is not None:
+            self.ewc.consolidate(self._model)
+            penalty = self.ewc.penalty(self._model)
+            penalty.backward()
+            losses["ewc/penalty"] = float(penalty.detach().cpu().item())
+        grad_norm = nn.utils.clip_grad_norm_(
+            self._model.parameters(), cfg.max_grad_norm,
+        )
+        self.optimizer.step()
+        self.scheduler.step()
+        if self.ewc is not None:
+            self.ewc.post_step(self._model)
+
+        # Detach temporal states for next step (truncated BPTT).
+        self._temporal_states = [
+            s.detach() if s is not None else None
+            for s in outputs.get("temporal_states", [])
+        ]
+
+        self.step_count += 1
+
         # --- buffer insertion --------------------------------------------
+        # Store ``pred_logits`` (already detached by the model's forward)
+        # as the DER++ teacher signal for each newly-buffered sample.
         if self.replay_bank is not None:
+            pred_logits = outputs.get("pred_logits")
             for i in range(frames.shape[0]):
+                stored = (
+                    pred_logits[i].detach().cpu()
+                    if isinstance(pred_logits, torch.Tensor)
+                    else None
+                )
                 self.replay_bank.insert(
                     self.name,
                     frames[i].detach().cpu(),
-                    stored_logits=None,
+                    stored_logits=stored,
                     step=self.step_count,
                 )
 
@@ -277,6 +316,9 @@ class HPWMPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -291,6 +333,7 @@ class HPWMPlugin(ComponentPlugin):
             self.scheduler.load_state_dict(state["scheduler"])
         self.step_count = int(state.get("step_count", 0))
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
     # -- helpers -----------------------------------------------------------
 

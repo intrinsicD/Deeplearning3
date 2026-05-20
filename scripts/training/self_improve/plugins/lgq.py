@@ -163,12 +163,18 @@ class LGQPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        trainer_state = {k: v for k, v in state.items() if k != "_ema"}
+        trainer_state = {
+            k: v for k, v in state.items() if k not in ("_ema", "_ewc")
+        }
         self._trainer.load_state_dict(trainer_state)
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
     # -- helpers -----------------------------------------------------------
 

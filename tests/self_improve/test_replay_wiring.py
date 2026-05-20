@@ -169,34 +169,28 @@ def test_attach_ewc_advances_counters(name: str) -> None:
     assert "ewc/penalty" in report.losses
 
 
-def test_hpwm_lr_scheduler_advances_with_replay() -> None:
-    """The replay branch performs a second ``optimizer.step()``; the
-    LR scheduler must advance with it. Without this fix, enabling
-    replay silently trains HPWM at higher LRs than the configured
-    cosine schedule prescribes (the scheduler lags the optimizer by
-    one step per train_step call once the buffer is non-empty).
+def test_hpwm_lr_scheduler_advances_once_per_step() -> None:
+    """One ``optimizer.step()`` per ``train_step`` ⇒ one
+    ``scheduler.step()`` per ``train_step``. With the fused-DER++
+    refactor the scheduler advances exactly once per call regardless
+    of whether the replay buffer is empty or not — there's only ever
+    one optimizer step, fed by ∇(task + replay + der + penalty).
     """
     HPWMPlugin = get_plugin("hpwm")
     plugin = HPWMPlugin()
     bank = ReplayBank(capacity=8, seed=0)
     plugin.attach_replay(bank, batch_size=1)
 
-    initial_scheduler_steps = plugin.scheduler.last_epoch
-
-    # Step 1: buffer is empty, only the main optimizer.step runs ⇒ +1.
+    initial = plugin.scheduler.last_epoch
     plugin.train_step(plugin.make_synthetic_batch(batch_size=1))
     after_step1 = plugin.scheduler.last_epoch
-    assert after_step1 - initial_scheduler_steps == 1, (
-        f"first step (no replay yet) should advance scheduler by 1; "
-        f"got {after_step1 - initial_scheduler_steps}"
-    )
+    assert after_step1 - initial == 1
 
-    # Step 2: buffer is non-empty, both main and replay optimizer.steps
-    # fire ⇒ +2.
+    # Second step has a non-empty buffer; scheduler still advances by 1.
     plugin.train_step(plugin.make_synthetic_batch(batch_size=1))
     after_step2 = plugin.scheduler.last_epoch
-    assert after_step2 - after_step1 == 2, (
-        f"second step (replay active) should advance scheduler by 2; "
+    assert after_step2 - after_step1 == 1, (
+        f"fused-DER++ HPWM step should advance scheduler by 1; "
         f"got {after_step2 - after_step1}"
     )
 
@@ -236,6 +230,42 @@ def test_mmwm_plugin_passes_curriculum_task_multipliers() -> None:
     assert len(seen) >= 1, "loss_fn was not called on train_step"
     assert seen[0] == _FakePhase.task_multipliers, (
         f"task_multipliers were dropped: got {seen[0]!r}"
+    )
+
+
+def test_mmwm_plugin_eval_uses_curriculum_task_multipliers() -> None:
+    """The plugin's eval path also must respect curriculum
+    multipliers — the upstream trainer's eval reads
+    ``phase.task_multipliers`` from ``_active_phase()`` so the eval
+    score matches the actual training objective. If we drop this on
+    the eval side, scores diverge from training even though training
+    behavior is unchanged, which mis-prioritizes the scheduler and
+    can trigger spurious rollbacks.
+    """
+    from unittest.mock import patch
+
+    MMWMPlugin = get_plugin("mmwm")
+    plugin = MMWMPlugin()
+
+    seen: list = []
+    real_loss_fn = plugin._trainer.loss_fn
+
+    def _spy_loss_fn(output, inputs, *, task_multipliers=None, **kwargs):
+        seen.append(task_multipliers)
+        return real_loss_fn(
+            output, inputs, task_multipliers=task_multipliers, **kwargs,
+        )
+
+    class _FakePhase:
+        task_multipliers = {"vector_pred_loss": 3.0, "latent_dyn_loss": 0.25}
+
+    plugin._trainer.loss_fn = _spy_loss_fn
+    with patch.object(plugin._trainer, "_active_phase", return_value=_FakePhase()):
+        plugin.evaluate()
+
+    assert len(seen) >= 1, "loss_fn was not called during evaluate"
+    assert all(s == _FakePhase.task_multipliers for s in seen), (
+        f"task_multipliers were dropped on eval: got {seen!r}"
     )
 
 

@@ -101,6 +101,12 @@ class ComponentPlugin(ABC):
     distill_weight: float = 0.5
     #: Number of replay samples drawn per training step.
     replay_batch_size: int = 1
+    #: Weight on the cross-component pseudo-label consistency loss
+    #: (§5). The default is conservative — pseudo-labels never
+    #: dominate the real-data signal — matching the design-doc 30%
+    #: real-data-majority cap (which the orchestrator enforces at the
+    #: batch level; ``pseudo_weight`` shapes the loss-level mix).
+    pseudo_weight: float = 0.3
 
     def attach_replay(
         self,
@@ -211,11 +217,15 @@ class ComponentPlugin(ABC):
         ema_state = self._ema_state()
         if ema_state is not None:
             out["_ema"] = ema_state
+        ewc_state = self._ewc_state()
+        if ewc_state is not None:
+            out["_ewc"] = ewc_state
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self.model.load_state_dict(state["model"])
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
     def _ema_state(self) -> dict[str, Any] | None:
         """Helper for subclass ``state_dict`` impls.
@@ -255,6 +265,47 @@ class ComponentPlugin(ABC):
 
             self.ema_teacher = EMATeacher(self.model, decay=float(state["decay"]))
         self.ema_teacher.load_state_dict(state)
+
+    def _ewc_state(self) -> dict[str, Any] | None:
+        """Helper for subclass ``state_dict`` impls.
+
+        Returns the online-EWC + SI regularizer's state (fisher,
+        omega, anchor, counters) when one is attached, ``None``
+        otherwise. Subclasses with custom ``state_dict`` should call
+        this and merge the result under the ``"_ewc"`` key — otherwise
+        vault rollback restores model weights but leaves the
+        regularizer's importance statistics + anchor at the
+        post-regression trajectory's values, so subsequent penalties
+        no longer match the restored checkpoint state.
+        """
+        if self.ewc is None:
+            return None
+        return self.ewc.state_dict()
+
+    def _load_ewc_state(self, state: Any) -> None:
+        """Companion to :meth:`_ewc_state` for subclass ``load_state_dict``.
+
+        Same three-case tolerance as :meth:`_load_ema_state`:
+
+        - No EWC in the checkpoint and no regularizer attached: no-op.
+        - EWC in the checkpoint and a regularizer attached: load.
+        - EWC in the checkpoint but no regularizer: lazily attach
+          (with the saved decay / λ values), so a resumed run with
+          EWC enabled doesn't lose its anchor + Fisher just because
+          ``attach_ewc`` hadn't yet been called on the new instance.
+        """
+        if state is None:
+            return
+        if self.ewc is None:
+            from scripts.training.self_improve.forgetting.ewc import EWCSI
+
+            self.ewc = EWCSI(
+                self.model,
+                fisher_decay=float(state["fisher_decay"]),
+                lam_ewc=float(state["lam_ewc"]),
+                lam_si=float(state["lam_si"]),
+            )
+        self.ewc.load_state_dict(state)
 
     # ------------------------------------------------------------------
     # Helpers
