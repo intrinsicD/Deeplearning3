@@ -133,6 +133,49 @@ def test_calibrate_edge_rejects_unknown_producer_kind() -> None:
         calibrate_edge(spec, n_samples=4)
 
 
+@pytest.mark.parametrize("n_samples", [5, 7, 9, 13, 16])
+def test_calibrate_edge_honors_exact_sample_count(n_samples: int) -> None:
+    """The probe builder must allocate **ceil(n_samples / batch_size)**
+    batches so calibration evaluates the full requested sample size.
+    Floor division silently under-allocated (e.g. ``n_samples=5`` with
+    batch_size=4 yielded 4 samples), so the threshold score landscape
+    was computed on a smaller-than-requested population and the
+    operator wasn't told.
+
+    Regression: report ``n_samples`` must equal the requested count
+    exactly, and τ=0 must keep every sample (volume=1.0 of that
+    population).
+    """
+    spec = EdgeSpec(
+        producer="gaussian_encoder",
+        consumer="gaussian_encoder",
+        label_fn="gaussian_recon_label_fn",
+    )
+    report = calibrate_edge(spec, n_samples=n_samples, thresholds=[0.0])
+    assert report.n_samples == n_samples, (
+        f"calibration evaluated {report.n_samples} samples but operator "
+        f"requested {n_samples}"
+    )
+    # τ=0 keeps every sample ⇒ volume == 1.0 ⇒ the row's "kept" count
+    # equals the full requested population.
+    assert report.sweep[0].volume == 1.0
+
+
+def test_calibrate_edge_rejects_non_positive_n_samples() -> None:
+    """``n_samples <= 0`` must fail loudly — the silent 0-volume
+    sweep would otherwise look like a 'no labels survive' result and
+    mislead the operator."""
+    spec = EdgeSpec(
+        producer="gaussian_encoder",
+        consumer="gaussian_encoder",
+        label_fn="gaussian_recon_label_fn",
+    )
+    with pytest.raises(SystemExit, match="positive"):
+        calibrate_edge(spec, n_samples=0)
+    with pytest.raises(SystemExit, match="positive"):
+        calibrate_edge(spec, n_samples=-3)
+
+
 # ---------------------------------------------------------------------------
 # CLI smoke
 # ---------------------------------------------------------------------------

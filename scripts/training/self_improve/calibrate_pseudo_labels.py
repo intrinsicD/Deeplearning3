@@ -172,7 +172,16 @@ def _build_probe_inputs(
     sweep sees the same distribution as the §6.1 eval probes. For an
     image-shaped consumer we use the eval-registry's probe builder for
     the matching plugin and slice each batch into per-sample tensors.
+
+    Asks the builder for **ceil(n_samples / batch_size)** batches —
+    floor division would silently under-allocate (e.g. ``n_samples=5``
+    with ``batch_size=4`` would produce one batch of 4 and silently
+    evaluate fewer samples than requested, changing the threshold
+    score landscape without raising). The caller still gets exactly
+    ``n_samples`` via the slice below.
     """
+    if n_samples <= 0:
+        raise SystemExit(f"--n-samples must be positive; got {n_samples}")
     from scripts.training.self_improve.eval_registry import (
         build_gaussian_encoder_probe,
         build_lgq_probe,
@@ -188,9 +197,9 @@ def _build_probe_inputs(
             f"calibration probe builder not registered for consumer kind "
             f"{consumer_kind!r}; supported: {sorted(builders)}"
         )
-    probe = builder(
-        seed=seed, n_batches=max(1, n_samples // 4), batch_size=4,
-    )
+    batch_size = 4
+    n_batches = (n_samples + batch_size - 1) // batch_size  # ceiling division
+    probe = builder(seed=seed, n_batches=n_batches, batch_size=batch_size)
     samples: list[torch.Tensor] = []
     for batch in probe:
         for i in range(batch.shape[0]):

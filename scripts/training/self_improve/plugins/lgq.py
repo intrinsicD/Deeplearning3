@@ -206,6 +206,12 @@ class LGQPlugin(ComponentPlugin):
             penalty = self.ewc.penalty(model)
             penalty.backward()
             losses["ewc/penalty"] = float(penalty.detach().cpu().item())
+            # Fold the regularizer's value into the reported total so
+            # ``losses["total"]`` / ``StepReport.loss`` reflect the
+            # actual optimized objective. Both ``total`` and ``penalty``
+            # have already been backwarded so this addition is for the
+            # scalar log only — it doesn't change gradients.
+            total = total + penalty
 
         nn.utils.clip_grad_norm_(
             trainer._param_groups["generator"], cfg.max_grad_norm,

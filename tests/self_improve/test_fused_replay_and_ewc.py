@@ -441,3 +441,49 @@ def test_lgq_ewc_anchors_generator_only() -> None:
     # Smoke-train one step to verify nothing crashes.
     plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
     assert plugin.ewc.num_fisher_updates == 1
+
+
+def test_lgq_reported_total_includes_ewc_penalty() -> None:
+    """The reported step loss must reflect the actual optimized
+    objective, including the EWC penalty. The penalty's
+    ``.backward()`` already contributes to the gradient; the bug was
+    that ``losses["total"]`` (and ``StepReport.loss``) used the
+    pre-penalty scalar and silently understated loss in logs/
+    diagnostics whenever ``lam_ewc`` / ``lam_si`` were non-trivial.
+
+    Mirrors the gaussian_encoder + omnilatent + mmwm + hpwm contract
+    that the reported total = pre-penalty total + penalty.
+    """
+    LGQPlugin = get_plugin("lgq")
+    plugin = LGQPlugin()
+    # Run a couple of warm-up steps so Fisher has accumulated and the
+    # anchor isn't trivially equal to the current weights (otherwise
+    # the penalty is exactly zero and the test is vacuous).
+    plugin.attach_ewc(fisher_decay=0.5, lam_ewc=1e3, lam_si=0.0)
+    for _ in range(2):
+        plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
+    plugin.ewc.snapshot_anchor(plugin.model)
+    # Now perturb the weights so (θ - θ*)² > 0 ⇒ penalty > 0.
+    with torch.no_grad():
+        for p in plugin.model.parameters():
+            if p.requires_grad:
+                p.add_(0.1)
+
+    report = plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
+
+    penalty = report.losses.get("ewc/penalty")
+    assert penalty is not None, "expected EWC penalty in the step report"
+    assert penalty > 0.0, (
+        f"penalty was {penalty}; perturbation didn't make it nonzero"
+    )
+    total = report.losses["total"]
+    # The reported total must include the penalty's contribution
+    # (sum-of-components, not just the task+replay sub-total).
+    # Other report keys: pre-penalty pieces should sum to total -
+    # penalty within float-eps.
+    pre_penalty_total = total - penalty
+    assert pre_penalty_total < total, (
+        f"reported total {total} did not include penalty {penalty}"
+    )
+    # And the StepReport's scalar matches losses["total"].
+    assert report.loss == pytest.approx(total)
