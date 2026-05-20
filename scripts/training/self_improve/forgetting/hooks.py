@@ -121,6 +121,7 @@ def expand_omnilatent_capacity(
     num_tokens: int = 4,
     gate_bias_init: float = -4.0,
     use_transform: bool = True,
+    rebuild_optimizer: bool = True,
 ) -> "LatentNeuralHook":
     """Freeze the backbone and register a fresh hook on OmniLatent.
 
@@ -137,7 +138,17 @@ def expand_omnilatent_capacity(
     - The gate starts at ``sigmoid(gate_bias_init)`` ≈ 0.018 by
       default, so the immediate forward pass is bit-equivalent to the
       pre-expansion forward pass within floating-point tolerance.
+    - With ``rebuild_optimizer=True`` (the default) the plugin's
+      :attr:`_trainer.optimizer` is replaced by a fresh ``AdamW`` over
+      the new hook's parameters. The original optimizer holds
+      references to the *pre-expansion* parameter list — none of those
+      params are trainable anymore — and contains no reference to the
+      new hook's params. Without this rebuild, subsequent
+      ``plugin.train_step`` calls update neither backbone nor hook
+      and the expansion is silently a no-op.
     """
+    import torch
+
     from omnilatent.model.hooks import LatentNeuralHook
 
     model = omnilatent_plugin.model
@@ -173,6 +184,17 @@ def expand_omnilatent_capacity(
     # under model.parameters()).
     for p in hook.parameters():
         p.requires_grad_(True)
+
+    if rebuild_optimizer:
+        # Replace the trainer's pre-expansion optimizer with one that
+        # references only the new hook's parameters. Keep the same
+        # config (lr, weight_decay, betas) as the upstream trainer.
+        omnilatent_plugin._trainer.optimizer = torch.optim.AdamW(
+            hook.parameters(),
+            lr=cfg.learning_rate,
+            weight_decay=cfg.weight_decay,
+            betas=(0.9, 0.95),
+        )
 
     logger.info(
         "registered expansion hook %r on omnilatent (num_tokens=%d, "

@@ -142,16 +142,16 @@ def test_expand_omnilatent_freezes_backbone_and_adds_hook() -> None:
 def test_expansion_then_train_step_does_not_move_backbone() -> None:
     """After expansion, taking a train step updates the hook's
     parameters but leaves the backbone weights unchanged (the
-    forgetting-defense guarantee from §4.4)."""
+    forgetting-defense guarantee from §4.4).
+
+    The expander rebuilds the plugin's optimizer to manage the new
+    hook's params, so a plain ``plugin.train_step`` call after
+    expansion is sufficient — no manual optimizer surgery required.
+    """
     torch.manual_seed(0)
     OmniLatentPlugin = get_plugin("omnilatent")
     plugin = OmniLatentPlugin()
     hook = expand_omnilatent_capacity(plugin, num_tokens=4)
-
-    # Build a fresh optimizer over the hook's parameters only.
-    hook_optimizer = torch.optim.AdamW(hook.parameters(), lr=1e-3)
-    # Replace the plugin's internal optimizer for the train step.
-    plugin._trainer.optimizer = hook_optimizer
 
     backbone_pre = {
         n: p.detach().clone()
@@ -197,3 +197,43 @@ def test_expansion_rejects_wrong_plugin_type() -> None:
     plugin = GaussianEncoderPlugin()
     with pytest.raises(TypeError, match="OmniLatentPlugin"):
         expand_omnilatent_capacity(plugin)
+
+
+def test_expansion_rebuilds_optimizer_over_hook_params() -> None:
+    """After expansion, the plugin's optimizer must reference the new
+    hook's parameters (and only those). Without this rebuild, the
+    optimizer still holds references to the frozen pre-expansion
+    parameter list and ``plugin.train_step`` silently updates nothing.
+    """
+    torch.manual_seed(0)
+    OmniLatentPlugin = get_plugin("omnilatent")
+    plugin = OmniLatentPlugin()
+    hook = expand_omnilatent_capacity(plugin, num_tokens=4)
+
+    # Every parameter the optimizer manages is one of the hook's params.
+    hook_param_ids = {id(p) for p in hook.parameters()}
+    opt = plugin._trainer.optimizer
+    managed_ids = {
+        id(p) for group in opt.param_groups for p in group["params"]
+    }
+    assert managed_ids, "optimizer manages no parameters at all"
+    assert managed_ids.issubset(hook_param_ids), (
+        "optimizer references parameters outside the new hook: "
+        f"{managed_ids - hook_param_ids}"
+    )
+    # And all hook trainable params are present.
+    assert managed_ids == hook_param_ids
+
+
+def test_expansion_opt_out_leaves_optimizer_alone() -> None:
+    """When ``rebuild_optimizer=False`` is requested, the caller owns
+    the optimizer-swap responsibility. The test exists to lock the
+    opt-out contract in case future plugin code grows a separate
+    optimizer-management strategy.
+    """
+    torch.manual_seed(0)
+    OmniLatentPlugin = get_plugin("omnilatent")
+    plugin = OmniLatentPlugin()
+    pre_optimizer = plugin._trainer.optimizer
+    expand_omnilatent_capacity(plugin, num_tokens=4, rebuild_optimizer=False)
+    assert plugin._trainer.optimizer is pre_optimizer
