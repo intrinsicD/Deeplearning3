@@ -14,6 +14,7 @@ from omnilatent.training.trainer import Trainer as _OmniTrainer
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -92,21 +93,168 @@ class OmniLatentPlugin(ComponentPlugin):
             "image": torch.rand(batch_size, cfg.image_channels, cfg.image_size, cfg.image_size),
         }
 
+    # ------------------------------------------------------------------
+    # Phase 4 helpers
+    # ------------------------------------------------------------------
+
+    def _task_loss(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Single forward + criterion on ``batch`` without optimizer step.
+
+        Mirrors the core of :meth:`omnilatent.training.Trainer._train_step`
+        but skips AMP scaling and metrics logging — the orchestrator
+        owns logging in later phases. Returns a scalar loss with
+        autograd attached.
+
+        Builds the per-modality contrastive latent bundle when the
+        batch has ≥ 2 modalities and ``contrastive_weight > 0`` (the
+        same gate the upstream trainer uses). Without this the
+        contrastive component of the loss silently disappears for any
+        multimodal config — silently changing the optimized objective.
+        """
+        batch = {k: v.to(self.device) for k, v in batch.items()}
+        available = list(batch.keys())
+        src, tgt = self._trainer.task_sampler.sample(available)
+
+        model = self._trainer.model
+        latents: dict[str, torch.Tensor] | None = None
+        if len(available) >= 2 and self.config.contrastive_weight > 0:
+            latents = {}
+            for mod in available:
+                enc = model.encode(mod, batch[mod])
+                # Mean-pool content tokens, skipping the modality
+                # indicator at position 0 (matches upstream).
+                latents[mod] = enc[:, 1:].mean(dim=1)
+
+        result = model(
+            source_modality=src,
+            source_data=batch[src],
+            target_modality=tgt,
+            target_data=batch[tgt],
+        )
+        loss_dict = self._trainer.criterion(
+            {tgt: result["output"]},
+            {tgt: batch[tgt]},
+            latents,
+            reasoning_bottleneck=result.get("reasoning_bottleneck"),
+            source_summary=result.get("source_summary"),
+        )
+        return loss_dict["total"]
+
     def train_step(self, batch: dict[str, torch.Tensor]) -> StepReport:
-        losses = self._trainer._train_step(batch)
-        total = float(losses.get("total", 0.0))
-        return StepReport(loss=total, losses={k: float(v) for k, v in losses.items()})
+        """One training step with optional replay + EMA + EWC/SI.
+
+        When EWC is attached we need to (a) add ``penalty`` to the loss
+        before the optimizer step, and (b) accumulate Fisher from the
+        *task* gradient only. We satisfy (b) by backwarding ``task_loss``
+        first and calling ``consolidate`` before adding the penalty's
+        gradient on top.
+        """
+        model = self._trainer.model
+        optimizer = self._trainer.optimizer
+
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+
+        task_loss = self._task_loss(batch)
+        losses: dict[str, float] = {"total": float(task_loss.detach().item())}
+
+        task_loss.backward()
+        if self.ewc is not None:
+            # Fisher snapshot uses task grads only — call before penalty.
+            self.ewc.consolidate(model)
+            penalty = self.ewc.penalty(model)
+            penalty.backward()
+            losses["ewc/penalty"] = float(penalty.detach().item())
+
+        optimizer.step()
+        if self.ewc is not None:
+            self.ewc.post_step(model)
+
+        self._trainer.global_step += 1
+
+        # --- extra-step replay --------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rx = {"image": torch.stack([it.sample for it in items])}
+                optimizer.zero_grad(set_to_none=True)
+                r_loss = self._task_loss(rx)
+                (self.replay_weight * r_loss).backward()
+                optimizer.step()
+                losses["replay/total"] = float(r_loss.detach().item())
+
+        # --- buffer insertion (image-only; later phases handle all modalities)
+        if self.replay_bank is not None and "image" in batch:
+            img = batch["image"]
+            for i in range(img.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    img[i].detach().cpu(),
+                    stored_logits=None,
+                    step=self._trainer.global_step,
+                )
+
+        # --- EMA update ----------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(model)
+
+        return StepReport(loss=losses["total"], losses=losses)
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: image-reconstruction MSE + L1.
+
+        Phase 2 only exercises the image→image autoencoder path; later
+        phases expand to all 16 modality pairs per the design doc §6.1.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import (
+                build_omnilatent_probe,
+            )
+            probe_set = build_omnilatent_probe(
+                image_size=self.config.image_size,
+                image_channels=self.config.image_channels,
+            )
+
+        model = self._trainer.model
+        was_training = model.training
+        model.eval()
+        try:
+            mse_sum = 0.0
+            l1_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                image = batch["image"].to(self.device, non_blocking=True)
+                result = model.reconstruct("image", image)
+                recon = result["output"]
+                mse_sum += float(torch.nn.functional.mse_loss(recon, image).item()) * image.shape[0]
+                l1_sum += float(torch.nn.functional.l1_loss(recon, image).item()) * image.shape[0]
+                n += image.shape[0]
+        finally:
+            model.train(was_training)
+
+        mse = mse_sum / max(n, 1)
+        l1 = l1_sum / max(n, 1)
+        return EvalReport(
+            score=mse,
+            metrics={"image_mse": mse, "image_l1": l1},
+            higher_is_better=False,
+        )
 
     # -- state -------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "model": self._trainer.model.state_dict(),
             "optimizer": self._trainer.optimizer.state_dict(),
             "scaler": self._trainer.scaler.state_dict(),
             "criterion": self._trainer.criterion.state_dict(),
             "global_step": self._trainer.global_step,
         }
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self._trainer.model.load_state_dict(state["model"])
@@ -117,6 +265,7 @@ class OmniLatentPlugin(ComponentPlugin):
         if "criterion" in state:
             self._trainer.criterion.load_state_dict(state["criterion"])
         self._trainer.global_step = int(state.get("global_step", 0))
+        self._load_ema_state(state.get("_ema"))
 
     # -- helpers -----------------------------------------------------------
 

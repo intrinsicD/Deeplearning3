@@ -9,10 +9,12 @@ import torch
 import torch.nn as nn
 
 from lgq.config import LGQConfig
+from lgq.metrics import psnr as _psnr
 from lgq.trainer import LGQTrainer
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -76,17 +78,97 @@ class LGQPlugin(ComponentPlugin):
         return torch.rand(batch_size, cfg.in_channels, cfg.resolution, cfg.resolution)
 
     def train_step(self, batch: torch.Tensor) -> StepReport:
-        losses = self._trainer.step(batch)
-        total = losses["total"]
-        return StepReport(loss=total, losses=dict(losses))
+        """One LGQ training step, optionally extended with replay + EMA update.
+
+        LGQ's :meth:`LGQTrainer.step` is a self-contained
+        generator+discriminator update that internally manages AMP and
+        backward, so we use the simpler **extra-step replay** pattern
+        (a second ``step`` on a replayed mini-batch) rather than fusing
+        gradients into a single backward like ``GaussianEncoderPlugin``.
+        Both are valid forgetting defenses; the fused version is more
+        sample-efficient, the extra-step version is easier to bolt onto
+        a trainer that owns its own optimizer loop.
+        """
+        losses = dict(self._trainer.step(batch))
+
+        # --- replay step ---------------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rx = torch.stack([it.sample for it in items])
+                replay_losses = self._trainer.step(rx)
+                for k, v in replay_losses.items():
+                    losses[f"replay/{k}"] = float(v)
+
+        # --- buffer insertion ---------------------------------------------
+        if self.replay_bank is not None:
+            for i in range(batch.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    batch[i].detach().cpu(),
+                    stored_logits=None,
+                    step=self._trainer.step_count,
+                )
+
+        # --- EMA update ----------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(self._trainer.model)
+
+        total = losses.get("total", 0.0)
+        return StepReport(loss=float(total), losses=losses)
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: PSNR (primary) + reconstruction MSE.
+
+        PSNR is bounded above and behaves smoothly; MSE catches the
+        degenerate-mean reconstruction case PSNR averaging can mask.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import build_lgq_probe
+            probe_set = build_lgq_probe(
+                resolution=self.config.resolution,
+                in_channels=self.config.in_channels,
+            )
+
+        model = self._trainer.model
+        was_training = model.training
+        model.eval()
+        try:
+            psnr_sum = 0.0
+            mse_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                x = batch.to(self.device, non_blocking=True)
+                out = model(x)
+                recon = out["recon"].clamp(0, 1)
+                psnr_sum += float(_psnr(recon, x).item()) * x.shape[0]
+                mse_sum += float(torch.nn.functional.mse_loss(recon, x).item()) * x.shape[0]
+                n += x.shape[0]
+        finally:
+            model.train(was_training)
+
+        psnr_val = psnr_sum / max(n, 1)
+        mse = mse_sum / max(n, 1)
+        return EvalReport(
+            score=psnr_val,
+            metrics={"psnr": psnr_val, "mse": mse},
+            higher_is_better=True,
+        )
 
     # -- state -------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        return self._trainer.state_dict()
+        out = dict(self._trainer.state_dict())
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        self._trainer.load_state_dict(state)
+        trainer_state = {k: v for k, v in state.items() if k != "_ema"}
+        self._trainer.load_state_dict(trainer_state)
+        self._load_ema_state(state.get("_ema"))
 
     # -- helpers -----------------------------------------------------------
 

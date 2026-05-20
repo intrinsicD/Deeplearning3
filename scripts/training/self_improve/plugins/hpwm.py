@@ -22,6 +22,7 @@ from hpwm.model import HPWM
 
 from scripts.training.self_improve.plugins.base import (
     ComponentPlugin,
+    EvalReport,
     StepReport,
 )
 
@@ -173,11 +174,91 @@ class HPWMPlugin(ComponentPlugin):
                 losses[key] = float(v.detach().cpu().item())
 
         self.step_count += 1
+
+        # --- extra-step replay --------------------------------------------
+        # HPWM owns a temporal state; we *don't* replay through it because
+        # replayed clips have no temporal continuity with the fresh batch.
+        # Run replay with a fresh ``None`` temporal state.
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                r_frames = torch.stack([it.sample for it in items]).to(self._device)
+                self.optimizer.zero_grad(set_to_none=True)
+                r_outputs = self._model(r_frames, None)
+                r_loss = r_outputs["loss"]
+                (self.replay_weight * r_loss).backward()
+                nn.utils.clip_grad_norm_(
+                    self._model.parameters(), cfg.max_grad_norm,
+                )
+                self.optimizer.step()
+                # Keep the LR scheduler in step with the optimizer: the
+                # replay branch is a real parameter update, so without
+                # this the cosine/warmup schedule would lag the actual
+                # optimizer step count whenever replay is active and
+                # train at systematically higher LRs than configured.
+                self.scheduler.step()
+                losses["replay/loss"] = float(r_loss.detach().cpu().item())
+
+        # --- buffer insertion --------------------------------------------
+        if self.replay_bank is not None:
+            for i in range(frames.shape[0]):
+                self.replay_bank.insert(
+                    self.name,
+                    frames[i].detach().cpu(),
+                    stored_logits=None,
+                    step=self.step_count,
+                )
+
+        # --- EMA update --------------------------------------------------
+        if self.ema_teacher is not None:
+            self.ema_teacher.update(self._model)
+
         return StepReport(
             loss=losses.get("loss", float(loss.detach().cpu().item())),
             losses=losses,
             grad_norm=float(grad_norm.detach().cpu().item())
             if isinstance(grad_norm, torch.Tensor) else float(grad_norm),
+        )
+
+    @torch.no_grad()
+    def evaluate(self, probe_set: Any | None = None) -> EvalReport:
+        """Score on a probe set: prediction loss + VQ-VAE reconstruction.
+
+        These are the two losses ``hpwm.evaluate`` treats as primary
+        training signals. The three validation signals from
+        ``hpwm/evaluate.py`` (MoD entropy, slot Jaccard, Mamba retention)
+        are deferred to a later phase that loads them via the upstream
+        ``Evaluator`` class.
+        """
+        if probe_set is None:
+            from scripts.training.self_improve.eval_registry import build_hpwm_probe
+            probe_set = build_hpwm_probe(
+                n_frames=self.config.n_frames,
+                resolution=self.config.resolution,
+            )
+
+        was_training = self._model.training
+        self._model.eval()
+        try:
+            pred_sum = 0.0
+            recon_sum = 0.0
+            n = 0
+            for batch in probe_set:
+                frames = batch["frames"].to(self._device, non_blocking=True)
+                out = self._model(frames, None)  # fresh temporal state per probe batch
+                bs = frames.shape[0]
+                pred_sum += float(out["prediction_loss"].item()) * bs
+                recon_sum += float(out["vqvae_recon_loss"].item()) * bs
+                n += bs
+        finally:
+            self._model.train(was_training)
+
+        pred = pred_sum / max(n, 1)
+        recon = recon_sum / max(n, 1)
+        return EvalReport(
+            score=pred,
+            metrics={"prediction_loss": pred, "vqvae_recon_loss": recon},
+            higher_is_better=False,
         )
 
     # -- state -------------------------------------------------------------
@@ -187,12 +268,16 @@ class HPWMPlugin(ComponentPlugin):
         # that snapshot/rollback is bit-faithful. The __init__ above forces
         # DINO to materialize, so these keys are always present on both
         # save and (post-construction) load.
-        return {
+        out: dict[str, Any] = {
             "model": self._model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "step_count": self.step_count,
         }
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         # Ensure DINO is materialized before load — defensive in case a
@@ -205,6 +290,7 @@ class HPWMPlugin(ComponentPlugin):
         if "scheduler" in state:
             self.scheduler.load_state_dict(state["scheduler"])
         self.step_count = int(state.get("step_count", 0))
+        self._load_ema_state(state.get("_ema"))
 
     # -- helpers -----------------------------------------------------------
 
