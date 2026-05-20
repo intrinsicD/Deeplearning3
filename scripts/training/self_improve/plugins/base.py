@@ -101,6 +101,12 @@ class ComponentPlugin(ABC):
     distill_weight: float = 0.5
     #: Number of replay samples drawn per training step.
     replay_batch_size: int = 1
+    #: Weight on the cross-component pseudo-label consistency loss
+    #: (§5). The default is conservative — pseudo-labels never
+    #: dominate the real-data signal — matching the design-doc 30%
+    #: real-data-majority cap (which the orchestrator enforces at the
+    #: batch level; ``pseudo_weight`` shapes the loss-level mix).
+    pseudo_weight: float = 0.3
 
     def attach_replay(
         self,

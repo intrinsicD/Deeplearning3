@@ -169,34 +169,28 @@ def test_attach_ewc_advances_counters(name: str) -> None:
     assert "ewc/penalty" in report.losses
 
 
-def test_hpwm_lr_scheduler_advances_with_replay() -> None:
-    """The replay branch performs a second ``optimizer.step()``; the
-    LR scheduler must advance with it. Without this fix, enabling
-    replay silently trains HPWM at higher LRs than the configured
-    cosine schedule prescribes (the scheduler lags the optimizer by
-    one step per train_step call once the buffer is non-empty).
+def test_hpwm_lr_scheduler_advances_once_per_step() -> None:
+    """One ``optimizer.step()`` per ``train_step`` ⇒ one
+    ``scheduler.step()`` per ``train_step``. With the fused-DER++
+    refactor the scheduler advances exactly once per call regardless
+    of whether the replay buffer is empty or not — there's only ever
+    one optimizer step, fed by ∇(task + replay + der + penalty).
     """
     HPWMPlugin = get_plugin("hpwm")
     plugin = HPWMPlugin()
     bank = ReplayBank(capacity=8, seed=0)
     plugin.attach_replay(bank, batch_size=1)
 
-    initial_scheduler_steps = plugin.scheduler.last_epoch
-
-    # Step 1: buffer is empty, only the main optimizer.step runs ⇒ +1.
+    initial = plugin.scheduler.last_epoch
     plugin.train_step(plugin.make_synthetic_batch(batch_size=1))
     after_step1 = plugin.scheduler.last_epoch
-    assert after_step1 - initial_scheduler_steps == 1, (
-        f"first step (no replay yet) should advance scheduler by 1; "
-        f"got {after_step1 - initial_scheduler_steps}"
-    )
+    assert after_step1 - initial == 1
 
-    # Step 2: buffer is non-empty, both main and replay optimizer.steps
-    # fire ⇒ +2.
+    # Second step has a non-empty buffer; scheduler still advances by 1.
     plugin.train_step(plugin.make_synthetic_batch(batch_size=1))
     after_step2 = plugin.scheduler.last_epoch
-    assert after_step2 - after_step1 == 2, (
-        f"second step (replay active) should advance scheduler by 2; "
+    assert after_step2 - after_step1 == 1, (
+        f"fused-DER++ HPWM step should advance scheduler by 1; "
         f"got {after_step2 - after_step1}"
     )
 

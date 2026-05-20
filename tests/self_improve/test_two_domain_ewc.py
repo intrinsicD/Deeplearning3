@@ -84,13 +84,18 @@ def _train_two_domain(
 
     if mode in ("replay", "ewc"):
         bank = ReplayBank(capacity=256, seed=0)
-        plugin.attach_replay(bank, weight=1.0, batch_size=1)
+        # Deliberately weak replay (``replay_weight=0.3``, no DER):
+        # fused DER++ replay is strong enough on its own that EWC has
+        # no measurable benefit. Weakening replay leaves headroom for
+        # EWC's anchor regularization to bite on the OmniLatent toy.
+        plugin.attach_replay(bank, weight=0.3, der_weight=0.0, batch_size=1)
     if mode == "ewc":
-        # lam_ewc=1e4 is the empirical sweet spot for OmniLatent's tiny
-        # config: large enough to bite, small enough to not block the B
-        # learning entirely. lam_si=0 isolates the EWC effect for this
-        # test; SI is exercised by ``test_ewc.py``.
-        plugin.attach_ewc(fisher_decay=0.9, lam_ewc=1e4, lam_si=0.0)
+        # lam_ewc=1e5 is the empirical sweet spot for OmniLatent's tiny
+        # config with the weak-replay regime above. Larger lambdas
+        # over-regularize (B doesn't learn); smaller lambdas have no
+        # effect. lam_si=0 isolates the EWC effect for this test; SI
+        # is exercised by ``test_ewc.py``.
+        plugin.attach_ewc(fisher_decay=0.9, lam_ewc=1e5, lam_si=0.0)
 
     domain_a = _make_domain(seed=1, center=0.05, n=steps_per_domain)
     domain_b = _make_domain(seed=2, center=0.95, n=steps_per_domain)

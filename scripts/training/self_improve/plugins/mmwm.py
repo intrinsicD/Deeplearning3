@@ -100,13 +100,15 @@ class MMWMPlugin(ComponentPlugin):
 
     def _task_forward(
         self, batch: dict[str, Any], memory_state: Any,
-    ) -> tuple[dict[str, torch.Tensor], Any]:
+    ) -> tuple[dict[str, torch.Tensor], Any, Any]:
         """Forward + criterion on ``batch`` without optimizer step.
 
         Mirrors :meth:`MMWM.trainer.Trainer.train_step` but skips the
         AMP scaler, gradient-clip, logging hooks, eval suite, and the
-        adaptive scheduler. Returns the raw losses dict (tensors) and
-        the new memory state.
+        adaptive scheduler. Returns ``(losses, next_memory, output)`` —
+        the model output is returned (not just the losses) so callers
+        can pull ``output.predicted_next_latent.z_sem`` as the
+        autograd-tracked DER++ teacher signal.
         """
         trainer = self._trainer
         obs_t = trainer._to_packet(batch, "t")
@@ -124,26 +126,25 @@ class MMWMPlugin(ComponentPlugin):
         for k in ("text_target", "vector_target", "image_target", "audio_target"):
             if k in batch:
                 loss_inputs[k] = batch[k].to(trainer.device)
-        # Preserve curriculum / adaptive-phase task weighting. The
-        # upstream trainer reads ``phase.task_multipliers`` from
-        # ``_active_phase()`` and passes them to the loss; if we leave
-        # ``task_multipliers=None`` we silently optimize a different
-        # objective whenever curriculum is enabled.
+        # Preserve curriculum / adaptive-phase task weighting.
         phase = trainer._active_phase()
         task_multipliers = phase.task_multipliers if phase is not None else None
         losses = trainer.loss_fn(
             output, loss_inputs, task_multipliers=task_multipliers,
         )
         next_memory = trainer._apply_reset_mask(output.next_memory, batch)
-        return losses, next_memory
+        return losses, next_memory, output
 
     def train_step(self, batch: dict[str, Any]) -> StepReport:
-        """One MMWM step with optional replay + EMA + EWC/SI.
+        """One MMWM step with fused DER++ replay + optional EMA + EWC/SI.
 
-        Bypasses :meth:`MMWM.trainer.Trainer.train_step` (and its heavy
-        logging-hook payload) to expose the backward call, which we need
-        for EWC's Fisher accumulation. The numerical step is equivalent
-        on the synthetic batches we care about (no AMP, no clip).
+        Section-B followup restructure: the previous "extra-step
+        replay" took a second ``optimizer.step()`` on the replay batch.
+        This version folds the replay task loss and a DER++
+        MSE-consistency term on ``z_sem`` (the predicted next-step
+        semantic latent) into a single backward alongside the main
+        task loss. Bypasses :meth:`MMWM.trainer.Trainer.train_step`
+        and its logging hooks so we own the backward step.
         """
         trainer = self._trainer
         model = trainer.model
@@ -151,9 +152,37 @@ class MMWMPlugin(ComponentPlugin):
 
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        losses_t, new_memory = self._task_forward(batch, self._memory_state)
+        losses_t, new_memory, output = self._task_forward(
+            batch, self._memory_state,
+        )
         total_loss = losses_t["total_loss"]
 
+        # --- Fused DER++ replay -------------------------------------------
+        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
+            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
+            if items:
+                rbatch = _collate_mmwm_items([it.sample for it in items])
+                r_losses, _, r_output = self._task_forward(rbatch, None)
+                total_loss = total_loss + self.replay_weight * r_losses["total_loss"]
+                for k, v in r_losses.items():
+                    if isinstance(v, torch.Tensor):
+                        losses_t.setdefault(f"replay/{k}", v.detach())
+
+                der_items = [it for it in items if it.stored_logits is not None]
+                if der_items:
+                    rd_batch = _collate_mmwm_items(
+                        [it.sample for it in der_items],
+                    )
+                    _, _, rd_output = self._task_forward(rd_batch, None)
+                    z_sem = rd_output.predicted_next_latent.z_sem
+                    stored = torch.stack(
+                        [it.stored_logits for it in der_items],
+                    ).to(trainer.device)
+                    der = nn.functional.mse_loss(z_sem, stored)
+                    total_loss = total_loss + self.der_weight * der
+                    losses_t["der_consistency"] = der.detach()
+
+        # --- Backward / Fisher / step / SI -------------------------------
         total_loss.backward()
         if self.ewc is not None:
             self.ewc.consolidate(model)
@@ -175,26 +204,17 @@ class MMWMPlugin(ComponentPlugin):
         if self.ewc is not None:
             clean["ewc/penalty"] = float(penalty.detach().item())
 
-        # --- extra-step replay --------------------------------------------
-        if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
-            items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
-            if items:
-                rbatch = _collate_mmwm_items([it.sample for it in items])
-                optimizer.zero_grad(set_to_none=True)
-                r_losses, _ = self._task_forward(rbatch, None)
-                (self.replay_weight * r_losses["total_loss"]).backward()
-                optimizer.step()
-                for k, v in r_losses.items():
-                    if isinstance(v, torch.Tensor):
-                        clean[f"replay/{k}"] = float(v.detach().cpu().item())
-
-        # --- buffer insertion (slice each sample out of the batch) --------
+        # --- buffer insertion --------------------------------------------
+        # Store ``predicted_next_latent.z_sem`` per-sample as the DER++
+        # teacher signal. Detach + move to CPU so the buffer doesn't
+        # pin GPU memory.
         if self.replay_bank is not None:
-            for sample in _split_mmwm_batch(batch):
+            z_sem = output.predicted_next_latent.z_sem.detach().cpu()
+            for i, sample in enumerate(_split_mmwm_batch(batch)):
                 self.replay_bank.insert(
                     self.name,
                     sample,
-                    stored_logits=None,
+                    stored_logits=z_sem[i] if i < z_sem.shape[0] else None,
                     step=trainer.global_step,
                 )
 
