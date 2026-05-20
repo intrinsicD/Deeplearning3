@@ -172,3 +172,71 @@ def test_status_filters_to_self_improve_jobs_only(client: TestClient) -> None:
     JOB.status = {"state": "running", "kind": "train:mmwm_minari", "step": 5}
     r = client.get("/api/self-improve/status")
     assert r.json() == {"state": "idle", "kind": None}
+
+
+def test_stop_does_not_kill_unrelated_training_job(client: TestClient) -> None:
+    """``/api/self-improve/stop`` must NOT terminate jobs of other kinds
+    that happen to occupy the shared :data:`JOB` slot — otherwise an
+    operator who clicks "stop" in the self-improve UI while a Minari
+    training run is happening will silently kill the training run.
+    """
+    # Simulate an active training job (no real subprocess; just the
+    # state shape that ``snapshot()`` returns for a running job).
+    class _FakeProc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self):
+            return 0
+
+    fake_proc = _FakeProc()
+    JOB.proc = fake_proc
+    JOB.status = {
+        "state": "running",
+        "kind": "train:mmwm_minari",
+        "step": 5,
+    }
+
+    r = client.post("/api/self-improve/stop")
+    assert r.status_code == 200
+    # Training job survives.
+    assert JOB.proc is fake_proc, "self-improve stop terminated a foreign job"
+    assert JOB.status.get("kind") == "train:mmwm_minari"
+    assert JOB.status.get("state") == "running"
+    assert not getattr(fake_proc, "terminated", False), (
+        "stop endpoint called terminate() on a non-self-improve subprocess"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pydantic model hygiene — fields can't drift between request payloads
+# ---------------------------------------------------------------------------
+
+
+def test_minari_download_request_still_carries_force_download() -> None:
+    """Regression for an earlier change that accidentally moved
+    ``force_download`` off ``MinariDownloadRequest`` and onto
+    ``SelfImproveStartRequest`` — ``/api/minari/download`` reads
+    ``req.force_download`` and would raise ``AttributeError`` at
+    request time without this field.
+    """
+    from apps.control_center.server import (
+        MinariDownloadRequest,
+        SelfImproveStartRequest,
+    )
+
+    req = MinariDownloadRequest(dataset_id="some/ds")
+    assert hasattr(req, "force_download")
+    assert req.force_download is False
+
+    # Inverse: SelfImproveStartRequest must NOT carry force_download.
+    si = SelfImproveStartRequest()
+    assert not hasattr(si, "force_download"), (
+        "force_download leaked onto SelfImproveStartRequest; it belongs "
+        "on MinariDownloadRequest only"
+    )

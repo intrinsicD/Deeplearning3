@@ -53,6 +53,10 @@ app.add_middleware(
 
 class MinariDownloadRequest(BaseModel):
     dataset_id: str
+    # Read by ``/api/minari/download``. An earlier change accidentally
+    # subsumed this field into ``SelfImproveStartRequest`` (the
+    # following class), which broke the Minari endpoint at runtime.
+    force_download: bool = False
 
 
 class SelfImproveStartRequest(BaseModel):
@@ -71,7 +75,6 @@ class SelfImproveStartRequest(BaseModel):
     dry_run: bool = False
     vault_root: Optional[str] = None
     log_level: str = "INFO"
-    force_download: bool = False
 
 
 class TrainStartRequest(BaseModel):
@@ -358,7 +361,23 @@ def self_improve_start(req: SelfImproveStartRequest) -> Dict[str, Any]:
 
 @app.post("/api/self-improve/stop")
 def self_improve_stop() -> Dict[str, Any]:
-    """Stop the active self-improve subprocess (no-op if none)."""
+    """Stop the active self-improve subprocess.
+
+    No-op (returns the current snapshot) when:
+
+    - no job is running, or
+    - the active job is *not* a self-improve job (e.g. a Minari
+      training run started via ``/api/train/start``).
+
+    The shared :data:`JOB` slot means a naive ``JOB.stop()`` here would
+    terminate any active job, including unrelated training runs — that
+    contradicts the endpoint contract and was a real footgun for
+    operators running both pipelines on the same host.
+    """
+    snap = JOB.snapshot()
+    if snap.get("kind") != "self-improve":
+        # Leave whatever else is running alone.
+        return snap
     return JOB.stop()
 
 
