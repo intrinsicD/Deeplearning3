@@ -233,6 +233,42 @@ def test_mmwm_plugin_passes_curriculum_task_multipliers() -> None:
     )
 
 
+def test_mmwm_plugin_eval_uses_curriculum_task_multipliers() -> None:
+    """The plugin's eval path also must respect curriculum
+    multipliers — the upstream trainer's eval reads
+    ``phase.task_multipliers`` from ``_active_phase()`` so the eval
+    score matches the actual training objective. If we drop this on
+    the eval side, scores diverge from training even though training
+    behavior is unchanged, which mis-prioritizes the scheduler and
+    can trigger spurious rollbacks.
+    """
+    from unittest.mock import patch
+
+    MMWMPlugin = get_plugin("mmwm")
+    plugin = MMWMPlugin()
+
+    seen: list = []
+    real_loss_fn = plugin._trainer.loss_fn
+
+    def _spy_loss_fn(output, inputs, *, task_multipliers=None, **kwargs):
+        seen.append(task_multipliers)
+        return real_loss_fn(
+            output, inputs, task_multipliers=task_multipliers, **kwargs,
+        )
+
+    class _FakePhase:
+        task_multipliers = {"vector_pred_loss": 3.0, "latent_dyn_loss": 0.25}
+
+    plugin._trainer.loss_fn = _spy_loss_fn
+    with patch.object(plugin._trainer, "_active_phase", return_value=_FakePhase()):
+        plugin.evaluate()
+
+    assert len(seen) >= 1, "loss_fn was not called during evaluate"
+    assert all(s == _FakePhase.task_multipliers for s in seen), (
+        f"task_multipliers were dropped on eval: got {seen!r}"
+    )
+
+
 def test_omnilatent_plugin_builds_contrastive_latents_when_enabled() -> None:
     """When the batch has >=2 modalities and contrastive_weight > 0,
     the OmniLatent plugin must pass per-modality latents to the

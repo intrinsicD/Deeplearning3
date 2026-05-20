@@ -266,7 +266,20 @@ class MMWMPlugin(ComponentPlugin):
                 for k in ("text_target", "vector_target", "image_target", "audio_target"):
                     if k in batch:
                         loss_inputs[k] = batch[k].to(self._trainer.device)
-                losses = self._trainer.loss_fn(output, loss_inputs, task_multipliers=None)
+                # Match the upstream trainer's eval path: it weights the
+                # eval loss by the active curriculum / adaptive phase
+                # multipliers from ``_active_phase()``. Leaving this at
+                # ``None`` drifts the plugin's eval score away from the
+                # actual training objective whenever a curriculum is
+                # configured, which then mis-prioritizes the scheduler
+                # and triggers incorrect rollbacks.
+                phase = self._trainer._active_phase()
+                task_multipliers = (
+                    phase.task_multipliers if phase is not None else None
+                )
+                losses = self._trainer.loss_fn(
+                    output, loss_inputs, task_multipliers=task_multipliers,
+                )
                 bs = action.shape[0]
                 total_sum += float(losses["total_loss"].item()) * bs
                 if "latent_dyn_loss" in losses:
@@ -295,6 +308,9 @@ class MMWMPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -305,6 +321,7 @@ class MMWMPlugin(ComponentPlugin):
             self._trainer.loss_fn.load_state_dict(state["loss_fn"])
         self._trainer.global_step = int(state.get("global_step", 0))
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
 
 def _split_mmwm_batch(batch: dict[str, Any]) -> list[dict[str, Any]]:

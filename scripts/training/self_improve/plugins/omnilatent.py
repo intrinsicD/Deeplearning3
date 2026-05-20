@@ -304,6 +304,9 @@ class OmniLatentPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -316,6 +319,7 @@ class OmniLatentPlugin(ComponentPlugin):
             self._trainer.criterion.load_state_dict(state["criterion"])
         self._trainer.global_step = int(state.get("global_step", 0))
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
     # -- helpers -----------------------------------------------------------
 

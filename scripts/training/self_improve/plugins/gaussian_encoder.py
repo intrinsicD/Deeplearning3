@@ -218,14 +218,20 @@ class GaussianEncoderPlugin(ComponentPlugin, PluginPseudoLabelConsumer):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        # Strip EMA before delegating; the underlying GaussianTrainer
-        # doesn't know that key and would mishandle it.
-        trainer_state = {k: v for k, v in state.items() if k != "_ema"}
+        # Strip EMA/EWC before delegating; the underlying GaussianTrainer
+        # doesn't know those keys and would mishandle them.
+        trainer_state = {
+            k: v for k, v in state.items() if k not in ("_ema", "_ewc")
+        }
         self._trainer.load_state_dict(trainer_state)
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
 
 __all__ = ["GaussianEncoderPlugin"]

@@ -217,3 +217,129 @@ def test_ewc_penalty_actually_affects_gradients() -> None:
         f"lam_ewc=1e6 did not reduce drift: "
         f"strong={drift_strong_ewc:.4e} vs none={drift_no_ewc:.4e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Persistence — vault rollback must restore EWC/SI state alongside weights
+# ---------------------------------------------------------------------------
+
+
+# All plugins that wire EWC into their train_step.
+_EWC_WIRED_PLUGINS_ALL = ("omnilatent", "mmwm", "gaussian_encoder", "hpwm")
+
+
+@pytest.mark.parametrize("name", list(_EWC_WIRED_PLUGINS_ALL))
+def test_ewc_state_round_trips_through_state_dict(name: str) -> None:
+    """The vault stores ``plugin.state_dict()`` opaquely; if the EWC
+    regularizer's state isn't included there, ``rollback()`` rewinds
+    model weights but leaves Fisher / omega / anchor at the
+    post-regression trajectory's values. Subsequent penalties are then
+    computed against stale importance statistics, breaking rollback
+    fidelity.
+
+    Round-trip protocol:
+      1. Build a plugin, attach EWC.
+      2. Take a few steps so Fisher / omega / counters diverge from
+         their freshly-initialized state.
+      3. Capture ``state_dict()``.
+      4. Build a fresh plugin (no EWC), call ``load_state_dict``.
+      5. Verify the loaded plugin's ewc exists with matching decay /
+         lambdas / counters, and that Fisher / omega / anchor tensors
+         are bit-identical to the saved ones.
+    """
+    cls = get_plugin(name)
+    try:
+        plugin = cls()
+    except ImportError as exc:  # pragma: no cover - env-specific
+        pytest.skip(f"{name}: missing dependency ({exc})")
+
+    plugin.attach_ewc(fisher_decay=0.7, lam_ewc=3.5, lam_si=1.5)
+    for _ in range(3):
+        plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
+
+    expected_fisher = {
+        k: v.detach().clone() for k, v in plugin.ewc.fisher.items()
+    }
+    expected_omega = {
+        k: v.detach().clone() for k, v in plugin.ewc.omega.items()
+    }
+    expected_anchor = {
+        k: v.detach().clone() for k, v in plugin.ewc.anchor.items()
+    }
+    expected_fisher_updates = plugin.ewc.num_fisher_updates
+    expected_si_updates = plugin.ewc.num_si_updates
+
+    saved = plugin.state_dict()
+    assert "_ewc" in saved, f"{name}: state_dict missing _ewc key"
+
+    fresh = cls()
+    assert fresh.ewc is None
+    fresh.load_state_dict(saved)
+
+    assert fresh.ewc is not None, (
+        f"{name}: load_state_dict did not reattach EWC from checkpoint"
+    )
+    assert fresh.ewc.fisher_decay == pytest.approx(0.7)
+    assert fresh.ewc.lam_ewc == pytest.approx(3.5)
+    assert fresh.ewc.lam_si == pytest.approx(1.5)
+    assert fresh.ewc.num_fisher_updates == expected_fisher_updates
+    assert fresh.ewc.num_si_updates == expected_si_updates
+    for k, expected in expected_fisher.items():
+        assert torch.equal(fresh.ewc.fisher[k], expected), (
+            f"{name}: Fisher tensor {k!r} drifted across save/load"
+        )
+    for k, expected in expected_omega.items():
+        assert torch.equal(fresh.ewc.omega[k], expected), (
+            f"{name}: omega tensor {k!r} drifted across save/load"
+        )
+    for k, expected in expected_anchor.items():
+        assert torch.equal(fresh.ewc.anchor[k], expected), (
+            f"{name}: anchor tensor {k!r} drifted across save/load"
+        )
+
+
+def test_ewc_state_persistence_survives_vault_rollback(tmp_path) -> None:
+    """End-to-end with a vault: after a regression triggers a
+    rollback, the restored plugin's EWC regularizer matches the
+    saved state — not the post-regression trajectory's stale values.
+    """
+    from scripts.training.self_improve import EvalReport, Vault
+
+    cls = get_plugin("gaussian_encoder")
+    plugin = cls()
+    plugin.attach_ewc(fisher_decay=0.7, lam_ewc=1.0, lam_si=0.5)
+    for _ in range(3):
+        plugin.train_step(plugin.make_synthetic_batch(batch_size=2))
+
+    pre_fisher = {k: v.detach().clone() for k, v in plugin.ewc.fisher.items()}
+    pre_anchor = {k: v.detach().clone() for k, v in plugin.ewc.anchor.items()}
+
+    vault = Vault(tmp_path / "vault")
+    vault.save(
+        "gaussian_encoder",
+        plugin,
+        EvalReport(score=0.01, metrics={"a": 0.01, "b": 0.01}, higher_is_better=False),
+        step=3,
+    )
+
+    # Corrupt EWC state in place (simulates the post-regression drift
+    # that an unrolled-back rollback would leave behind).
+    for k in plugin.ewc.fisher:
+        plugin.ewc.fisher[k].mul_(0.0).add_(99.0)
+    for k in plugin.ewc.anchor:
+        plugin.ewc.anchor[k].mul_(0.0).add_(-99.0)
+    plugin.ewc.num_fisher_updates = 9999
+
+    # Rollback should restore the saved EWC state.
+    snap_id = vault.best("gaussian_encoder")
+    vault.rollback("gaussian_encoder", plugin, snapshot_id=snap_id)
+
+    for k, expected in pre_fisher.items():
+        assert torch.equal(plugin.ewc.fisher[k], expected), (
+            f"Fisher tensor {k!r} not restored after rollback"
+        )
+    for k, expected in pre_anchor.items():
+        assert torch.equal(plugin.ewc.anchor[k], expected), (
+            f"anchor tensor {k!r} not restored after rollback"
+        )
+    assert plugin.ewc.num_fisher_updates != 9999

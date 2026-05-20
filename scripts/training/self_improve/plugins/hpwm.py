@@ -316,6 +316,9 @@ class HPWMPlugin(ComponentPlugin):
         ema = self._ema_state()
         if ema is not None:
             out["_ema"] = ema
+        ewc = self._ewc_state()
+        if ewc is not None:
+            out["_ewc"] = ewc
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -330,6 +333,7 @@ class HPWMPlugin(ComponentPlugin):
             self.scheduler.load_state_dict(state["scheduler"])
         self.step_count = int(state.get("step_count", 0))
         self._load_ema_state(state.get("_ema"))
+        self._load_ewc_state(state.get("_ewc"))
 
     # -- helpers -----------------------------------------------------------
 
