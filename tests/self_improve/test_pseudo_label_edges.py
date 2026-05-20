@@ -269,3 +269,218 @@ def test_orchestrator_clears_pending_labels_even_on_no_match(
     )
     orch.run(1)
     assert plugin._pending_pseudo_labels is None
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator finalizes the broker on construction (startup validation)
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_finalizes_strict_acyclic_broker_with_cycle(
+    tmp_path: Path,
+) -> None:
+    """The orchestrator must call ``broker.finalize()`` so the §5.3
+    startup graph validation runs. Without that call, a strict-acyclic
+    broker with cyclic edges would silently accept the config — the
+    same config that ``finalize`` rejects.
+    """
+    cls = get_plugin("gaussian_encoder")
+    plugin_a = cls()
+    plugin_b = cls()
+
+    vault = Vault(tmp_path / "vault")
+    broker = PseudoLabelBroker(vault, strict_acyclic=True)
+    broker.register_producer("a", plugin_a)
+    broker.register_producer("b", plugin_b)
+    # A↔B cycle: must be rejected at orchestrator construction.
+    broker.register_edge(
+        EdgeConfig("a", "b"), label_fn=lambda s, p: (s, 1.0),
+    )
+    broker.register_edge(
+        EdgeConfig("b", "a"), label_fn=lambda s, p: (s, 1.0),
+    )
+
+    with pytest.raises(ValueError, match="cycle"):
+        Orchestrator(
+            {"a": plugin_a, "b": plugin_b},
+            scheduler=RoundRobinScheduler(["a", "b"]),
+            pseudo_label_broker=broker,
+        )
+
+
+def test_orchestrator_finalizes_non_strict_broker_missing_guards(
+    tmp_path: Path,
+) -> None:
+    """Non-strict path: cyclic edges must declare ``min_stale_steps``
+    and ``confidence_threshold`` above the floor. A configuration that
+    omits the guards must be rejected at orchestrator construction.
+    """
+    cls = get_plugin("gaussian_encoder")
+    plugin_a = cls()
+    plugin_b = cls()
+
+    vault = Vault(tmp_path / "vault")
+    broker = PseudoLabelBroker(vault, strict_acyclic=False)
+    broker.register_producer("a", plugin_a)
+    broker.register_producer("b", plugin_b)
+    # Cyclic edges with min_stale_steps below the floor.
+    broker.register_edge(
+        EdgeConfig("a", "b", min_stale_steps=10, confidence_threshold=0.5),
+        label_fn=lambda s, p: (s, 1.0),
+    )
+    broker.register_edge(
+        EdgeConfig("b", "a", min_stale_steps=10, confidence_threshold=0.5),
+        label_fn=lambda s, p: (s, 1.0),
+    )
+
+    with pytest.raises(ValueError, match="min_stale_steps"):
+        Orchestrator(
+            {"a": plugin_a, "b": plugin_b},
+            scheduler=RoundRobinScheduler(["a", "b"]),
+            pseudo_label_broker=broker,
+        )
+
+
+def test_orchestrator_finalize_is_idempotent_with_pre_finalized_broker(
+    tmp_path: Path,
+) -> None:
+    """Passing a broker that the caller already finalized works — the
+    orchestrator's second ``finalize`` call is a no-op."""
+    broker, _producer, consumer_name = _make_producer_and_broker(tmp_path)
+    # Broker was already finalized by ``_make_producer_and_broker``.
+    cls = get_plugin("gaussian_encoder")
+    consumer = cls()
+    orch = Orchestrator(
+        {consumer_name: consumer},
+        scheduler=RoundRobinScheduler([consumer_name]),
+        eval_every=0,
+        pseudo_label_broker=broker,
+    )
+    orch.run(1)
+    # Sanity: the broker can still emit labels after the double
+    # finalize.
+    assert broker._finalized is True
+
+
+# ---------------------------------------------------------------------------
+# Partial confidence-gating ⇒ surviving subset still trains
+# ---------------------------------------------------------------------------
+
+
+def _build_partial_confidence_broker(
+    tmp_path: Path, threshold: float, conf_per_sample: list[float],
+) -> tuple[PseudoLabelBroker, str]:
+    """Helper: builds a broker whose label_fn returns a per-sample
+    confidence drawn from ``conf_per_sample`` in order. The producer
+    plugin's identity doesn't matter — the label_fn just returns the
+    sample back unchanged.
+
+    Returns ``(broker, consumer_name)``.
+    """
+    cls = get_plugin("gaussian_encoder")
+    producer = cls()
+    consumer_name = "gaussian_encoder"
+
+    vault = Vault(tmp_path / "vault")
+    vault.save(
+        "partial_producer", producer, producer.evaluate(), step=0,
+    )
+
+    broker = PseudoLabelBroker(vault, strict_acyclic=False)
+    broker.register_producer("partial_producer", producer)
+
+    queue = list(conf_per_sample)
+
+    def _label_fn(sample: torch.Tensor, _producer) -> tuple[torch.Tensor, float]:
+        # Return ``sample`` itself as the label so the consistency
+        # loss is well-defined (student must match its own input ⇒
+        # perfect zero when the student is the identity, but with
+        # random init it just contributes a real gradient signal).
+        conf = queue.pop(0) if queue else 0.0
+        return sample.clone(), conf
+
+    broker.register_edge(
+        EdgeConfig(
+            "partial_producer", consumer_name,
+            min_stale_steps=0, confidence_threshold=threshold,
+        ),
+        label_fn=_label_fn,
+    )
+    broker.finalize()
+    return broker, consumer_name
+
+
+def test_apply_pending_labels_consumes_partial_subset(tmp_path: Path) -> None:
+    """When confidence gating drops *some* (not all) samples, the
+    consumer must still train on the surviving subset rather than
+    skipping the whole batch — the broker reports survivor indices for
+    exactly this purpose.
+
+    Trajectory: 4 samples, threshold 0.6, confidences [0.1, 0.7, 0.4,
+    0.9] ⇒ 2 survive (positions 1 and 3). The consumer's step report
+    should carry a ``pseudo/`` key with ``n_kept = 2`` and no
+    ``skipped`` indicator.
+    """
+    broker, consumer_name = _build_partial_confidence_broker(
+        tmp_path, threshold=0.6, conf_per_sample=[0.1, 0.7, 0.4, 0.9],
+    )
+
+    cls = get_plugin("gaussian_encoder")
+    consumer = cls()
+
+    batch = torch.rand(4, 1, 28, 28)
+    raw_inputs = [batch[i] for i in range(batch.shape[0])]
+    consumer._pending_pseudo_labels = broker.sample(consumer_name, raw_inputs)
+    # Pre-condition: broker returned a batch with 2 surviving samples
+    # and indices [1, 3].
+    assert len(consumer._pending_pseudo_labels) == 1
+    pseudo_batch = consumer._pending_pseudo_labels[0]
+    assert len(pseudo_batch.labels) == 2
+    assert pseudo_batch.indices == [1, 3]
+
+    report = consumer.train_step(batch)
+    keys = list(report.losses)
+    assert any(k.startswith("pseudo/") and not k.endswith("/skipped")
+               for k in keys), (
+        f"partial-confidence batch was dropped; got keys {keys}"
+    )
+    # n_kept reported explicitly so an operator can see what's happening.
+    n_kept_keys = [k for k in keys if k.endswith("/n_kept")]
+    assert n_kept_keys
+    assert report.losses[n_kept_keys[0]] == 2.0
+
+
+def test_apply_pending_labels_handles_full_drop(tmp_path: Path) -> None:
+    """If every sample fails confidence gating, the broker emits no
+    batch and the consumer's step proceeds without a pseudo-loss
+    (no ``pseudo/`` key in the step report).
+    """
+    broker, consumer_name = _build_partial_confidence_broker(
+        tmp_path, threshold=0.9, conf_per_sample=[0.1, 0.2, 0.3, 0.4],
+    )
+
+    cls = get_plugin("gaussian_encoder")
+    consumer = cls()
+
+    batch = torch.rand(4, 1, 28, 28)
+    raw_inputs = [batch[i] for i in range(batch.shape[0])]
+    consumer._pending_pseudo_labels = broker.sample(consumer_name, raw_inputs)
+    # Broker emits no batch (per the all-dropped contract from phase 7).
+    assert consumer._pending_pseudo_labels == []
+
+    report = consumer.train_step(batch)
+    assert not any(k.startswith("pseudo/") for k in report.losses)
+
+
+def test_register_edge_rejected_after_finalize(tmp_path: Path) -> None:
+    """Once finalized, the broker's graph is frozen — any further
+    ``register_edge`` must raise so the validation pass stays
+    authoritative.
+    """
+    vault = Vault(tmp_path / "vault")
+    broker = PseudoLabelBroker(vault, strict_acyclic=False)
+    broker.finalize()
+    with pytest.raises(RuntimeError, match="frozen"):
+        broker.register_edge(
+            EdgeConfig("a", "b"), label_fn=lambda s, p: (s, 1.0),
+        )

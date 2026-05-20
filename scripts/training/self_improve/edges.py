@@ -143,11 +143,17 @@ def apply_pending_labels(
     tensor (zero if no labels queued); ``log_dict`` carries per-producer
     consistency values for the step report.
 
-    The function only consumes label batches whose ``inputs`` happen to
-    match ``inputs`` element-wise (the broker guarantees this when the
-    orchestrator passes the same raw batch to ``broker.sample`` and to
-    ``train_step``). This avoids accidentally consuming a stale batch
-    whose shapes don't align.
+    Confidence gating in the broker may drop *some* (not all) samples
+    from a producer's batch — the broker reports the surviving subset
+    along with ``indices`` recording each survivor's position in the
+    consumer's raw input list. We index ``student_recon`` / ``inputs``
+    by those positions so the surviving subset trains, rather than
+    dropping the whole batch the moment any sample fails the threshold.
+
+    Batches whose ``indices`` don't fit inside ``student_recon`` (e.g.
+    a stale batch from an earlier step) are skipped — the broker should
+    never produce these in practice but the guard keeps the function
+    safe to call from any train_step.
     """
     log: dict[str, float] = {}
     batches = plugin.pop_pending_labels()
@@ -162,17 +168,25 @@ def apply_pending_labels(
         confidences = torch.tensor(
             list(b.confidences), dtype=torch.float32,
         ) if isinstance(b.confidences, list) else b.confidences
-        # The broker keeps inputs/labels size-aligned to *its own*
-        # sample list (phase-7 fix). We need them aligned to the
-        # student's input batch as well — drop the broker batch if
-        # its shape doesn't match.
-        if labels.shape[0] != student_recon.shape[0]:
+        indices = list(b.indices) if b.indices else list(range(labels.shape[0]))
+
+        if any(i < 0 or i >= student_recon.shape[0] for i in indices):
+            log[f"pseudo/{b.producer}/out_of_range"] = float(len(indices))
+            continue
+        if len(indices) != labels.shape[0]:
             log[f"pseudo/{b.producer}/skipped"] = float(labels.shape[0])
             continue
+
+        idx = torch.tensor(indices, dtype=torch.long, device=student_recon.device)
+        # Index-select the surviving subset from the student's batch so
+        # the MSE aligns row-by-row with the surviving labels.
+        student_subset = student_recon.index_select(0, idx)
+        input_subset = inputs.index_select(0, idx)
         term = image_consistency_loss(
-            inputs, student_recon, labels, confidences,
+            input_subset, student_subset, labels, confidences,
         )
         log[f"pseudo/{b.producer}"] = float(term.detach().item())
+        log[f"pseudo/{b.producer}/n_kept"] = float(len(indices))
         total = term if total is None else total + term
 
     if total is None:

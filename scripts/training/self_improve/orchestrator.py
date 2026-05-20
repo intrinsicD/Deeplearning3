@@ -203,7 +203,20 @@ class Orchestrator:
         # resulting batches onto ``plugin._pending_pseudo_labels``. The
         # plugin consults the slot and folds a consistency loss into
         # its main backward.
+        #
+        # We finalize the broker here so the startup graph validation
+        # (cycle detection in ``--strict-acyclic`` mode, or per-edge
+        # guard-floor checks otherwise) runs before any training step.
+        # Without this call the broker's safety contract is silently
+        # bypassed — cyclic configs that should fail fast would happily
+        # run, permitting unstable label feedback loops. ``finalize`` is
+        # idempotent for already-finalized brokers (its second call is
+        # a no-op), but the broker raises if the same finalized broker
+        # is re-finalized with a different graph; the orchestrator
+        # always owns a single broker per run so that's fine.
         self.pseudo_label_broker = pseudo_label_broker
+        if pseudo_label_broker is not None:
+            pseudo_label_broker.finalize()
 
         # --- Compute budget (§6.2) --------------------------------------
         # ``compute_budget`` can be a single int (applied to every
