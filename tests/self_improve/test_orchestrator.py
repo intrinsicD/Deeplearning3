@@ -169,6 +169,90 @@ def test_orchestrator_matches_direct_training_hpwm() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_run_report_steps_are_per_call_not_cumulative() -> None:
+    """``run(N)`` must report ``N`` steps for its own invocation, not
+    ``N + (everything ever)``. Without this, code that reuses an
+    orchestrator (staged training, periodic checkpoint loops) sees
+    inflated counts and can take incorrect control decisions.
+    """
+    torch.manual_seed(0)
+    GaussianEncoderPlugin = get_plugin("gaussian_encoder")
+    plugin = GaussianEncoderPlugin()
+
+    orch = Orchestrator(
+        {"gaussian_encoder": plugin},
+        scheduler=RoundRobinScheduler(["gaussian_encoder"]),
+        eval_every=0,
+    )
+
+    first = orch.run(7)
+    assert first.total_steps == 7
+    assert first.steps_per_component["gaussian_encoder"] == 7
+    # Step-loss list is also per-call.
+    assert len(first.step_losses["gaussian_encoder"]) == 7
+
+    second = orch.run(3)
+    assert second.total_steps == 3
+    assert second.steps_per_component["gaussian_encoder"] == 3
+    assert len(second.step_losses["gaussian_encoder"]) == 3
+
+    third = orch.run(0)
+    assert third.total_steps == 0
+    assert third.steps_per_component["gaussian_encoder"] == 0
+    assert third.step_losses["gaussian_encoder"] == []
+
+
+def test_run_report_rollbacks_are_per_call(tmp_path: Path) -> None:
+    """Same per-call semantics for the rollbacks counter."""
+    torch.manual_seed(0)
+    GaussianEncoderPlugin = get_plugin("gaussian_encoder")
+    plugin = GaussianEncoderPlugin()
+
+    vault = Vault(tmp_path / "vault")
+    eval_registry = EvalRegistry.with_defaults(["gaussian_encoder"])
+
+    # Seed the vault with the *real* baseline so rollback restores
+    # consistent (params, score) and the post-rollback eval doesn't
+    # trigger another spurious regression.
+    from scripts.training.self_improve import SyntheticDataStream
+    stream = SyntheticDataStream(batch_size=2)
+    for _ in range(3):
+        plugin.train_step(stream.next(plugin, batch_size=2))
+    baseline_report = plugin.evaluate(eval_registry.get("gaussian_encoder"))
+    vault.save("gaussian_encoder", plugin, baseline_report, step=3)
+
+    orch = Orchestrator(
+        {"gaussian_encoder": plugin},
+        scheduler=RoundRobinScheduler(["gaussian_encoder"]),
+        eval_registry=eval_registry,
+        vault=vault,
+        eval_every=1,
+        # Non-trivial tolerance: after rollback, a normal train step
+        # may nudge the eval score slightly above the saved best, but
+        # not by enough to count as a regression.
+        rollback_tol=0.05,
+    )
+
+    # First run: injection + 1 step → at least 1 rollback.
+    with torch.no_grad():
+        for p in plugin.model.parameters():
+            p.add_(torch.ones_like(p))
+    first = orch.run(1)
+    assert first.rollbacks["gaussian_encoder"] >= 1
+    first_rollbacks = first.rollbacks["gaussian_encoder"]
+
+    # Second run with no further regression injected: should report 0
+    # rollbacks for this call, even though the orchestrator's persistent
+    # counter still holds the previous total.
+    second = orch.run(1)
+    assert second.rollbacks["gaussian_encoder"] == 0, (
+        f"second run reported {second.rollbacks['gaussian_encoder']} "
+        f"rollbacks (cumulative leakage); expected 0"
+    )
+    # Persistent counter is still at the earlier value.
+    assert orch._rollbacks["gaussian_encoder"] == first_rollbacks
+
+
 def test_orchestrator_evaluates_and_snapshots(tmp_path: Path) -> None:
     """With ``eval_every`` set and a vault attached, the orchestrator
     saves at least one snapshot per component over the course of the run.

@@ -122,10 +122,27 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def run(self, max_steps: int) -> RunReport:
-        """Execute ``max_steps`` training steps and return a summary."""
+        """Execute ``max_steps`` training steps and return a summary.
+
+        The returned :class:`RunReport` reports counts **for this
+        invocation only** — staged training that reuses one orchestrator
+        across multiple ``run`` calls sees per-call deltas, not the
+        cumulative totals. Persistent counters
+        (``self._steps_per_component`` / ``self._rollbacks``) keep
+        accumulating across calls for the scheduler's benefit, but the
+        report is a snapshot of "what happened on this call".
+        """
+        # Snapshot counters before the loop so we can compute per-call
+        # deltas at the end. A naive ``+= 1`` against ``report.X[name]``
+        # inside the loop would have the same effect but would force the
+        # report dict to be initialized to ``0`` for every component;
+        # the snapshot avoids that coupling.
+        pre_steps = dict(self._steps_per_component)
+        pre_rollbacks = dict(self._rollbacks)
+
         report = RunReport(
-            steps_per_component=dict(self._steps_per_component),
-            rollbacks=dict(self._rollbacks),
+            steps_per_component={n: 0 for n in self.plugins},
+            rollbacks={n: 0 for n in self.plugins},
             step_losses={n: [] for n in self.plugins},
         )
 
@@ -155,9 +172,16 @@ class Orchestrator:
             if self.eval_every > 0 and comp_steps % self.eval_every == 0:
                 self._evaluate_and_maybe_rollback(name, plugin)
 
-        report.total_steps = sum(self._steps_per_component.values())
-        report.steps_per_component = dict(self._steps_per_component)
-        report.rollbacks = dict(self._rollbacks)
+        # Per-call deltas, not cumulative totals.
+        report.steps_per_component = {
+            n: self._steps_per_component[n] - pre_steps.get(n, 0)
+            for n in self.plugins
+        }
+        report.rollbacks = {
+            n: self._rollbacks[n] - pre_rollbacks.get(n, 0)
+            for n in self.plugins
+        }
+        report.total_steps = sum(report.steps_per_component.values())
         # Final evals — one per component if a registry is configured.
         if self.eval_registry is not None:
             for n, plugin in self.plugins.items():
