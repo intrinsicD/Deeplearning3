@@ -77,45 +77,194 @@ class LGQPlugin(ComponentPlugin):
         cfg = self.config
         return torch.rand(batch_size, cfg.in_channels, cfg.resolution, cfg.resolution)
 
-    def train_step(self, batch: torch.Tensor) -> StepReport:
-        """One LGQ training step, optionally extended with replay + EMA update.
+    def _generator_forward(
+        self, x: torch.Tensor, *, use_adv: bool,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Single generator forward + criterion.
 
-        LGQ's :meth:`LGQTrainer.step` is a self-contained
-        generator+discriminator update that internally manages AMP and
-        backward, so we use the simpler **extra-step replay** pattern
-        (a second ``step`` on a replayed mini-batch) rather than fusing
-        gradients into a single backward like ``GaussianEncoderPlugin``.
-        Both are valid forgetting defenses; the fused version is more
-        sample-efficient, the extra-step version is easier to bolt onto
-        a trainer that owns its own optimizer loop.
+        Mirrors the generator-side of :meth:`LGQTrainer.step` but exposes
+        ``model_out`` and the losses dict so the plugin can fuse replay
+        + DER consistency + EWC penalty into one backward instead of
+        delegating to the trainer's self-contained step.
+
+        Returns ``(model_out, gen_losses)``.
         """
-        losses = dict(self._trainer.step(batch))
+        trainer = self._trainer
+        with torch.amp.autocast(
+            "cuda", dtype=trainer.amp_dtype, enabled=trainer.use_amp,
+        ):
+            model_out = trainer.model(x)
+            adv_loss = None
+            if use_adv and trainer.step_count >= self.config.disc_start_step:
+                adv_loss = trainer.model.generator_adversarial_loss(
+                    model_out["recon"],
+                )
+            gen_losses = trainer.loss_fn.generator_loss(
+                x, model_out, adv_loss, trainer.step_count,
+            )
+        return model_out, gen_losses
 
-        # --- replay step ---------------------------------------------------
+    def train_step(self, batch: torch.Tensor) -> StepReport:
+        """One LGQ training step with fused DER++ + optional EWC + EMA.
+
+        Restructures the dual-optimizer GAN trainer step so the
+        generator-side forward + backward is owned by the plugin
+        (giving EWC's Fisher accumulation access to the task
+        gradient and letting DER++ replay fold into the same
+        backward). The discriminator-side step is otherwise
+        unchanged — EWC anchors only the generator's parameters
+        (the conventional choice for VQ-GAN-style anchoring).
+
+        Sequence (per step):
+          1. Generator forward on the fresh batch → ``gen_losses``.
+          2. If replay attached + non-empty: forward on the replay
+             batch; add ``replay_weight·replay_task`` to total;
+             add ``der_weight·MSE(replay_recon, stored_recon)``
+             where the stored signal is the recon captured at
+             insertion time.
+          3. ``total.backward()`` (with AMP scaler if configured).
+          4. If EWC attached: ``consolidate(model)`` → ``penalty``
+             → ``penalty.backward()``.
+          5. Clip + ``opt_gen.step()`` + ``sched_gen.step()``.
+          6. If EWC attached: ``post_step(model)``.
+          7. Discriminator step (unchanged, uses detached recon).
+          8. Insert ``batch`` into the buffer with the current
+             recon as the DER teacher signal.
+          9. EMA update if attached.
+        """
+        trainer = self._trainer
+        cfg = self.config
+        model = trainer.model
+        x = batch.to(trainer.device, non_blocking=True)
+        model.train()
+
+        # 1. Fresh-batch generator forward.
+        model_out, gen_losses = self._generator_forward(x, use_adv=True)
+        total = gen_losses["total"]
+
+        losses: dict[str, float] = {}
+        for k, v in gen_losses.items():
+            if isinstance(v, torch.Tensor):
+                losses[k] = float(v.detach().cpu().item())
+            elif isinstance(v, (int, float)):
+                losses[k] = float(v)
+
+        # 2. Fused DER++ replay. One forward over the replay batch
+        # serves both the task-loss term and the DER consistency
+        # term (the buffer always carries stored recons for LGQ —
+        # buffer insertion below sets them on every step).
         if self.replay_bank is not None and self.replay_bank.size(self.name) > 0:
             items = self.replay_bank.sample(self.name, k=self.replay_batch_size)
             if items:
-                rx = torch.stack([it.sample for it in items])
-                replay_losses = self._trainer.step(rx)
-                for k, v in replay_losses.items():
-                    losses[f"replay/{k}"] = float(v)
+                rx = torch.stack([it.sample for it in items]).to(trainer.device)
+                # ``use_adv=False`` on the replay forward to keep the
+                # discriminator loss out of the replay-side gradient —
+                # adversarial training on stale clips would push the
+                # generator toward fitting whatever the *current*
+                # discriminator wants on the buffer, which isn't the
+                # forgetting-defense goal.
+                r_out, r_losses = self._generator_forward(rx, use_adv=False)
+                total = total + self.replay_weight * r_losses["total"]
+                losses["replay/total"] = float(r_losses["total"].detach().cpu().item())
 
-        # --- buffer insertion ---------------------------------------------
+                der_items = [it for it in items if it.stored_logits is not None]
+                if der_items:
+                    # We can reuse ``r_out`` only when *every* item
+                    # carries stored logits (the common case after a
+                    # warm-up step). Otherwise we'd need a separate
+                    # forward over the gated subset.
+                    if len(der_items) == len(items):
+                        rd_recon = r_out["recon"]
+                        stored = torch.stack(
+                            [it.stored_logits for it in der_items],
+                        ).to(trainer.device)
+                        der = nn.functional.mse_loss(rd_recon, stored)
+                    else:
+                        rd_x = torch.stack(
+                            [it.sample for it in der_items],
+                        ).to(trainer.device)
+                        rd_out, _ = self._generator_forward(rd_x, use_adv=False)
+                        stored = torch.stack(
+                            [it.stored_logits for it in der_items],
+                        ).to(trainer.device)
+                        der = nn.functional.mse_loss(rd_out["recon"], stored)
+                    total = total + self.der_weight * der
+                    losses["der_consistency"] = float(der.detach().cpu().item())
+
+        # 3. Backward + 4. EWC + 5. Clip + opt_gen.step + sched_gen.step.
+        trainer.opt_gen.zero_grad(set_to_none=True)
+        if trainer.scaler is not None:
+            trainer.scaler.scale(total).backward()
+            # Unscale before EWC's grad-based Fisher accumulation so the
+            # scale doesn't pollute the empirical Fisher.
+            trainer.scaler.unscale_(trainer.opt_gen)
+        else:
+            total.backward()
+
+        if self.ewc is not None:
+            self.ewc.consolidate(model)
+            penalty = self.ewc.penalty(model)
+            penalty.backward()
+            losses["ewc/penalty"] = float(penalty.detach().cpu().item())
+
+        nn.utils.clip_grad_norm_(
+            trainer._param_groups["generator"], cfg.max_grad_norm,
+        )
+        if trainer.scaler is not None:
+            trainer.scaler.step(trainer.opt_gen)
+            trainer.scaler.update()
+        else:
+            trainer.opt_gen.step()
+        trainer.sched_gen.step()
+
+        if self.ewc is not None:
+            self.ewc.post_step(model)
+
+        # 7. Discriminator step (after warmup). Operates on detached
+        # recon from the *fresh* batch — we don't run the discriminator
+        # on replayed images.
+        disc_loss_val: float | None = None
+        if trainer.step_count >= cfg.disc_start_step:
+            with torch.amp.autocast(
+                "cuda", dtype=trainer.amp_dtype, enabled=trainer.use_amp,
+            ):
+                disc_out = model.forward_discriminator(
+                    x, model_out["recon"].detach(),
+                )
+            trainer.opt_disc.zero_grad(set_to_none=True)
+            if trainer.scaler is not None:
+                trainer.scaler.scale(disc_out["d_loss"]).backward()
+                trainer.scaler.step(trainer.opt_disc)
+                trainer.scaler.update()
+            else:
+                disc_out["d_loss"].backward()
+                trainer.opt_disc.step()
+            trainer.sched_disc.step()
+            disc_loss_val = float(disc_out["d_loss"].detach().cpu().item())
+
+        if disc_loss_val is not None:
+            losses["d_loss"] = disc_loss_val
+
+        trainer.step_count += 1
+
+        # 8. Buffer insertion with DER teacher signal.
         if self.replay_bank is not None:
+            with torch.no_grad():
+                stored_recon = model(x)["recon"].detach().cpu()
             for i in range(batch.shape[0]):
                 self.replay_bank.insert(
                     self.name,
                     batch[i].detach().cpu(),
-                    stored_logits=None,
-                    step=self._trainer.step_count,
+                    stored_logits=stored_recon[i],
+                    step=trainer.step_count,
                 )
 
-        # --- EMA update ----------------------------------------------------
+        # 9. EMA update.
         if self.ema_teacher is not None:
-            self.ema_teacher.update(self._trainer.model)
+            self.ema_teacher.update(model)
 
-        total = losses.get("total", 0.0)
-        return StepReport(loss=float(total), losses=losses)
+        losses["total"] = float(total.detach().cpu().item())
+        return StepReport(loss=losses["total"], losses=losses)
 
     @torch.no_grad()
     def evaluate(self, probe_set: Any | None = None) -> EvalReport:
