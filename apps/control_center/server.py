@@ -53,7 +53,28 @@ app.add_middleware(
 
 class MinariDownloadRequest(BaseModel):
     dataset_id: str
+    # Read by ``/api/minari/download``. An earlier change accidentally
+    # subsumed this field into ``SelfImproveStartRequest`` (the
+    # following class), which broke the Minari endpoint at runtime.
     force_download: bool = False
+
+
+class SelfImproveStartRequest(BaseModel):
+    """Payload for ``/api/self-improve/start``.
+
+    All fields are optional; the CLI fills sensible defaults. Defaults
+    here match ``scripts/training/self_improve/cli.py``.
+    """
+
+    components: List[str] = Field(default_factory=lambda: ["gaussian_encoder"])
+    max_steps: int = 100
+    eval_every: int = 50
+    batch_size: int = 2
+    seed: int = 0
+    rollback_tol: float = 0.0
+    dry_run: bool = False
+    vault_root: Optional[str] = None
+    log_level: str = "INFO"
 
 
 class TrainStartRequest(BaseModel):
@@ -81,7 +102,10 @@ class UseCaseRequest(BaseModel):
 
 class JobState:
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        # ``RLock`` because ``start()`` calls ``self.snapshot()`` at the
+        # end while still holding the lock, and ``snapshot()`` re-acquires
+        # it. Originally a non-reentrant ``Lock`` — see commit message.
+        self.lock = threading.RLock()
         self.proc: Optional[subprocess.Popen[str]] = None
         self.status_file: Optional[Path] = None
         self.status: Dict[str, Any] = {
@@ -285,6 +309,87 @@ def train_start(req: TrainStartRequest) -> Dict[str, Any]:
 @app.post("/api/train/stop")
 def train_stop() -> Dict[str, Any]:
     return JOB.stop()
+
+
+# ---------------------------------------------------------------------------
+# Self-improvement orchestrator endpoints (phase 10)
+# ---------------------------------------------------------------------------
+
+
+def _build_self_improve_command(req: SelfImproveStartRequest) -> List[str]:
+    """Translate a :class:`SelfImproveStartRequest` to a CLI invocation.
+
+    Mirrors the argparse interface in
+    ``scripts/training/self_improve/cli.py``. Defaults are applied at
+    the CLI; we just forward whatever was set.
+    """
+    cmd: List[str] = [
+        sys.executable,
+        "scripts/training/self_improve_cli.py",
+        "--components", *req.components,
+        "--max-steps", str(req.max_steps),
+        "--eval-every", str(req.eval_every),
+        "--batch-size", str(req.batch_size),
+        "--seed", str(req.seed),
+        "--rollback-tol", str(req.rollback_tol),
+        "--log-level", req.log_level,
+    ]
+    if req.vault_root:
+        cmd.extend(["--vault-root", req.vault_root])
+    if req.dry_run:
+        cmd.append("--dry-run")
+    return cmd
+
+
+@app.post("/api/self-improve/start")
+def self_improve_start(req: SelfImproveStartRequest) -> Dict[str, Any]:
+    """Launch the self-improvement orchestrator as a subprocess.
+
+    Uses the same single-job ``JobState`` lock as ``/api/train/start``:
+    starting a self-improve run while a training job is active returns
+    409. The two share one job slot by design — they both touch the GPU
+    and shouldn't run concurrently on a single-GPU host.
+    """
+    cmd = _build_self_improve_command(req)
+    return JOB.start(
+        cmd,
+        status_file=None,
+        total_steps=req.max_steps,
+        kind="self-improve",
+    )
+
+
+@app.post("/api/self-improve/stop")
+def self_improve_stop() -> Dict[str, Any]:
+    """Stop the active self-improve subprocess.
+
+    No-op (returns the current snapshot) when:
+
+    - no job is running, or
+    - the active job is *not* a self-improve job (e.g. a Minari
+      training run started via ``/api/train/start``).
+
+    The shared :data:`JOB` slot means a naive ``JOB.stop()`` here would
+    terminate any active job, including unrelated training runs — that
+    contradicts the endpoint contract and was a real footgun for
+    operators running both pipelines on the same host.
+    """
+    snap = JOB.snapshot()
+    if snap.get("kind") != "self-improve":
+        # Leave whatever else is running alone.
+        return snap
+    return JOB.stop()
+
+
+@app.get("/api/self-improve/status")
+def self_improve_status() -> Dict[str, Any]:
+    """Current job state. Returns the same payload shape as
+    ``/api/status`` but filters to self-improve jobs only.
+    """
+    snap = JOB.snapshot()
+    if snap.get("kind") != "self-improve":
+        return {"state": "idle", "kind": None}
+    return snap
 
 
 def _safe_text(value: str, fallback: str = "") -> str:
