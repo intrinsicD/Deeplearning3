@@ -191,6 +191,12 @@ class HPWMPlugin(ComponentPlugin):
                     self._model.parameters(), cfg.max_grad_norm,
                 )
                 self.optimizer.step()
+                # Keep the LR scheduler in step with the optimizer: the
+                # replay branch is a real parameter update, so without
+                # this the cosine/warmup schedule would lag the actual
+                # optimizer step count whenever replay is active and
+                # train at systematically higher LRs than configured.
+                self.scheduler.step()
                 losses["replay/loss"] = float(r_loss.detach().cpu().item())
 
         # --- buffer insertion --------------------------------------------
@@ -262,12 +268,16 @@ class HPWMPlugin(ComponentPlugin):
         # that snapshot/rollback is bit-faithful. The __init__ above forces
         # DINO to materialize, so these keys are always present on both
         # save and (post-construction) load.
-        return {
+        out: dict[str, Any] = {
             "model": self._model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "step_count": self.step_count,
         }
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         # Ensure DINO is materialized before load — defensive in case a
@@ -280,6 +290,7 @@ class HPWMPlugin(ComponentPlugin):
         if "scheduler" in state:
             self.scheduler.load_state_dict(state["scheduler"])
         self.step_count = int(state.get("step_count", 0))
+        self._load_ema_state(state.get("_ema"))
 
     # -- helpers -----------------------------------------------------------
 

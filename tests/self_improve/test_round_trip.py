@@ -32,6 +32,14 @@ _TOL = {
 
 @pytest.mark.parametrize("name", list(available_plugins()))
 def test_round_trip_identical_metrics(name: str, tmp_path: Path) -> None:
+    # Seed at the start so the test is order-independent. Without this,
+    # earlier tests in the suite can perturb the global RNG enough that
+    # the small-model gaussian_encoder trajectory moves the eval probe
+    # by less than ``_TOL["gaussian_encoder"]`` (1e-5), making the
+    # "training moved the score" guard vacuous.
+    import torch as _torch
+    _torch.manual_seed(0)
+
     try:
         plugin = get_plugin(name)()
     except ImportError as exc:  # pragma: no cover - env-specific

@@ -167,13 +167,17 @@ class OmniLatentPlugin(ComponentPlugin):
     # -- state -------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "model": self._trainer.model.state_dict(),
             "optimizer": self._trainer.optimizer.state_dict(),
             "scaler": self._trainer.scaler.state_dict(),
             "criterion": self._trainer.criterion.state_dict(),
             "global_step": self._trainer.global_step,
         }
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self._trainer.model.load_state_dict(state["model"])
@@ -184,6 +188,7 @@ class OmniLatentPlugin(ComponentPlugin):
         if "criterion" in state:
             self._trainer.criterion.load_state_dict(state["criterion"])
         self._trainer.global_step = int(state.get("global_step", 0))
+        self._load_ema_state(state.get("_ema"))
 
     # -- helpers -----------------------------------------------------------
 

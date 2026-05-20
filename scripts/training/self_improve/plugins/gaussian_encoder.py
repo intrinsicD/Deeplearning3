@@ -183,10 +183,18 @@ class GaussianEncoderPlugin(ComponentPlugin):
     # -- state -------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        return self._trainer.state_dict()
+        out = dict(self._trainer.state_dict())
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        self._trainer.load_state_dict(state)
+        # Strip EMA before delegating; the underlying GaussianTrainer
+        # doesn't know that key and would mishandle it.
+        trainer_state = {k: v for k, v in state.items() if k != "_ema"}
+        self._trainer.load_state_dict(trainer_state)
+        self._load_ema_state(state.get("_ema"))
 
 
 __all__ = ["GaussianEncoderPlugin"]

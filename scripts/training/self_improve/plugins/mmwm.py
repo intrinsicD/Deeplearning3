@@ -194,12 +194,16 @@ class MMWMPlugin(ComponentPlugin):
     # -- state -------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "model": self._trainer.model.state_dict(),
             "optimizer": self._trainer.optimizer.state_dict(),
             "loss_fn": self._trainer.loss_fn.state_dict(),
             "global_step": self._trainer.global_step,
         }
+        ema = self._ema_state()
+        if ema is not None:
+            out["_ema"] = ema
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self._trainer.model.load_state_dict(state["model"])
@@ -208,6 +212,7 @@ class MMWMPlugin(ComponentPlugin):
         if "loss_fn" in state:
             self._trainer.loss_fn.load_state_dict(state["loss_fn"])
         self._trainer.global_step = int(state.get("global_step", 0))
+        self._load_ema_state(state.get("_ema"))
 
 
 def _split_mmwm_batch(batch: dict[str, Any]) -> list[dict[str, Any]]:

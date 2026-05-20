@@ -181,10 +181,54 @@ class ComponentPlugin(ABC):
 
     def state_dict(self) -> dict[str, Any]:
         """Return a serializable snapshot of the plugin's mutable state."""
-        return {"model": self.model.state_dict()}
+        out = {"model": self.model.state_dict()}
+        ema_state = self._ema_state()
+        if ema_state is not None:
+            out["_ema"] = ema_state
+        return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self.model.load_state_dict(state["model"])
+        self._load_ema_state(state.get("_ema"))
+
+    def _ema_state(self) -> dict[str, Any] | None:
+        """Helper for subclass ``state_dict`` impls.
+
+        Returns the EMA teacher's state when one is attached, ``None``
+        otherwise. Subclasses with custom ``state_dict`` should call
+        this and merge the result under the ``"_ema"`` key so that
+        vault rollback / resume restores teacher weights alongside the
+        student — otherwise the teacher drifts away from the restored
+        student and distillation loss becomes meaningless.
+        """
+        if self.ema_teacher is None:
+            return None
+        return self.ema_teacher.state_dict()
+
+    def _load_ema_state(self, state: Any) -> None:
+        """Companion to :meth:`_ema_state` for subclass ``load_state_dict``.
+
+        Tolerates three cases without raising:
+
+        - No EMA in the checkpoint and no teacher attached: no-op.
+        - EMA in the checkpoint and a teacher attached: load.
+        - EMA in the checkpoint but no teacher: lazily attach (so
+          a resumed run with distillation enabled doesn't lose its
+          teacher just because attach_ema hadn't yet been called).
+
+        The fourth case (teacher attached but no EMA in the checkpoint)
+        leaves the teacher untouched; resuming a non-distillation
+        checkpoint into a distillation-enabled plugin is the caller's
+        problem.
+        """
+        if state is None:
+            return
+        if self.ema_teacher is None:
+            # Lazy reattach. Decay is read back from the saved state.
+            from scripts.training.self_improve.forgetting.ema import EMATeacher
+
+            self.ema_teacher = EMATeacher(self.model, decay=float(state["decay"]))
+        self.ema_teacher.load_state_dict(state)
 
     # ------------------------------------------------------------------
     # Helpers
