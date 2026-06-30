@@ -77,16 +77,21 @@ class Trainer:
         )
         self.model.to(self.device)
 
-        # Optimizer
+        # Loss (built before the optimizer so its learnable uncertainty
+        # weights — MultiModalLoss.log_vars — are actually optimized).
+        self.criterion = MultiModalLoss(config).to(self.device)
+
+        # Optimizer — must include the criterion's parameters, otherwise the
+        # learned task-weighting (Kendall et al. 2018) never updates.
+        self._optim_params = list(self.model.parameters()) + list(
+            self.criterion.parameters()
+        )
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
+            self._optim_params,
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
             betas=(0.9, 0.95),
         )
-
-        # Loss
-        self.criterion = MultiModalLoss(config).to(self.device)
 
         # Mixed precision
         self.scaler = torch.amp.GradScaler("cuda", enabled=config.mixed_precision and self.device.type == "cuda")
@@ -200,7 +205,7 @@ class Trainer:
         # Gradient clipping (unscale first for correct norm)
         self.scaler.unscale_(self.optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip
+            self._optim_params, self.config.grad_clip
         ).item()
 
         self.scaler.step(self.optimizer)

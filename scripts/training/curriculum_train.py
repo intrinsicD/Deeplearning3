@@ -189,12 +189,24 @@ class CurriculumTrainer:
         if self.recurrent_memory is not None:
             self.recurrent_memory.to(self.device)
 
-        # Collect all parameters for optimizer
+        # Loss — built before the optimizer so the learnable uncertainty
+        # weights (MultiModalLoss.log_vars, TemporalContextLoss.log_vars and
+        # its sub-module heads) are actually optimized.
+        self.criterion = MultiModalLoss(config).to(self.device)
+        self.temporal_criterion = TemporalContextLoss(config).to(self.device)
+        self.next_clip_criterion = NextClipPredictionLoss().to(self.device)
+
+        # Collect all parameters for optimizer (model + optional temporal
+        # context modules + every learnable loss term).
         all_params = list(self.model.parameters())
         if self.temporal_transformer is not None:
             all_params += list(self.temporal_transformer.parameters())
         if self.recurrent_memory is not None:
             all_params += list(self.recurrent_memory.parameters())
+        all_params += list(self.criterion.parameters())
+        all_params += list(self.temporal_criterion.parameters())
+        all_params += list(self.next_clip_criterion.parameters())
+        self._optim_params = all_params
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -203,11 +215,6 @@ class CurriculumTrainer:
             weight_decay=config.weight_decay,
             betas=(0.9, 0.95),
         )
-
-        # Loss
-        self.criterion = MultiModalLoss(config).to(self.device)
-        self.temporal_criterion = TemporalContextLoss(config).to(self.device)
-        self.next_clip_criterion = NextClipPredictionLoss().to(self.device)
 
         # Mixed precision
         self.scaler = torch.amp.GradScaler(
@@ -284,7 +291,7 @@ class CurriculumTrainer:
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
         gnorm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip
+            self._optim_params, self.config.grad_clip
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
@@ -329,7 +336,7 @@ class CurriculumTrainer:
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
         gnorm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip
+            self._optim_params, self.config.grad_clip
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
