@@ -38,11 +38,19 @@ def _seed_from(text: str) -> int:
 
 @dataclass(frozen=True)
 class ExpertSpec:
-    """Immutable description of one registered expert."""
+    """Immutable description of one registered expert.
+
+    ``action`` is the agent-graph action a router emits when this expert is
+    selected. For tools it must be the **dispatch key** under which the tool is
+    registered in the runtime (``AgentRuntime.tools``) — emitting a generic
+    ``"TOOL_CALL"`` would lose which tool was chosen and the runtime could not
+    execute it. Defaults are filled in by :meth:`ExpertRegistry.register`.
+    """
 
     expert_id: str
     kind: str
     tags: tuple[str, ...] = field(default_factory=tuple)
+    action: str | None = None
 
     def __post_init__(self) -> None:
         if not self.expert_id:
@@ -76,11 +84,20 @@ class ExpertRegistry(nn.Module):
         expert_id: str,
         kind: str,
         tags: Sequence[str] = (),
+        action: str | None = None,
     ) -> ExpertSpec:
-        """Register an expert with a deterministically-seeded learnable key."""
+        """Register an expert with a deterministically-seeded learnable key.
+
+        For ``kind="tool"`` the dispatch ``action`` defaults to ``expert_id``
+        with a leading ``"tool:"`` stripped (so ``"tool:search"`` dispatches as
+        ``"search"``); a router emits this action and the runtime looks it up in
+        its ``tools`` map.
+        """
         if expert_id in self._specs:
             raise ValueError(f"Expert {expert_id!r} already registered")
-        spec = ExpertSpec(expert_id=expert_id, kind=kind, tags=tuple(tags))
+        if action is None and kind == "tool":
+            action = expert_id.split(":", 1)[1] if expert_id.startswith("tool:") else expert_id
+        spec = ExpertSpec(expert_id=expert_id, kind=kind, tags=tuple(tags), action=action)
         # Seed the key from id + tags so the same expert always starts the same.
         gen = torch.Generator().manual_seed(_seed_from("|".join((expert_id, *spec.tags))))
         key = torch.randn(self.key_dim, generator=gen) * self.key_init_scale
@@ -134,6 +151,18 @@ class ExpertRegistry(nn.Module):
 
     def ids_of_kind(self, kind: str) -> list[str]:
         return [e for e in self._order if self._specs[e].kind == kind]
+
+    def tool_actions(self) -> dict[str, str]:
+        """Map each tool expert's dispatch ``action`` → expert id.
+
+        Use the keys to wire the agent graph (each maps to a ``TOOL_CALL``
+        node) and the runtime's ``tools`` map, so a selected tool executes.
+        """
+        return {
+            self._specs[e].action: e
+            for e in self._order
+            if self._specs[e].kind == "tool" and self._specs[e].action
+        }
 
     def keys(self) -> torch.Tensor:
         """Stacked key matrix ``(num_experts, key_dim)`` in id order.

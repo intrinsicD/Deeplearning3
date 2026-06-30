@@ -216,10 +216,17 @@ class LearnedLatentRouter(nn.Module):
                 meta["retrieval_candidates"] = self.retrieval_fn(pooled.detach())
             return RouteDecision(self.abstain_action, confidence=confidence, metadata=meta)
 
-        # Top expert decides the graph action; its kind maps to a node.
+        # Top expert decides the graph action. A tool expert emits its own
+        # dispatch id (so the runtime can execute *that* tool); hook/kb experts
+        # map by kind. Emitting a generic "TOOL_CALL" would lose which tool was
+        # chosen and the runtime could not run it.
         top_idx = int(torch.argmax(weights).item())
         top_id = ids[top_idx]
-        action = self.action_map.get(self.registry.kind(top_id), self.fallback_action)
+        spec = self.registry.spec(top_id)
+        if spec.kind == "tool" and spec.action:
+            action = spec.action
+        else:
+            action = self.action_map.get(spec.kind, self.fallback_action)
 
         active = {ids[i]: float(weights[i].item()) for i in range(len(ids)) if weights[i] > 0}
         return RouteDecision(
