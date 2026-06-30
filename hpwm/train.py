@@ -37,10 +37,12 @@ class Trainer:
         config: HPWMConfig,
         use_synthetic: bool = True,
         resume_from: str | None = None,
+        data_dir: str | None = None,
     ):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_synthetic = use_synthetic
+        self.data_dir = data_dir
 
         # Create output directories
         os.makedirs(config.checkpoint_dir, exist_ok=True)
@@ -93,7 +95,7 @@ class Trainer:
         # Data
         print("\nCreating dataloaders...")
         self.train_loader, self.val_loader = create_dataloaders(
-            config, use_synthetic=use_synthetic,
+            config, use_synthetic=use_synthetic, data_dir=data_dir,
         )
         print(f"  Train: {len(self.train_loader.dataset)} clips")
         print(f"  Val: {len(self.val_loader.dataset)} clips")
@@ -487,6 +489,11 @@ def main():
         "--eval-only", action="store_true",
         help="Run evaluation only (requires --resume)",
     )
+    parser.add_argument(
+        "--allow-random-dino", action="store_true",
+        help="Permit a RANDOM frozen DINO backbone when pretrained weights "
+             "cannot be loaded (offline/CI only — results are not meaningful)",
+    )
     args = parser.parse_args()
 
     config = HPWMConfig()
@@ -500,6 +507,8 @@ def main():
         config.n_frames = args.n_frames
     if args.no_mamba:
         config.use_mamba = False
+    if args.allow_random_dino:
+        config.dino_allow_random_fallback = True
 
     if config.n_frames < 32:
         print(
@@ -515,6 +524,7 @@ def main():
         config=config,
         use_synthetic=use_synthetic,
         resume_from=args.resume,
+        data_dir=args.ssv2_dir,
     )
 
     if args.eval_only:

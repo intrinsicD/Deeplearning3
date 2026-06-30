@@ -34,10 +34,16 @@ class DINOBackbone(nn.Module):
     Phase -1: Fully frozen. Full spec: blocks 9-12 full-rank fine-tuning.
     """
 
-    def __init__(self, model_name: str = "dinov2_vits14", frozen: bool = True):
+    def __init__(
+        self,
+        model_name: str = "dinov2_vits14",
+        frozen: bool = True,
+        allow_random_fallback: bool = False,
+    ):
         super().__init__()
         self.model_name = model_name
         self.frozen = frozen
+        self.allow_random_fallback = allow_random_fallback
         self._model = None  # Lazy loading
 
     def _load_model(self, device: torch.device):
@@ -84,9 +90,28 @@ class DINOBackbone(nn.Module):
             except Exception:
                 pass
 
-        # Strategy 3: random fallback (testing / offline)
+        # Strategy 3: random fallback — ONLY when explicitly allowed. A frozen
+        # random backbone trains without error but can never learn real visual
+        # features, so silently falling back masks a broken setup (Audit.md A8).
         if not loaded:
+            if not self.allow_random_fallback:
+                raise RuntimeError(
+                    f"Could not load pretrained DINO backbone {self.model_name!r} "
+                    "via timm or torch.hub. Install timm with network access, or "
+                    "pass allow_random_fallback=True (CLI: --allow-random-dino) to "
+                    "train on RANDOM frozen features — for tests/CI only, never "
+                    "for a run whose visual quality matters."
+                )
+            import warnings
+
             from hpwm.components._dino_fallback import create_dino_fallback
+
+            warnings.warn(
+                "[DINO] Using RANDOM frozen backbone (allow_random_fallback=True). "
+                "Visual features are not learned; results are not meaningful.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             self._model = create_dino_fallback()
 
         self._model = self._model.to(device)
@@ -242,6 +267,7 @@ class HPWM(nn.Module):
         # Component 0: DINO backbone (frozen)
         self.dino = DINOBackbone(
             model_name=config.dino_model, frozen=config.dino_frozen,
+            allow_random_fallback=config.dino_allow_random_fallback,
         )
 
         # Component 1: MoD Surprise Router
