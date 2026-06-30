@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import torch
+
 
 def routing_accuracy(predicted: Sequence[str], gold: Sequence[str]) -> float:
     """Fraction of inputs whose routed expert matches the gold expert."""
@@ -61,4 +63,33 @@ def expected_calibration_error(
     return ece
 
 
-__all__ = ["routing_accuracy", "expected_calibration_error"]
+def load_balancing_loss(logits: torch.Tensor) -> torch.Tensor:
+    """Switch-Transformer load-balancing auxiliary loss (Fedus et al. 2021).
+
+    Discourages the router from collapsing onto a few experts — the failure
+    mode of end-to-end credit assignment (W3.3). For ``E`` experts over a batch
+    of ``N`` inputs::
+
+        loss = E * Σ_e  f_e · P_e
+
+    where ``f_e`` is the fraction of inputs whose top-1 expert is ``e`` and
+    ``P_e`` is the mean router probability of ``e``. Minimized (= 1.0) when load
+    is uniform; larger when concentrated. Differentiable through ``P_e``.
+    """
+    if logits.dim() != 2:
+        raise ValueError(f"logits must be (N, E); got {tuple(logits.shape)}")
+    n, e = logits.shape
+    if e == 0:
+        return logits.new_zeros(())
+    probs = torch.softmax(logits, dim=-1)          # (N, E)
+    mean_prob = probs.mean(dim=0)                   # (E,) — P_e (differentiable)
+    top1 = probs.argmax(dim=-1)                     # (N,)
+    frac = torch.bincount(top1, minlength=e).to(probs.dtype) / n  # f_e (constant)
+    return e * torch.sum(frac * mean_prob)
+
+
+__all__ = [
+    "routing_accuracy",
+    "expected_calibration_error",
+    "load_balancing_loss",
+]

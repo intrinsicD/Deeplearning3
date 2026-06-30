@@ -20,7 +20,11 @@ import torch
 
 from omnilatent.agent.registry import ExpertRegistry
 from omnilatent.agent.router import LearnedLatentRouter
-from omnilatent.agent.routing_metrics import expected_calibration_error, routing_accuracy
+from omnilatent.agent.routing_metrics import (
+    expected_calibration_error,
+    load_balancing_loss,
+    routing_accuracy,
+)
 
 
 @dataclass
@@ -80,11 +84,14 @@ def fit_router(
     probe: RoutingProbe,
     steps: int = 300,
     lr: float = 0.05,
+    load_balance_weight: float = 0.0,
 ) -> None:
     """Train the router (query projection + expert keys) to route the probe.
 
-    Uses full-softmax cross-entropy over the routing logits against the gold
-    expert — the W3.3 "credit assignment v1" objective in miniature.
+    Credit assignment v1 (W3.3): full-softmax cross-entropy over the routing
+    logits against the gold expert, plus an optional Switch-style
+    load-balancing auxiliary (``load_balance_weight``) that discourages expert
+    collapse.
     """
     # The registry is a submodule of the router, so router.parameters() already
     # includes the expert keys alongside the query projection.
@@ -93,8 +100,31 @@ def fit_router(
         opt.zero_grad()
         logits = router.forward(probe.inputs)["logits"]
         loss = torch.nn.functional.cross_entropy(logits, probe.gold_idx)
+        if load_balance_weight > 0:
+            loss = loss + load_balance_weight * load_balancing_loss(logits)
         loss.backward()
         opt.step()
+
+
+def counterfactual_lift(router: LearnedLatentRouter, probe: RoutingProbe) -> dict[str, float]:
+    """Task-metric lift from the router's choice vs uninformed baselines (W3.3).
+
+    The probe's task metric is "did we activate the correct expert?". We compare
+    the router's routing accuracy against:
+
+      * **random**: pick an expert uniformly at random (expected = ``chance``);
+      * **backbone-only**: activate no expert at all (accuracy 0 — no task is
+        solvable without its expert).
+
+    A useful router has positive lift over both.
+    """
+    report = evaluate_router(router, probe)
+    acc = report["routing_accuracy"]
+    return {
+        "routing_accuracy": acc,
+        "lift_vs_random": acc - probe.chance,
+        "lift_vs_backbone": acc - 0.0,
+    }
 
 
 def evaluate_router(router: LearnedLatentRouter, probe: RoutingProbe) -> dict[str, float]:
@@ -114,4 +144,10 @@ def evaluate_router(router: LearnedLatentRouter, probe: RoutingProbe) -> dict[st
     return {"routing_accuracy": acc, "ece": ece, "chance": probe.chance}
 
 
-__all__ = ["RoutingProbe", "build_routing_probe", "fit_router", "evaluate_router"]
+__all__ = [
+    "RoutingProbe",
+    "build_routing_probe",
+    "fit_router",
+    "evaluate_router",
+    "counterfactual_lift",
+]

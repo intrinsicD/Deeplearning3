@@ -122,9 +122,9 @@ selection was correct (in-distribution).
 
 | ID | Item | Depends on | Files | Acceptance | Status |
 |----|------|-----------|-------|------------|--------|
-| **W3.1** | Content-conditioned hook gates | W2.2 | `omnilatent/model/hooks.py` (`NeuralPortManager`) | effective gate = `sigmoid(static[h,L]) * route_weight[h](x)`; `route_weight=0` ⇒ exact prior behaviour (additive-safety preserved); effective gates logged to `AgentTraceStep.hook_gates`; test asserts exact recovery at weight 0 and parity at weight 1 | `[ ]` |
-| **W3.2** | Learned router execution loop | W3.1, W2.3 | `omnilatent/agent/runtime.py` | runtime drives `LearnedLatentRouter`; top-k experts co-activate and compose in attention; side-effect guard intact; e2e test | `[ ]` |
-| **W3.3** | Credit assignment v1 (end-to-end + load-balancing) | W3.2 | `omnilatent/agent/router.py`, training loop | router trained with task loss + Switch-style load-balancing aux; **counterfactual lift > 0** on the routing probe vs random-expert and backbone-only baselines | `[ ]` |
+| **W3.1** | Content-conditioned hook gates | W2.2 | `omnilatent/model/hooks.py` (`NeuralPortManager`) | effective gate = `sigmoid(static[h,L]) * route_weight[h](x)`; `route_weight=0` ⇒ exact prior behaviour (additive-safety preserved); effective gates logged to `AgentTraceStep.hook_gates`; test asserts exact recovery at weight 0 and parity at weight 1 | `[x]` |
+| **W3.2** | Learned router execution loop | W3.1, W2.3 | `omnilatent/agent/runtime.py` | runtime drives `LearnedLatentRouter`; top-k experts co-activate and compose in attention; side-effect guard intact; e2e test | `[x]` |
+| **W3.3** | Credit assignment v1 (end-to-end + load-balancing) | W3.2 | `omnilatent/agent/router.py`, training loop | router trained with task loss + Switch-style load-balancing aux; **counterfactual lift > 0** on the routing probe vs random-expert and backbone-only baselines | `[x]` |
 
 ---
 
@@ -178,8 +178,11 @@ vibe.
   confidence-gated abstention, and a synthetic routing probe showing
   above-chance routing accuracy + measured ECE. The system identifies the
   relevant pattern and abstains when it has none.
-- **M4 — Uses (Wish 3):** Phase 3 done. Selected skills are applied
-  per-input with positive counterfactual lift.
+- **M4 — Uses (Wish 3):** ✅ **DONE** (2026-06-30). Phase 3 complete:
+  content-conditioned hook gates (exact recovery at weight 0), a routed-forward
+  controller that co-activates the selected hooks, and credit-assignment v1
+  (CE + Switch load-balancing) with positive counterfactual lift on the routing
+  probe. Selected skills are applied per-input.
 - **M5 — Grows:** Phase 4 done. Capacity expands on demand without regression.
 - *(Research)* **R*** — Phase 5 items report results as they land.
 
@@ -212,3 +215,12 @@ vibe.
   with `routing_accuracy`/ECE metrics. New tests: expert_registry (6),
   learned_router (7), router_abstention (6), routing_probe (3). Full suite
   697 passed. Next: Phase 3 (wish 3 — content-conditioned hook use + credit).
+- *2026-06-30* — **Phase 3 (W3.1–W3.3) complete.** Milestone M4 reached:
+  content-conditioned hook gates in NeuralPortManager (route weight scales the
+  static gate; weight 0 skips the hook for *exact* recovery), `RoutedForward`
+  controller co-activating selected hooks in one forward with trace logging,
+  and credit-assignment v1 (CE + Switch load-balancing aux) showing positive
+  counterfactual lift vs random-expert and backbone-only. New tests:
+  conditioned_gates (6), routed_forward (5), credit_assignment (4). Full suite
+  712 passed. Remaining: W4.1 router-integration of expansion hooks, and the
+  Phase 5 research lane.
