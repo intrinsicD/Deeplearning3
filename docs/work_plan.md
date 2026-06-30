@@ -165,6 +165,28 @@ vibe.
 
 ---
 
+## Phase 6 — Make routing real (integration + value measurement)
+
+Added after Phases 0–4 landed: the selection/use mechanism worked in unit
+tests but had never trained on real model latents or been shown to *help*. This
+phase closes that gap.
+
+| ID | Item | Depends on | Files | Acceptance | Status |
+|----|------|-----------|-------|------------|--------|
+| **W6.1** | `RoutedTrainer`: router in real training | W3.2 | `omnilatent/training/routed_trainer.py` | trains hooks+router jointly on the real model; router gets gradients via gate scaling; modes routed/always_on/no_hooks; loss decreases | `[x]` |
+| **W6.2** | Measure routed vs always-on vs no-hooks | W6.1 | `scripts/diagnostics/routing_ablation.py`, `docs/routing_ablation.md` | three-arm comparison on the real model; honest writeup of the result | `[x]` |
+
+**Result (honest):** routing **does not beat always-on** at this scale — see
+[`routing_ablation.md`](routing_ablation.md). The trend is monotonic in
+top-k (routed +5.0% / +1.1% / −0.3% vs always-on at k=1/2/4), confirming the
+gap is *sparsity removing useful capacity*, not a broken router. Routing's win
+conditions (capacity pressure, conflicting experts, scale) are absent in the
+toy. The mechanism is correct and trainable; its value is **not yet
+demonstrated** on this codebase, and we now know exactly what experiment would
+demonstrate it.
+
+---
+
 ## Milestones
 
 - **M1 — Trustworthy loop:** ✅ **DONE** (2026-06-30). Phase 0 complete,
@@ -237,3 +259,11 @@ vibe.
   composition benchmark, and per the lane's charter have no guaranteed result.
   Full suite 718 passed. **All scheduled engineering work (Phases 0–4) is
   complete; the research lane remains intentionally open-ended.**
+- *2026-06-30* — **Phase 6 (W6.1–W6.2): made routing real and measured it.**
+  `RoutedTrainer` trains hooks+router on the real model; the
+  `routing_ablation.py` three-arm comparison gives an honest **negative**:
+  routing does not beat always-on at this scale (sparsity removes capacity with
+  no interference benefit to offset it). Documented in `routing_ablation.md`
+  with the conditions that would change the verdict. A real bug was found+fixed
+  en route (the trainer's `--no-freeze` never trained the backbone). New tests:
+  routed_trainer (5), routing_ablation (2). Full suite 725 passed.

@@ -1,0 +1,173 @@
+"""Train OmniLatent hooks together with a learned router (work plan W6.1).
+
+This is where input-conditioned selection (Phase 2) and conditional use
+(Phase 3) stop being unit-test mechanisms and enter a real training loop on the
+actual :class:`OmniLatentModel`. The backbone is frozen; the trainable pieces
+are the registered hooks and — in ``routed`` mode — the
+:class:`LearnedLatentRouter`.
+
+Three modes share one code path so the routed-vs-baseline comparison (W6.2) is
+apples-to-apples:
+
+* ``"routed"``   — the router selects per-input which hooks fire (top-k,
+  content-conditioned gates), trained with the task loss + a Switch
+  load-balancing auxiliary.
+* ``"always_on"`` — every hook fires for every input (the pre-routing default).
+* ``"no_hooks"``  — all hooks skipped (frozen-backbone baseline).
+
+The router receives gradient from the task loss *through the gate scaling*
+(``hook_tokens * (static_gate * route_weight)``), not only from the auxiliary.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import torch
+
+from omnilatent.agent.registry import ExpertRegistry
+from omnilatent.agent.router import LearnedLatentRouter
+from omnilatent.agent.routing_metrics import load_balancing_loss
+from omnilatent.training.losses import MultiModalLoss
+
+MODES = ("routed", "always_on", "no_hooks")
+
+
+@dataclass
+class RoutedTrainer:
+    """Joint hook+router trainer for one modality's self-reconstruction.
+
+    Args:
+        model: an ``OmniLatentModel`` with hooks registered.
+        config: its ``OmniLatentConfig``.
+        modality: the modality to self-reconstruct (controlled, single-task).
+        mode: one of :data:`MODES`.
+        router: required for ``mode="routed"`` (its registry should be synced
+            to the model's hooks).
+        lr: learning rate for hooks (+ router).
+        load_balance_weight: weight of the Switch auxiliary (routed mode).
+        freeze_backbone: freeze everything but the hooks (fair comparison).
+    """
+
+    model: object
+    config: object
+    modality: str = "image"
+    mode: str = "routed"
+    router: LearnedLatentRouter | None = None
+    lr: float = 1e-3
+    load_balance_weight: float = 0.01
+    freeze_backbone: bool = True
+    history: list[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}; got {self.mode!r}")
+        if self.mode == "routed" and self.router is None:
+            raise ValueError("routed mode requires a router")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.criterion = MultiModalLoss(self.config).to(self.device)
+
+        hook_params: list = []
+        for hook in self.model.hook_manager.hooks.values():
+            for p in hook.parameters():
+                p.requires_grad_(True)
+                hook_params.append(p)
+        hook_ids = {id(p) for p in hook_params}
+
+        params = list(hook_params)
+        # Backbone (everything that isn't a hook): freeze, or include in the
+        # optimizer when freeze_backbone=False.
+        for p in self.model.parameters():
+            if id(p) in hook_ids:
+                continue
+            p.requires_grad_(not self.freeze_backbone)
+            if not self.freeze_backbone:
+                params.append(p)
+
+        if self.mode == "routed":
+            self.router.to(self.device)
+            params += list(self.router.parameters())
+        # No trainable params in no_hooks (frozen backbone) — use a dummy so the
+        # optimizer is valid; it simply never updates anything.
+        self._has_params = len(params) > 0
+        self.optimizer = torch.optim.Adam(params, lr=self.lr) if self._has_params else None
+
+    # -- routing application --------------------------------------------
+    def _apply_routing(self, data: torch.Tensor) -> torch.Tensor | None:
+        """Set hook route weights for this batch; return router logits (routed)."""
+        manager = self.model.hook_manager
+        if self.mode == "always_on":
+            manager.set_route_weights(None)
+            return None
+        if self.mode == "no_hooks":
+            manager.set_route_weights({n: 0.0 for n in manager.hooks.keys()})
+            return None
+        # routed
+        enc = self.model.encode(self.modality, data)
+        summary = enc[:, 1:].mean(dim=1)
+        out = self.router.forward(summary)
+        ids = self.router.registry.ids()
+        rw = {}
+        for i, eid in enumerate(ids):
+            if self.router.registry.kind(eid) == "hook" and eid.startswith("hook:"):
+                name = eid[len("hook:"):]
+                if name in manager.hooks:
+                    rw[name] = out["weights"][:, i]
+        manager.set_route_weights(rw)
+        return out["logits"]
+
+    def step(self, batch: dict) -> float:
+        data = batch[self.modality].to(self.device)
+        manager = self.model.hook_manager
+        logits = self._apply_routing(data)
+        try:
+            result = self.model(self.modality, data, self.modality, data)
+            loss = self.criterion({self.modality: result["output"]}, {self.modality: data})["total"]
+            if self.mode == "routed" and self.load_balance_weight > 0 and logits is not None:
+                loss = loss + self.load_balance_weight * load_balancing_loss(logits)
+            if self.optimizer is not None:
+                self.optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                self.optimizer.step()
+        finally:
+            manager.set_route_weights(None)
+        value = float(loss.detach().item())
+        self.history.append(value)
+        return value
+
+    def train(self, dataloader, steps: int) -> list[float]:
+        self.model.train()
+        it = iter(dataloader)
+        for _ in range(steps):
+            try:
+                batch = next(it)
+            except StopIteration:
+                it = iter(dataloader)
+                batch = next(it)
+            self.step(batch)
+        return self.history
+
+    @torch.no_grad()
+    def evaluate(self, dataloader, batches: int = 8) -> float:
+        """Mean self-reconstruction loss over a few batches (no aux)."""
+        self.model.eval()
+        manager = self.model.hook_manager
+        total, n = 0.0, 0
+        for i, batch in enumerate(dataloader):
+            if i >= batches:
+                break
+            data = batch[self.modality].to(self.device)
+            self._apply_routing(data)
+            try:
+                result = self.model(self.modality, data, self.modality, data)
+                loss = self.criterion({self.modality: result["output"]}, {self.modality: data})["total"]
+            finally:
+                manager.set_route_weights(None)
+            total += float(loss.item())
+            n += 1
+        self.model.train()
+        return total / max(n, 1)
+
+
+__all__ = ["RoutedTrainer", "MODES"]
