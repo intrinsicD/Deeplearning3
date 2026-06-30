@@ -2,6 +2,13 @@
 > plan derived from it lives in [`docs/work_plan.md`](docs/work_plan.md).
 > Findings below are referenced from there as **A1–A10**; the capability
 > proposal for wishes 2 & 3 is referenced as **P1/P2**.
+>
+> **Resolution (2026-06-30):** All ten findings **A1–A10 are fixed** (work plan
+> Phase 0, each with a regression test) and **P1/P2 are implemented** (Phases
+> 2–3: expert registry, learned router, content-conditioned gates, credit v1).
+> The quality floor (Phase 1) and capacity expansion (Phase 4) pre-existed and
+> were verified. Full test suite: 718 passed. The Phase 5 research lane
+> (W5.2/W5.4/W5.5) remains intentionally open.
 
 I did not modify files. Findings below are ordered by impact on real learning/generalization.
 Findings
