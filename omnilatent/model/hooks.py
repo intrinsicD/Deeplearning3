@@ -239,6 +239,11 @@ class NeuralPortManager(nn.Module):
         # A scalar 0 ⇒ the hook is skipped entirely this forward (its tokens
         # are never injected), giving *exact* recovery of prior behaviour.
         self._route_weights: dict[str, Any] = {}
+        # Per-layer per-sample hook-token validity (B, H_layer): False where a
+        # hook's per-sample route weight is 0, so those samples don't attend to
+        # the hook's (zero-valued) tokens. Built in pre_layer, consumed by the
+        # backbone via mask_inactive_hook_positions (work plan bug 2).
+        self._hook_validity: dict[int, torch.Tensor] = {}
 
     def register_hook(self, hook: LatentNeuralHook) -> None:
         self.hooks[hook.name] = hook
@@ -348,6 +353,7 @@ class NeuralPortManager(nn.Module):
         self._batch_size = batch_size
         self._hook_states = {}
         self._last_gate_log = {}
+        self._hook_validity = {}
         for name, hook in self.hooks.items():
             hook = cast(LatentNeuralHook, hook)
             self._hook_states[name] = hook.get_hook_tokens(batch_size)
@@ -359,6 +365,8 @@ class NeuralPortManager(nn.Module):
         their magnitude in attention.
         """
         parts = [x]
+        validity_parts: list[torch.Tensor] = []
+        needs_mask = False
         for name, hook in self.hooks.items():
             hook = cast(LatentNeuralHook, hook)
             if layer_idx not in hook.target_layers:
@@ -378,9 +386,54 @@ class NeuralPortManager(nn.Module):
                 # per-batch gate (B,) → broadcast over (B, tokens, dim)
                 scaled = state * gate.view(-1, *([1] * (state.dim() - 1)))
             parts.append(scaled)
+
+            # Per-sample validity for this hook's tokens: a sample whose route
+            # weight is 0 must NOT attend to these (zero-valued) tokens, else
+            # its output is not equal to the no-hook case (bug 2).
+            rw = self._route_weights.get(name)
+            if isinstance(rw, torch.Tensor) and rw.dim() > 0:
+                valid = (rw != 0)
+                needs_mask = needs_mask or bool((~valid).any())
+            else:
+                valid = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
+            validity_parts.append(valid.view(-1, 1).expand(-1, hook.num_tokens))
+
         if len(parts) == 1:
             return x
+        if needs_mask:
+            self._hook_validity[layer_idx] = torch.cat(validity_parts, dim=1)  # (B, H_layer)
         return torch.cat(parts, dim=1)
+
+    def mask_inactive_hook_positions(
+        self,
+        layer_idx: int,
+        attn_mask: torch.Tensor | None,
+        seq_len: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Key-mask hook tokens that are inactive for specific samples (bug 2).
+
+        For samples whose per-sample route weight for a hook is 0, mask that
+        hook's token positions as **keys** so the samples' content never attends
+        to the (zero-valued) tokens — making their output exactly the no-hook
+        result. Only the key dimension is masked (not the query): a fully-masked
+        query row would produce NaN, and the inactive hook's own output is
+        discarded anyway (its next-layer contribution is gated to 0).
+        """
+        hv = self._hook_validity.get(layer_idx)
+        if hv is None or bool(hv.all()):
+            return attn_mask
+        b, h = hv.shape
+        content_len = seq_len - h
+        content_valid = torch.ones(b, content_len, dtype=torch.bool, device=device)
+        valid = torch.cat([content_valid, hv.to(device)], dim=1)  # (B, seq_len)
+        if attn_mask is None:
+            base = torch.ones(b, 1, seq_len, seq_len, dtype=torch.bool, device=device)
+        else:
+            heads = attn_mask.shape[-3] if attn_mask.dim() >= 3 else 1
+            base = attn_mask.expand(b, heads, seq_len, seq_len).clone()
+        # Mask the KEY dimension only.
+        return base & valid[:, None, None, :]
 
     def post_layer(self, layer_idx: int, x: torch.Tensor) -> torch.Tensor:
         """Strip hook tokens from the sequence and update their state.

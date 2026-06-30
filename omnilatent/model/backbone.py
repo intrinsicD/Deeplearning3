@@ -99,6 +99,14 @@ class UnifiedTransformer(nn.Module):
                     policy=hook_policy,
                 )
 
+            # Per-sample masking of hook tokens that are inactive for some
+            # samples (content-conditioned routing, bug 2). No-op unless a hook
+            # has a per-sample route weight that is 0 for part of the batch.
+            if hook_manager is not None:
+                layer_mask = hook_manager.mask_inactive_hook_positions(
+                    layer_idx, layer_mask, x.shape[1], x.device
+                )
+
             # --- Transformer layer (with optional gradient checkpointing) ---
             if self.config.gradient_checkpointing and self.training:
                 x = cp.checkpoint(
