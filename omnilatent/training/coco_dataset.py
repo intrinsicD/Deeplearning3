@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from omnilatent.config import OmniLatentConfig
+from omnilatent.data.errors import MediaDecodeError
 
 # Catch Exception (not just ImportError) because these libraries can fail
 # with RuntimeError, OSError, or AttributeError depending on build config.
@@ -142,17 +143,15 @@ class CocoCaptionsDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         img_path, caption = self.samples[idx]
 
-        # Load and transform image
+        # Load and transform image. Fail loud on a corrupt file rather than
+        # substituting a black image, which would pair a zero target with a
+        # real caption and teach the model corrupted cross-modal data
+        # (Audit.md A10).
         try:
             img = Image.open(img_path).convert("RGB")
             image_tensor = self.transform(img)  # (3, 224, 224)
-        except Exception:
-            # Fallback: black image (rare — corrupt file)
-            image_tensor = torch.zeros(
-                self.config.image_channels,
-                self.config.image_size,
-                self.config.image_size,
-            )
+        except Exception as exc:
+            raise MediaDecodeError(f"Failed to decode COCO image {img_path}: {exc}") from exc
 
         # Tokenize caption
         text_tensor = self._tokenize(caption)
