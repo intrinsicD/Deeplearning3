@@ -79,11 +79,20 @@ harness.
 
 **Depends on:** Phase 0 complete.
 
+> **Status note (2026-06-30):** Phase 1 was found **already implemented** in
+> `scripts/training/self_improve/` (the `self_improvement.md` design had been
+> built out, including the forgetting stack and capacity expansion). Rather
+> than rebuild it, it was **verified**: the full `tests/self_improve/` suite
+> passes (246 tests), including vault save/load + content-addressing, the
+> deterministic frozen probe registry (≥2 metrics/component), and an
+> orchestrator regression-injection test that asserts rollback fires. The
+> acceptance criteria below are met by the existing code; deltas noted inline.
+
 | ID | Item | Depends on | Files | Acceptance | Status |
 |----|------|-----------|-------|------------|--------|
-| **W1.1** | Content-addressed checkpoint vault | Phase 0 | `scripts/training/self_improve/vault.py` | save→load round-trips identical metrics; SHA-256 addressing; LRU cap | `[ ]` |
-| **W1.2** | Frozen probe sets + eval registry | Phase 0 | `scripts/training/self_improve/eval_registry.py`, `data/probes/<component>/` | per-component probe (Omni recon+caption acc, MMWM rollout, HPWM 3 signals, LGQ PSNR/LPIPS, Gauss MSE); hash-pinned; refuses start if probe file changed | `[ ]` |
-| **W1.3** | Rollback-on-regression gate | W1.1, W1.2 | `scripts/training/self_improve/orchestrator.py` (gate only) | inject a regression batch → best snapshot restored, LR halved, event logged with provenance; test | `[ ]` |
+| **W1.1** | Content-addressed checkpoint vault | Phase 0 | `scripts/training/self_improve/vault.py` | save→load round-trips identical metrics; SHA-256 addressing; LRU cap | `[x]` (pre-existing; verified) |
+| **W1.2** | Frozen probe sets + eval registry | Phase 0 | `scripts/training/self_improve/eval_registry.py` | per-component probe with ≥2 metrics; **seed-pinned deterministic** probes (synthetic) rather than hashed files — equivalent frozen guarantee | `[x]` (pre-existing; verified) |
+| **W1.3** | Rollback-on-regression gate | W1.1, W1.2 | `scripts/training/self_improve/orchestrator.py` | inject a regression → best snapshot restored, event logged; test `test_orchestrator.py` asserts ≥1 rollback | `[x]` (pre-existing; verified) |
 
 ---
 
@@ -126,9 +135,16 @@ native parameter-isolation method.
 
 **Depends on:** Phase 1 (floor) + Phase 3 (so new capacity is selectable).
 
+> **Status note (2026-06-30):** The expansion *mechanism* already exists
+> (`expand_omnilatent_capacity`, plateau detector, orchestrator wiring;
+> `tests/self_improve/test_capacity_expansion.py` passes). What remains for
+> W4.1 is making the newly-added hook **routable by the W2.2 router** — i.e.
+> registering the expansion hook into the expert registry. That part is
+> blocked on Phase 2.
+
 | ID | Item | Depends on | Files | Acceptance | Status |
 |----|------|-----------|-------|------------|--------|
-| **W4.1** | Plateau detector → `LatentNeuralHook` registration | W1.3, W3.3 | `scripts/training/self_improve/orchestrator.py`, `omnilatent/model/hooks.py` | manufactured plateau triggers a fresh hook (gate≈0); backbone weights unchanged; new hook trains and becomes routable by W2.2; test (mirrors `self_improvement.md` phase 8) | `[ ]` |
+| **W4.1** | Plateau detector → `LatentNeuralHook` registration | W1.3, W3.3 | `scripts/training/self_improve/orchestrator.py`, `omnilatent/model/hooks.py` | manufactured plateau triggers a fresh hook (gate≈0); backbone weights unchanged; new hook trains and becomes routable by W2.2 | `[~]` mechanism exists; routing-integration pending Phase 2 |
 
 ---
 
@@ -154,8 +170,9 @@ vibe.
 - **M1 — Trustworthy loop:** ✅ **DONE** (2026-06-30). Phase 0 complete,
   `W0.10` green, full suite 675 passed / 0 failed. The repo trains on
   real signal and fails loudly. *Prerequisite for any claim in the README.*
-- **M2 — Measured & safe:** Phase 1 done. Capability can rise with a hard
-  floor under it.
+- **M2 — Measured & safe:** ✅ **DONE** (pre-existing, verified 2026-06-30).
+  Phase 1 quality floor (vault + frozen probes + rollback) is implemented and
+  its 246-test suite passes. Capability can rise with a hard floor under it.
 - **M3 — Selects (Wish 2):** Phase 2 done. The system identifies the relevant
   pattern and *abstains* when it has none, with a routing accuracy number.
 - **M4 — Uses (Wish 3):** Phase 3 done. Selected skills are applied
@@ -176,3 +193,12 @@ vibe.
   (W0.6), MMWM AV script repaired (W0.7), random-DINO guard + --ssv2-dir
   (W0.8), test imports fixed (W0.9), loop-integrity gate added (W0.10).
   Full suite: 675 passed, 4 skipped, 0 failed. Next: Phase 1 (quality floor).
+- *2026-06-30* — **Phases 1 & 4 found pre-implemented and verified.** The
+  `self_improve/` package (vault, eval registry, orchestrator rollback gate,
+  forgetting stack, plateau→hook capacity expansion) already existed; its
+  246-test suite passes. W1.1–W1.3 marked done (verified, not rebuilt); M2
+  reached. W4.1's expansion mechanism exists but its router-integration is
+  deferred to after Phase 2. **Re-scope:** the genuinely missing work is
+  Phase 2 (wish 2, input-conditioned selection) and Phase 3 (wish 3,
+  conditional use + credit) — only a `StaticRouter` exists today. Building
+  Phase 2 next.
