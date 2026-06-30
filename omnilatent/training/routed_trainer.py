@@ -67,6 +67,8 @@ class RoutedTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
         self.criterion = MultiModalLoss(self.config).to(self.device)
+        self._last_injected = 0
+        self.injected_per_batch = 0.0
 
         hook_params: list = []
         for hook in self.model.hook_manager.hooks.values():
@@ -115,6 +117,11 @@ class RoutedTrainer:
                 if name in manager.hooks:
                     rw[name] = out["weights"][:, i]
         manager.set_route_weights(rw)
+        # Compute honesty: a hook is *injected for the whole batch* if any sample
+        # selects it. At batch>1 this can approach the full pool even though each
+        # input logically uses only top_k — so the per-input count overstates
+        # the batched compute saving.
+        self._last_injected = sum(1 for w in rw.values() if bool((w != 0).any()))
         return out["logits"]
 
     def step(self, batch: dict) -> float:
@@ -150,14 +157,21 @@ class RoutedTrainer:
 
     @torch.no_grad()
     def evaluate(self, dataloader, batches: int = 8) -> float:
-        """Mean self-reconstruction loss over a few batches (no aux)."""
+        """Mean self-reconstruction loss over a few batches (no aux).
+
+        Side effect: records ``self.injected_per_batch`` — the mean number of
+        hooks actually injected per batch in routed mode (an honest compute
+        proxy, vs the logical per-input ``top_k``).
+        """
         self.model.eval()
         manager = self.model.hook_manager
         total, n = 0.0, 0
+        injected_total = 0
         for i, batch in enumerate(dataloader):
             if i >= batches:
                 break
             data = batch[self.modality].to(self.device)
+            self._last_injected = self.model.hook_manager.hooks.__len__() if self.mode == "always_on" else 0
             self._apply_routing(data)
             try:
                 result = self.model(self.modality, data, self.modality, data)
@@ -165,8 +179,10 @@ class RoutedTrainer:
             finally:
                 manager.set_route_weights(None)
             total += float(loss.item())
+            injected_total += self._last_injected
             n += 1
         self.model.train()
+        self.injected_per_batch = injected_total / max(n, 1)
         return total / max(n, 1)
 
 

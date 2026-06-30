@@ -20,4 +20,8 @@ def test_run_ablation_reports_three_arms() -> None:
         top_k=1, image_size=16, freeze_backbone=True,
     )
     assert set(results) == {"no_hooks", "always_on", "routed"}
-    assert all(math.isfinite(v) for v in results.values())
+    assert all(math.isfinite(results[m]["loss"]) for m in results)
+    # Honest compute proxy is recorded per arm.
+    assert results["no_hooks"]["injected"] == 0
+    assert results["always_on"]["injected"] == 2
+    assert results["routed"]["injected"] <= 2

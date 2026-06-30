@@ -89,7 +89,8 @@ def run_arm(mode, cfg, samples, n_hooks, steps, batch_size, top_k, seed, freeze,
         trainer.step(next(train_iter))
 
     eval_iter = _batches(samples, batch_size, seed=seed + 999)
-    return trainer.evaluate(eval_iter, batches=16)
+    loss = trainer.evaluate(eval_iter, batches=16)
+    return loss, trainer.injected_per_batch
 
 
 def run_ablation(
@@ -110,34 +111,44 @@ def run_ablation(
     samples = make_multidomain_dataset(n_domains, image_size, seed=seed)
     results = {}
     for mode in ("no_hooks", "always_on", "routed"):
-        results[mode] = run_arm(
+        loss, injected = run_arm(
             mode, cfg, samples, n_hooks, steps, batch_size, top_k, seed,
             freeze_backbone, gate_bias,
         )
+        results[mode] = {"loss": loss, "injected": injected}
     return results
 
 
-def _format(results: dict[str, float], n_hooks: int, top_k: int) -> str:
-    base = results["no_hooks"]
-    # Active hooks per input — the compute the arm pays.
-    active = {"no_hooks": 0, "always_on": n_hooks, "routed": min(top_k, n_hooks)}
-    lines = ["", "Routing ablation — final self-reconstruction loss (lower is better)", "-" * 70]
-    lines.append(f"  {'arm':<12} {'loss':>9}   {'active hooks/input':>18}")
+def _format(results: dict[str, dict], n_hooks: int, top_k: int) -> str:
+    base = results["no_hooks"]["loss"]
+    logical = {"no_hooks": 0, "always_on": n_hooks, "routed": min(top_k, n_hooks)}
+    lines = ["", "Routing ablation — final self-reconstruction loss (lower is better)", "-" * 78]
+    lines.append(f"  {'arm':<12} {'loss':>9}   {'hooks/input':>11}   {'hooks injected/batch':>20}")
     for mode in ("no_hooks", "always_on", "routed"):
-        v = results[mode]
+        v = results[mode]["loss"]
+        inj = results[mode]["injected"]
         delta = "" if mode == "no_hooks" else f"  ({(v - base) / base * 100:+.1f}% vs none)"
-        lines.append(f"  {mode:<12} {v:>9.5f}   {active[mode]:>18}{delta}")
-    r, a = results["routed"], results["always_on"]
+        lines.append(f"  {mode:<12} {v:>9.5f}   {logical[mode]:>11}   {inj:>20.1f}{delta}")
+    r, a = results["routed"]["loss"], results["always_on"]["loss"]
+    r_inj, a_inj = results["routed"]["injected"], results["always_on"]["injected"]
     quality = (
         "routed BEATS always_on" if r < a * 0.99
         else "routed LOSES to always_on" if r > a * 1.01
         else "routed ~ always_on (tie)"
     )
-    lines += ["-" * 70, f"  quality: {quality}  (routed {(r - a) / a * 100:+.1f}% vs always_on)"]
-    if r <= a * 1.01 and active["routed"] < active["always_on"]:
+    lines += ["-" * 78, f"  quality: {quality}  (routed {(r - a) / a * 100:+.1f}% vs always_on)"]
+    # Honest compute verdict: compare ACTUAL hooks injected per batch, not the
+    # logical per-input count.
+    if r <= a * 1.01 and r_inj < a_inj * 0.95:
         lines.append(
-            f"  EFFICIENCY WIN: routed matches always_on quality using "
-            f"{active['routed']}/{n_hooks} hooks per input."
+            f"  COMPUTE WIN: equal/better quality injecting {r_inj:.1f} vs {a_inj:.1f} "
+            f"hooks/batch ({(1 - r_inj / a_inj) * 100:.0f}% fewer)."
+        )
+    elif r <= a * 1.01:
+        lines.append(
+            f"  NO batched-compute win: routed injects {r_inj:.1f} hooks/batch "
+            f"(~{a_inj:.1f} for always_on) — the per-input top_k saving collapses "
+            f"because some sample selects most hooks. Real saving needs batch=1."
         )
     lines.append("")
     return "\n".join(lines)

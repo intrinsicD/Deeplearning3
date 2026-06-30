@@ -77,18 +77,37 @@ Two consistent effects:
 1. **always-on degrades as the pool grows** (1.295 → 1.298, both *worse* than
    no-hooks): firing every hook on every input piles up interference.
 2. **routed stays flat** (~1.286) by firing only the top-2 — so it **matches or
-   slightly beats** always-on while activating **2 hooks instead of 12–16**
-   (a 6–8× reduction in active-hook compute).
+   slightly beats** always-on while *each input* uses only 2 of 12–16 hooks.
 
-So routing's real win in this codebase is **efficiency and robustness, not
-quality**: equal-or-better output at a fraction of the active-hook cost, and it
-does not degrade as you add more skills. (The per-sample masking fix — bug 2 —
-matters here: it makes the routed arm's inactive hooks exactly absent, so this
-comparison is clean.)
+So routing's win in this codebase is **efficiency and robustness, not quality**
+— but the size of the compute win depends on batch size, and the honest number
+is smaller than the per-input count suggests.
 
-Caveat, stated plainly: the absolute gaps are small (~1–2%) at this toy scale.
-The **direction** is consistent across hook counts and matches MoE theory; the
-magnitude would need real scale to matter.
+### How big is the compute win, really? (batch-size matters)
+
+A hook is injected for the **whole batch** if *any* sample selects it. So the
+hooks actually run per batch is the *union* of the per-sample top-k picks, not
+`top_k`. Measuring the hooks injected per batch (16-hook pool, top-2):
+
+| batch size | hooks injected / batch (routed) | vs always-on (16) |
+|---|---|---|
+| 1 (per-request serving) | 2.0 | **88% fewer** |
+| 16 (batched) | 11.3 | **29% fewer** |
+
+The full `top_k/N` saving only holds at **batch = 1** (per-request inference).
+As the batch grows and spans many domains, the injected set approaches the full
+pool and the saving erodes toward always-on. My first draft of this doc claimed
+a flat "6–8× reduction" — that was the per-input count and overstated the
+batched reality; the corrected, batch-aware numbers are above.
+
+(The per-sample masking fix — bug 2 — makes this clean: a sample whose weight
+for an injected hook is 0 gets *exact* no-hook output, so "injected for the
+batch" never silently changes a non-selecting sample.)
+
+Caveat, stated plainly: the absolute quality gaps are small (~1–2%) at this toy
+scale. The **direction** (always-on degrades with pool size; routed holds; real
+compute saving at low batch) is consistent and matches MoE theory; the
+magnitude would need real scale and per-request serving to matter.
 
 ## Bottom line for the project
 

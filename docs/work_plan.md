@@ -279,10 +279,15 @@ demonstrate it.
   `default_agent_graph(tool_actions=…)` wire it, and the selected tool runs.
   New tests: row_provenance (5), per_sample_hook_mask (3), tool_routing (4).
   Full suite 737 passed.
-- *2026-06-30* — **Routing's value located (capacity regime).** Scaling the
-  hook pool (12, 16) with `top_k=2`: always-on degrades as hooks grow
-  (interference, worse than no-hooks) while routed holds steady and matches/
-  beats it using **2 of N** hooks — a 6–8× cut in active-hook compute at
-  iso-quality. So routing's win in this architecture is efficiency/robustness,
-  not raw quality (hooks already self-route via attention). See
-  `routing_ablation.md`; the bug2 fix makes the routed arm's comparison exact.
+- *2026-06-30* — **Routing's value located (capacity regime) + honest compute
+  correction.** Scaling the hook pool (12, 16) with `top_k=2`: always-on
+  degrades as hooks grow (interference, worse than no-hooks) while routed holds
+  steady at iso-quality. Routing's win here is efficiency/robustness, not raw
+  quality (hooks already self-route via attention). **Correction:** the compute
+  saving is batch-size-dependent — a hook is injected if *any* batch sample
+  selects it, so the real hooks-injected-per-batch is the union of per-sample
+  top-k, not `top_k`. Measured: 16-hook pool routed injects 2.0/16 at batch=1
+  (88% fewer) but 11.3/16 at batch=16 (29% fewer). The earlier "6–8× reduction"
+  was the per-input count and overstated the batched reality; the ablation now
+  reports hooks-injected-per-batch and `routing_ablation.md` carries the
+  corrected, batch-aware numbers.
