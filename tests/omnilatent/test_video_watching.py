@@ -129,7 +129,7 @@ class TestCurriculumTrainer:
             collate_multimodal,
         )
         from torch.utils.data import DataLoader
-        from curriculum_train import CurriculumTrainer, Phase
+        from scripts.training.curriculum_train import CurriculumTrainer, Phase
 
         model = OmniLatentModel(config)
         dataset = SyntheticMultiModalDataset(config, length=20)
@@ -156,7 +156,7 @@ class TestCurriculumTrainer:
 
     def test_phase_transitions(self, config: OmniLatentConfig) -> None:
         """Verify correct phase boundary computation."""
-        from curriculum_train import CurriculumTrainer, Phase
+        from scripts.training.curriculum_train import CurriculumTrainer, Phase
         from omnilatent.training.data import (
             SyntheticMultiModalDataset,
             collate_multimodal,

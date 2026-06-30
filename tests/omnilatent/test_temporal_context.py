@@ -480,7 +480,7 @@ class TestTemporalIntegration:
             collate_multimodal,
         )
         from torch.utils.data import DataLoader
-        from curriculum_train import CurriculumTrainer, Phase
+        from scripts.training.curriculum_train import CurriculumTrainer, Phase
 
         model = OmniLatentModel(config)
         tx = TemporalSequenceTransformer(config)
