@@ -106,10 +106,10 @@ routing quality (W2.4). Can begin once Phase 0 is done; W2.4 needs W1.2.
 
 | ID | Item | Depends on | Files | Acceptance | Status |
 |----|------|-----------|-------|------------|--------|
-| **W2.1** | Expert registry (hooks ∪ tools ∪ KB-query) with learnable keys | Phase 0 | `omnilatent/agent/`, `omnilatent/model/hooks.py` (read `NeuralPortSpec.tags`) | every registered port/tool gets a key vector; registry enumerable; unit test | `[ ]` |
-| **W2.2** | `LearnedLatentRouter(BaseRouter)` with sparse top-k gating | W2.1 | `omnilatent/agent/router.py` | maps pooled `LatentPacket.state` → top-k expert weights; emits `RouteDecision` + `metadata["expert_weights"]`; drop-in for `StaticRouter` in `runtime.py`; test | `[ ]` |
-| **W2.3** | Retrieval-as-routing + calibrated abstention | W2.2 | `omnilatent/agent/router.py`, `omnilatent/kb/retrieval.py` | KB query derived from same summary via `retrieve_top_k`; below-threshold `confidence` routes to `KB_READ`/`MEMORY_READ` or backbone-only instead of forcing a skill; test | `[ ]` |
-| **W2.4** | Routing probe in the eval suite | W2.2, W1.2 | `scripts/training/self_improve/eval_registry.py`, `tests/...` | synthetic tasks each solvable by exactly one hook → **routing accuracy**; **abstention calibration** (ECE/reliability); fails CI if accuracy ≤ chance | `[ ]` |
+| **W2.1** | Expert registry (hooks ∪ tools ∪ KB-query) with learnable keys | Phase 0 | `omnilatent/agent/`, `omnilatent/model/hooks.py` (read `NeuralPortSpec.tags`) | every registered port/tool gets a key vector; registry enumerable; unit test | `[x]` |
+| **W2.2** | `LearnedLatentRouter(BaseRouter)` with sparse top-k gating | W2.1 | `omnilatent/agent/router.py` | maps pooled `LatentPacket.state` → top-k expert weights; emits `RouteDecision` + `metadata["expert_weights"]`; drop-in for `StaticRouter` in `runtime.py`; test | `[x]` |
+| **W2.3** | Retrieval-as-routing + calibrated abstention | W2.2 | `omnilatent/agent/router.py`, `omnilatent/kb/retrieval.py` | KB query derived from same summary via `retrieve_top_k`; below-threshold `confidence` routes to `KB_READ`/`MEMORY_READ` or backbone-only instead of forcing a skill; test | `[x]` |
+| **W2.4** | Routing probe in the eval suite | W2.2, W1.2 | `scripts/training/self_improve/eval_registry.py`, `tests/...` | synthetic tasks each solvable by exactly one hook → **routing accuracy**; **abstention calibration** (ECE/reliability); fails CI if accuracy ≤ chance | `[x]` |
 
 ---
 
@@ -173,8 +173,11 @@ vibe.
 - **M2 — Measured & safe:** ✅ **DONE** (pre-existing, verified 2026-06-30).
   Phase 1 quality floor (vault + frozen probes + rollback) is implemented and
   its 246-test suite passes. Capability can rise with a hard floor under it.
-- **M3 — Selects (Wish 2):** Phase 2 done. The system identifies the relevant
-  pattern and *abstains* when it has none, with a routing accuracy number.
+- **M3 — Selects (Wish 2):** ✅ **DONE** (2026-06-30). Phase 2 complete: an
+  `ExpertRegistry` + `LearnedLatentRouter` with sparse top-k selection,
+  confidence-gated abstention, and a synthetic routing probe showing
+  above-chance routing accuracy + measured ECE. The system identifies the
+  relevant pattern and abstains when it has none.
 - **M4 — Uses (Wish 3):** Phase 3 done. Selected skills are applied
   per-input with positive counterfactual lift.
 - **M5 — Grows:** Phase 4 done. Capacity expands on demand without regression.
@@ -202,3 +205,10 @@ vibe.
   Phase 2 (wish 2, input-conditioned selection) and Phase 3 (wish 3,
   conditional use + credit) — only a `StaticRouter` exists today. Building
   Phase 2 next.
+- *2026-06-30* — **Phase 2 (W2.1–W2.4) complete.** Milestone M3 reached:
+  `ExpertRegistry` (learnable keys, hooks∪tools∪kb), `LearnedLatentRouter`
+  (sparse top-k, differentiable, drop-in BaseRouter), confidence-gated
+  abstention + retrieval-as-routing, and a routing probe (`routing_probe.py`)
+  with `routing_accuracy`/ECE metrics. New tests: expert_registry (6),
+  learned_router (7), router_abstention (6), routing_probe (3). Full suite
+  697 passed. Next: Phase 3 (wish 3 — content-conditioned hook use + credit).
