@@ -160,7 +160,7 @@ vibe.
 | **W5.1** | Credit v2: outcome-based (probe-delta reward) | W3.3, W1.3 | router credit from a scalar outcome reward; harness reports above-chance routing | `[x]` harness landed (`fit_router_outcome_based`, REINFORCE+baseline); learns above chance from reward alone |
 | **W5.2** | Credit v3: counterfactual attribution | W5.1 | per-sample marginal-loss credit from hook ablation; router learns to prefer the genuinely-helpful hook | `[x]` `counterfactual_hook_credit` + `RoutedTrainer.step_counterfactual`; verified credit = exact loss deltas and the router routes toward the counterfactually-better hook |
 | **W5.3** | OOD selection + abstention study | W2.4 | held-out-novel set; report whether abstention calibration holds off-distribution | `[x]` harness landed (`ood_abstention_study`); reports ID-vs-OOD `confidence_gap` (sign not assumed) |
-| **W5.4** | Compositional use (novel skill composition) | W3.3 | benchmark requiring composing 2 known hooks into an unseen behaviour; report gap vs single-skill | `[ ]` **open** — a non-circular synthetic composition benchmark needs real per-hook semantics; deferred |
+| **W5.4** | Compositional use (novel skill composition) | W3.3 | benchmark composing 2 hooks into an unseen behaviour; report gap vs single-skill | `[x]` `compositional_routing.py` — directionally positive (both hooks contribute on the unseen compose task, both>single) **only with a frozen backbone**; effect tiny (~0.2%), erased by a trainable backbone. See `compositional_routing.md` |
 | **W5.5** | Router credit under pseudo-label self-training | W5.1, `self_improvement.md` §5 | confirm `§5` divergence guards cover router credit; poisoned-edge test severs+heals | `[ ]` **open** — needs router credit wired into the pseudo-label broker; deferred |
 
 ---
@@ -300,3 +300,13 @@ demonstrate it.
   toward it. This is task-grounded credit (vs v1's synthetic label / v2's scalar
   outcome). New tests: counterfactual_credit (4). Research lane now W5.4/W5.5
   open.
+- *2026-06-30* — **W5.4 (compositional use) done — honest, nuanced.**
+  `compositional_routing.py` trains hook A on a red transform and B on blue
+  (each only on its own task), then tests the unseen red+blue compose task.
+  With a **frozen** backbone (hooks must carry the skills) both hooks carry
+  positive counterfactual credit and both-active beats the best single hook —
+  real compositional generalization. But the effect is tiny (~0.2% of loss) and
+  a **trainable** backbone absorbs the transforms, erasing it entirely. So
+  composition is a demonstrated-but-marginal behaviour, not a dependable
+  mechanism (same weak hook output-leverage as W6.2). New tests:
+  compositional_routing (2). Research lane: only W5.5 remains.
