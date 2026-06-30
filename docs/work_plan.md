@@ -144,7 +144,7 @@ native parameter-isolation method.
 
 | ID | Item | Depends on | Files | Acceptance | Status |
 |----|------|-----------|-------|------------|--------|
-| **W4.1** | Plateau detector → `LatentNeuralHook` registration | W1.3, W3.3 | `scripts/training/self_improve/orchestrator.py`, `omnilatent/model/hooks.py` | manufactured plateau triggers a fresh hook (gate≈0); backbone weights unchanged; new hook trains and becomes routable by W2.2 | `[~]` mechanism exists; routing-integration pending Phase 2 |
+| **W4.1** | Plateau detector → `LatentNeuralHook` registration | W1.3, W3.3 | `scripts/training/self_improve/orchestrator.py`, `omnilatent/model/hooks.py` | manufactured plateau triggers a fresh hook (gate≈0); backbone weights unchanged; new hook trains and becomes routable by W2.2 | `[x]` mechanism + routing-integration (registry sync) done |
 
 ---
 
@@ -183,7 +183,10 @@ vibe.
   controller that co-activates the selected hooks, and credit-assignment v1
   (CE + Switch load-balancing) with positive counterfactual lift on the routing
   probe. Selected skills are applied per-input.
-- **M5 — Grows:** Phase 4 done. Capacity expands on demand without regression.
+- **M5 — Grows:** ✅ **DONE** (2026-06-30). Phase 4 mechanism pre-existed and
+  W4.1 now wires expansion hooks into the expert registry, so newly-grown
+  capacity is immediately routable. Capacity expands on demand without
+  regression and becomes selectable.
 - *(Research)* **R*** — Phase 5 items report results as they land.
 
 ---
