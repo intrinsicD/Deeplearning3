@@ -163,22 +163,36 @@ class Trainer:
 
         available = list(batch.keys())
         if len(available) == 0:
-            return {"total": 0.0}
+            # No usable modality this step. Report it as *skipped* — never as a
+            # zero-loss step, which would silently bias the loss average and
+            # mask a broken data path (Audit.md A3).
+            return {"skipped": 1.0}
 
-        # Use task sampler for modality pair selection
+        # Use task sampler for modality pair selection.
         src_mod, tgt_mod = self.task_sampler.sample(available)
+
+        # Cross-modal training needs row-aligned pairs. Union collation
+        # (Audit.md A3) can yield different per-modality batch sizes, so demote
+        # a misaligned cross-modal task to self-reconstruction instead of
+        # forwarding mismatched tensors.
+        if src_mod != tgt_mod and batch[src_mod].shape[0] != batch[tgt_mod].shape[0]:
+            tgt_mod = src_mod
 
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", dtype=self.amp_dtype, enabled=self.config.mixed_precision):
-            # Encode all available modalities for contrastive loss
+            # Encode modalities for the contrastive term — only those whose
+            # batch dimension matches the source, so InfoNCE sees aligned rows.
             latents = None
-            if len(available) >= 2 and self.config.contrastive_weight > 0:
-                latents = {}
-                for mod in available:
-                    enc = self.model.encode(mod, batch[mod])
-                    # Mean-pool content tokens (skip modality indicator at pos 0)
-                    latents[mod] = enc[:, 1:].mean(dim=1)
+            if self.config.contrastive_weight > 0:
+                ref_b = batch[src_mod].shape[0]
+                aligned = [m for m in available if batch[m].shape[0] == ref_b]
+                if len(aligned) >= 2:
+                    latents = {}
+                    for mod in aligned:
+                        enc = self.model.encode(mod, batch[mod])
+                        # Mean-pool content tokens (skip modality indicator at pos 0)
+                        latents[mod] = enc[:, 1:].mean(dim=1)
 
             result = self.model(
                 source_modality=src_mod,
@@ -243,6 +257,8 @@ class Trainer:
 
         data_iter = iter(self.dataloader)
         running_loss = 0.0
+        n_loss_steps = 0
+        n_skipped = 0
         t0 = time.time()
 
         for step in range(self.global_step, self.config.max_steps):
@@ -257,21 +273,31 @@ class Trainer:
                 batch = next(data_iter)
 
             losses = self._train_step(batch)
-            running_loss += losses.get("total", 0.0)
+            if losses.get("skipped"):
+                n_skipped += 1
+            else:
+                running_loss += losses.get("total", 0.0)
+                n_loss_steps += 1
 
             if (step + 1) % log_interval == 0:
-                avg_loss = running_loss / log_interval
+                # Average only over steps that actually produced a loss, so
+                # skipped (empty-batch) steps cannot deflate the reported loss.
+                avg_loss = running_loss / max(n_loss_steps, 1)
                 elapsed = time.time() - t0
                 steps_per_sec = log_interval / elapsed
                 avg_grad = self.metrics.avg_grad_norm()
+                skip_note = f" | skipped {n_skipped}" if n_skipped else ""
                 print(
                     f"step {step + 1:>6d} | "
                     f"loss {avg_loss:.4f} | "
                     f"lr {lr:.2e} | "
                     f"grad {avg_grad:.2f} | "
                     f"{steps_per_sec:.1f} steps/s"
+                    f"{skip_note}"
                 )
                 running_loss = 0.0
+                n_loss_steps = 0
+                n_skipped = 0
                 t0 = time.time()
 
             # Validation

@@ -89,36 +89,48 @@ def collate_multimodal(
 ) -> dict[str, torch.Tensor]:
     """Collate a batch of multi-modal samples.
 
-    Pads text and audio to the maximum length in the batch.
-    Images and videos are stacked directly (fixed spatial size).
+    Uses **union** semantics: every modality present in *any* sample survives,
+    stacked over just the samples that carry it. The previous intersection
+    semantics silently dropped a modality whenever a single sample lacked it,
+    which on mixed real batches could empty the batch entirely and produce a
+    fake zero-loss step (Audit.md A3).
+
+    Consequence: per-modality batch sizes may differ. Cross-modal training
+    steps that need row-aligned pairs must check this (see
+    ``Trainer._train_step``); self-reconstruction is always well defined.
+
+    Pads text and audio to the per-modality maximum length; images and videos
+    are stacked directly (fixed spatial size).
     """
     result: dict[str, torch.Tensor] = {}
 
-    # Find which modalities are present in ALL samples of this batch
-    common_modalities = set(batch[0].keys())
-    for sample in batch[1:]:
-        common_modalities &= set(sample.keys())
+    # Union of modalities present across the batch.
+    present: set[str] = set()
+    for sample in batch:
+        present |= set(sample.keys())
 
-    if "text" in common_modalities:
-        max_len = max(s["text"].shape[0] for s in batch)
-        padded = torch.zeros(len(batch), max_len, dtype=torch.long)
-        for i, s in enumerate(batch):
-            padded[i, : s["text"].shape[0]] = s["text"]
+    if "text" in present:
+        texts = [s["text"] for s in batch if "text" in s]
+        max_len = max(t.shape[0] for t in texts)
+        padded = torch.zeros(len(texts), max_len, dtype=torch.long)
+        for i, t in enumerate(texts):
+            padded[i, : t.shape[0]] = t
         result["text"] = padded
 
-    if "audio" in common_modalities:
-        max_frames = max(s["audio"].shape[1] for s in batch)
-        n_mels = batch[0]["audio"].shape[0]
-        padded = torch.zeros(len(batch), n_mels, max_frames)
-        for i, s in enumerate(batch):
-            padded[i, :, : s["audio"].shape[1]] = s["audio"]
+    if "audio" in present:
+        audios = [s["audio"] for s in batch if "audio" in s]
+        max_frames = max(a.shape[1] for a in audios)
+        n_mels = audios[0].shape[0]
+        padded = torch.zeros(len(audios), n_mels, max_frames)
+        for i, a in enumerate(audios):
+            padded[i, :, : a.shape[1]] = a
         result["audio"] = padded
 
-    if "image" in common_modalities:
-        result["image"] = torch.stack([s["image"] for s in batch])
+    if "image" in present:
+        result["image"] = torch.stack([s["image"] for s in batch if "image" in s])
 
-    if "video" in common_modalities:
-        result["video"] = torch.stack([s["video"] for s in batch])
+    if "video" in present:
+        result["video"] = torch.stack([s["video"] for s in batch if "video" in s])
 
     return result
 
