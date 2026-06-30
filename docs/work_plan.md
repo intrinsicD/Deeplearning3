@@ -57,16 +57,16 @@ identical hidden states for the same input with hooks registered.
 
 | ID | Item | Findings | Depends on | Files | Acceptance | Status |
 |----|------|----------|-----------|-------|------------|--------|
-| **W0.1** | Put learnable loss params in the optimizer | A4, A7 | — | `omnilatent/training/trainer.py`, `omnilatent/training/losses.py`, `scripts/training/curriculum_train.py`, `scripts/training/train_mmwm_minari.py`, `MMWM/losses.py` | Probe asserts `criterion_params_in_optimizer == 4/4` (Omni) and `8/8` (temporal) and MMWM uncertainty params update; build optimizer from `chain(model.parameters(), criterion.parameters())` **after** all criteria exist | `[ ]` |
-| **W0.2** | Real data path: collate bridge + tensorized samples | A1, A2 | — | `omnilatent/data/collate/__init__.py`, `omnilatent/data/sources/local.py`, `omnilatent/data/datasets/streaming.py`, `omnilatent/data/sources/manifest.py` | `StreamingMultiModalDataset` → default DataLoader yields `dict[str,Tensor]`; local audio/video samples carry decoded tensors not paths; `streaming:"false"` parses to `False` (fix `bool(...)` coercion) | `[ ]` |
-| **W0.3** | Collator must not silently drop modalities / emit zero-loss steps | A3 | W0.2 | `omnilatent/training/data.py`, `omnilatent/training/trainer.py` | Collator preserves all present modalities; a step with <2 usable modalities is skipped+counted, never returns `total: 0.0`; unit test on a mixed batch | `[ ]` |
-| **W0.4** | Fail loud on bad media (no zero-tensor fallback) | A10 | — | `omnilatent/training/video_dataset.py`, `omnilatent/data/datasets/coco_dataset.py`, `datasets/adapters/mmwm_adapter.py` | Failed image/audio/video load raises a typed `MediaDecodeError` (or is dropped by the dataset), never returns zeros; test feeds a corrupt file and asserts raise/skip | `[ ]` |
-| **W0.5** | Inference parity: hooks + true multimodal fusion | A9 | — | `omnilatent/model/omnilatent.py` | `generate()` runs through the hook manager (identical hidden states to training forward); `forward_multimodal()` fuses all provided inputs instead of picking one; tests assert both | `[ ]` |
-| **W0.6** | Fix direction-blind / collapse-inducing temporal losses | A5 | W0.1 | `omnilatent/training/losses.py`, `scripts/training/curriculum_train.py` | `TemporalOrderLoss` gives different logits for `(A,B)` vs `(B,A)` (use the abandoned `combined` classifier input); distant-clip objective models change, not `MSE(z_anchor,z_context)` collapse; unit tests for asymmetry and non-collapse | `[ ]` |
-| **W0.7** | Repair broken MMWM AV training script | A6 | — | `scripts/training/train_mmwm_av.py`, `MMWM/decoders.py`, `MMWM/losses.py` | Script runs end-to-end on synthetic data: define `include_text`/`include_image`, use `output_channels`/`output_size`, pass `weights` first to `WorldModelLoss`; smoke test | `[ ]` |
-| **W0.8** | HPWM: refuse to freeze a random DINO; honor `--ssv2-dir` | A8 | — | `hpwm/model.py`, `hpwm/train.py`, `hpwm/data.py` | If pretrained DINO load fails, **raise** (or require `--allow-random-dino`); `--ssv2-dir` is threaded into `create_dataloaders`; test asserts both | `[ ]` |
-| **W0.9** | Fix broken `curriculum_train` test imports | (test debt noted in Verification) | — | `tests/...` | The 3 failing temporal/video tests import from `scripts.training.curriculum_train`; suite green | `[ ]` |
-| **W0.10** | Loop-integrity gate test | — | W0.1–W0.5 | `tests/integration/test_loop_integrity.py` | New test encodes the four phase-exit assertions above; CI runs it | `[ ]` |
+| **W0.1** | Put learnable loss params in the optimizer | A4, A7 | — | `omnilatent/training/trainer.py`, `omnilatent/training/losses.py`, `scripts/training/curriculum_train.py`, `scripts/training/train_mmwm_minari.py`, `MMWM/losses.py` | Probe asserts `criterion_params_in_optimizer == 4/4` (Omni) and `8/8` (temporal) and MMWM uncertainty params update; build optimizer from `chain(model.parameters(), criterion.parameters())` **after** all criteria exist | `[x]` |
+| **W0.2** | Real data path: collate bridge + tensorized samples | A1, A2 | — | `omnilatent/data/collate/__init__.py`, `omnilatent/data/sources/local.py`, `omnilatent/data/datasets/streaming.py`, `omnilatent/data/sources/manifest.py` | `StreamingMultiModalDataset` → default DataLoader yields `dict[str,Tensor]`; local audio/video samples carry decoded tensors not paths; `streaming:"false"` parses to `False` (fix `bool(...)` coercion) | `[x]` |
+| **W0.3** | Collator must not silently drop modalities / emit zero-loss steps | A3 | W0.2 | `omnilatent/training/data.py`, `omnilatent/training/trainer.py` | Collator preserves all present modalities; a step with <2 usable modalities is skipped+counted, never returns `total: 0.0`; unit test on a mixed batch | `[x]` |
+| **W0.4** | Fail loud on bad media (no zero-tensor fallback) | A10 | — | `omnilatent/training/video_dataset.py`, `omnilatent/data/datasets/coco_dataset.py`, `datasets/adapters/mmwm_adapter.py` | Failed image/audio/video load raises a typed `MediaDecodeError` (or is dropped by the dataset), never returns zeros; test feeds a corrupt file and asserts raise/skip | `[x]` |
+| **W0.5** | Inference parity: hooks + true multimodal fusion | A9 | — | `omnilatent/model/omnilatent.py` | `generate()` runs through the hook manager (identical hidden states to training forward); `forward_multimodal()` fuses all provided inputs instead of picking one; tests assert both | `[x]` |
+| **W0.6** | Fix direction-blind / collapse-inducing temporal losses | A5 | W0.1 | `omnilatent/training/losses.py`, `scripts/training/curriculum_train.py` | `TemporalOrderLoss` gives different logits for `(A,B)` vs `(B,A)` (use the abandoned `combined` classifier input); distant-clip objective models change, not `MSE(z_anchor,z_context)` collapse; unit tests for asymmetry and non-collapse | `[x]` |
+| **W0.7** | Repair broken MMWM AV training script | A6 | — | `scripts/training/train_mmwm_av.py`, `MMWM/decoders.py`, `MMWM/losses.py` | Script runs end-to-end on synthetic data: define `include_text`/`include_image`, use `output_channels`/`output_size`, pass `weights` first to `WorldModelLoss`; smoke test | `[x]` |
+| **W0.8** | HPWM: refuse to freeze a random DINO; honor `--ssv2-dir` | A8 | — | `hpwm/model.py`, `hpwm/train.py`, `hpwm/data.py` | If pretrained DINO load fails, **raise** (or require `--allow-random-dino`); `--ssv2-dir` is threaded into `create_dataloaders`; test asserts both | `[x]` |
+| **W0.9** | Fix broken `curriculum_train` test imports | (test debt noted in Verification) | — | `tests/...` | The 3 failing temporal/video tests import from `scripts.training.curriculum_train`; suite green | `[x]` |
+| **W0.10** | Loop-integrity gate test | — | W0.1–W0.5 | `tests/integration/test_loop_integrity.py` | New test encodes the four phase-exit assertions above; CI runs it | `[x]` |
 
 ---
 
@@ -151,7 +151,8 @@ vibe.
 
 ## Milestones
 
-- **M1 — Trustworthy loop:** Phase 0 done (`W0.10` green). The repo trains on
+- **M1 — Trustworthy loop:** ✅ **DONE** (2026-06-30). Phase 0 complete,
+  `W0.10` green, full suite 675 passed / 0 failed. The repo trains on
   real signal and fails loudly. *Prerequisite for any claim in the README.*
 - **M2 — Measured & safe:** Phase 1 done. Capability can rise with a hard
   floor under it.
@@ -168,3 +169,10 @@ vibe.
 
 - *2026-06-30* — Plan created from `Audit.md` (A1–A10) + wish-2/3 proposal
   (P1/P2). All items `todo`.
+- *2026-06-30* — **Phase 0 (W0.1–W0.10) complete.** Milestone M1 reached:
+  loss params optimized (W0.1), manifest data reaches training (W0.2),
+  union collation + no fake zero-loss (W0.3), media fails loud (W0.4),
+  hooks in generate() + real fusion (W0.5), temporal order/collapse fixed
+  (W0.6), MMWM AV script repaired (W0.7), random-DINO guard + --ssv2-dir
+  (W0.8), test imports fixed (W0.9), loop-integrity gate added (W0.10).
+  Full suite: 675 passed, 4 skipped, 0 failed. Next: Phase 1 (quality floor).
