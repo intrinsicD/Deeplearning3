@@ -157,9 +157,15 @@ def build_sample_collator(
     """Build a ``DataLoader`` ``collate_fn`` that turns a list of
     ``MultiModalSample`` into a ``dict[str, Tensor]`` batch."""
 
+    # Lazy import avoids an import-time cycle (data layer ← training).
+    from omnilatent.training.data import ROW_SUFFIX
+
     def collate(batch: List[MultiModalSample]) -> dict[str, torch.Tensor]:
         converted = [sample_to_inputs(s, config, tokenizer) for s in batch]
         result: dict[str, torch.Tensor] = {}
+
+        def _rows(mod: str) -> torch.Tensor:
+            return torch.tensor([i for i, c in enumerate(converted) if mod in c], dtype=torch.long)
 
         # Text: pad to the longest sequence in the batch (id 0 = padding).
         text_tokens = [c["text"] for c in converted if "text" in c]
@@ -169,6 +175,7 @@ def build_sample_collator(
             for i, t in enumerate(text_tokens):
                 padded[i, : t.shape[0]] = t
             result["text"] = padded
+            result["text" + ROW_SUFFIX] = _rows("text")
 
         # Audio: pad mel frames to the longest in the batch.
         audios = [c["audio"] for c in converted if "audio" in c]
@@ -179,14 +186,17 @@ def build_sample_collator(
             for i, a in enumerate(audios):
                 padded_a[i, :, : a.shape[1]] = a
             result["audio"] = padded_a
+            result["audio" + ROW_SUFFIX] = _rows("audio")
 
         # Image / video: fixed shape after standardization → stack directly.
         images = [c["image"] for c in converted if "image" in c]
         if images:
             result["image"] = torch.stack(images)
+            result["image" + ROW_SUFFIX] = _rows("image")
         videos = [c["video"] for c in converted if "video" in c]
         if videos:
             result["video"] = torch.stack(videos)
+            result["video" + ROW_SUFFIX] = _rows("video")
 
         return result
 

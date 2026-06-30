@@ -302,7 +302,13 @@ class CurriculumTrainer:
 
     def _train_step_synthetic(self, batch: dict) -> dict[str, float]:
         """Training step for synthetic multi-modal data."""
-        batch = {k: v.to(self.device) for k, v in batch.items()}
+        from omnilatent.training.data import ROW_SUFFIX
+
+        batch = {
+            k: v.to(self.device)
+            for k, v in batch.items()
+            if not k.endswith(ROW_SUFFIX)
+        }
         available = list(batch.keys())
         if not available:
             return {"total": 0.0}

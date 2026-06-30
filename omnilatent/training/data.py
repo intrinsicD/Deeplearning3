@@ -84,6 +84,13 @@ class SyntheticMultiModalDataset(Dataset):
         return sample
 
 
+#: Suffix marking a per-modality row-provenance tensor in a collated batch.
+#: ``batch[f"{mod}{ROW_SUFFIX}"]`` is a LongTensor of the original sample index
+#: each stacked row of ``batch[mod]`` came from. Consumers that iterate
+#: modalities must skip these keys (see ``Trainer._train_step``).
+ROW_SUFFIX = "__rows"
+
+
 def collate_multimodal(
     batch: list[dict[str, torch.Tensor]],
 ) -> dict[str, torch.Tensor]:
@@ -95,9 +102,12 @@ def collate_multimodal(
     which on mixed real batches could empty the batch entirely and produce a
     fake zero-loss step (Audit.md A3).
 
-    Consequence: per-modality batch sizes may differ. Cross-modal training
-    steps that need row-aligned pairs must check this (see
-    ``Trainer._train_step``); self-reconstruction is always well defined.
+    Consequence: per-modality batch sizes may differ. Because the stacks are
+    built independently, row *i* of one modality need not come from the same
+    original sample as row *i* of another. To let cross-modal training pair
+    only genuinely co-occurring rows, each modality also gets a
+    ``f"{mod}{ROW_SUFFIX}"`` LongTensor recording the original sample index of
+    every stacked row (``Trainer._train_step`` uses it to align pairs).
 
     Pads text and audio to the per-modality maximum length; images and videos
     are stacked directly (fixed spatial size).
@@ -109,6 +119,9 @@ def collate_multimodal(
     for sample in batch:
         present |= set(sample.keys())
 
+    def _rows(mod: str) -> torch.Tensor:
+        return torch.tensor([i for i, s in enumerate(batch) if mod in s], dtype=torch.long)
+
     if "text" in present:
         texts = [s["text"] for s in batch if "text" in s]
         max_len = max(t.shape[0] for t in texts)
@@ -116,6 +129,7 @@ def collate_multimodal(
         for i, t in enumerate(texts):
             padded[i, : t.shape[0]] = t
         result["text"] = padded
+        result["text" + ROW_SUFFIX] = _rows("text")
 
     if "audio" in present:
         audios = [s["audio"] for s in batch if "audio" in s]
@@ -125,12 +139,15 @@ def collate_multimodal(
         for i, a in enumerate(audios):
             padded[i, :, : a.shape[1]] = a
         result["audio"] = padded
+        result["audio" + ROW_SUFFIX] = _rows("audio")
 
     if "image" in present:
         result["image"] = torch.stack([s["image"] for s in batch if "image" in s])
+        result["image" + ROW_SUFFIX] = _rows("image")
 
     if "video" in present:
         result["video"] = torch.stack([s["video"] for s in batch if "video" in s])
+        result["video" + ROW_SUFFIX] = _rows("video")
 
     return result
 

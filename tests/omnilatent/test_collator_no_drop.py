@@ -34,9 +34,13 @@ def test_collate_union_preserves_all_modalities() -> None:
         {"text": torch.randint(1, cfg.vocab_size, (7,))},
     ]
     out = collate_multimodal(batch)
-    assert set(out.keys()) == {"text", "image"}  # nothing dropped
+    modalities = {k for k in out if not k.endswith("__rows")}
+    assert modalities == {"text", "image"}  # nothing dropped
     assert out["text"].shape[0] == 2  # two text samples
     assert out["image"].shape[0] == 1  # one image sample
+    # Row provenance records which original samples each row came from.
+    assert out["text__rows"].tolist() == [0, 2]
+    assert out["image__rows"].tolist() == [1]
 
 
 def test_empty_batch_is_skipped_not_zero_loss() -> None:

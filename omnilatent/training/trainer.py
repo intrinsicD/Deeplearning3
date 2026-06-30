@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 
 from omnilatent.config import OmniLatentConfig
 from omnilatent.model.omnilatent import OmniLatentModel
+from omnilatent.training.data import ROW_SUFFIX
 from omnilatent.training.losses import MultiModalLoss
 from omnilatent.training.metrics import MetricsAggregator, StepMetrics
 from omnilatent.training.sampler import TaskSampler
@@ -152,6 +153,66 @@ class Trainer:
             pg["lr"] = lr
         return lr
 
+    def _align_rows(
+        self,
+        data: dict[str, torch.Tensor],
+        rows: dict[str, torch.Tensor],
+        src: str,
+        tgt: str,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Return (src, tgt) tensors restricted to genuinely co-occurring rows.
+
+        Pairs only rows that came from the same original sample (via row
+        provenance). Returns ``None`` when no sample carries both modalities.
+        Falls back to the size guard when provenance is unavailable.
+        """
+        if src not in rows or tgt not in rows:
+            if data[src].shape[0] == data[tgt].shape[0]:
+                return data[src], data[tgt]
+            return None
+        src_rows = rows[src].tolist()
+        tgt_pos = {o: i for i, o in enumerate(rows[tgt].tolist())}
+        pairs = [(i, tgt_pos[o]) for i, o in enumerate(src_rows) if o in tgt_pos]
+        if not pairs:
+            return None
+        device = data[src].device
+        s_idx = torch.tensor([i for i, _ in pairs], dtype=torch.long, device=device)
+        t_idx = torch.tensor([j for _, j in pairs], dtype=torch.long, device=device)
+        return data[src][s_idx], data[tgt][t_idx]
+
+    def _aligned_latents(
+        self,
+        data: dict[str, torch.Tensor],
+        rows: dict[str, torch.Tensor],
+        src: str,
+    ) -> dict[str, torch.Tensor] | None:
+        """Mean-pooled latents for modalities fully co-occurring with ``src``.
+
+        Only modalities whose rows are exactly the source's original-sample set
+        are kept, aligned in a common order — so InfoNCE never contrasts
+        unrelated rows. Returns ``None`` if fewer than two qualify.
+        """
+        if src not in rows:
+            ref_b = data[src].shape[0]
+            chosen = [m for m in data if data[m].shape[0] == ref_b]
+            if len(chosen) < 2:
+                return None
+            return {
+                m: self.model.encode(m, data[m])[:, 1:].mean(dim=1) for m in chosen
+            }
+        src_set = set(rows[src].tolist())
+        order = sorted(src_set)
+        chosen = [m for m in data if m in rows and set(rows[m].tolist()) == src_set]
+        if len(chosen) < 2:
+            return None
+        device = data[src].device
+        latents: dict[str, torch.Tensor] = {}
+        for m in chosen:
+            pos = {o: i for i, o in enumerate(rows[m].tolist())}
+            idx = torch.tensor([pos[o] for o in order], dtype=torch.long, device=device)
+            latents[m] = self.model.encode(m, data[m][idx])[:, 1:].mean(dim=1)
+        return latents
+
     def _train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
         """One training step.
 
@@ -161,7 +222,13 @@ class Trainer:
         # Move batch to device
         batch = {k: v.to(self.device) for k, v in batch.items()}
 
-        available = list(batch.keys())
+        # Separate modality tensors from per-modality row-provenance tensors.
+        rows = {
+            k[: -len(ROW_SUFFIX)]: v for k, v in batch.items() if k.endswith(ROW_SUFFIX)
+        }
+        data = {k: v for k, v in batch.items() if not k.endswith(ROW_SUFFIX)}
+
+        available = list(data.keys())
         if len(available) == 0:
             # No usable modality this step. Report it as *skipped* — never as a
             # zero-loss step, which would silently bias the loss average and
@@ -171,39 +238,41 @@ class Trainer:
         # Use task sampler for modality pair selection.
         src_mod, tgt_mod = self.task_sampler.sample(available)
 
-        # Cross-modal training needs row-aligned pairs. Union collation
-        # (Audit.md A3) can yield different per-modality batch sizes, so demote
-        # a misaligned cross-modal task to self-reconstruction instead of
-        # forwarding mismatched tensors.
-        if src_mod != tgt_mod and batch[src_mod].shape[0] != batch[tgt_mod].shape[0]:
-            tgt_mod = src_mod
+        # Cross-modal training needs genuinely paired rows — same ORIGINAL
+        # sample for source and target. Independent union stacking means equal
+        # batch sizes do NOT imply row alignment (e.g. [text-only, image-only]
+        # gives text.shape[0]==image.shape[0]==1 from two unrelated samples).
+        # Use row provenance to pair only co-occurring rows; if none, demote to
+        # self-reconstruction rather than train on unrelated rows.
+        src_data = data[src_mod]
+        tgt_data = data[tgt_mod]
+        if src_mod != tgt_mod:
+            paired = self._align_rows(data, rows, src_mod, tgt_mod)
+            if paired is None:
+                tgt_mod = src_mod
+                tgt_data = src_data
+            else:
+                src_data, tgt_data = paired
 
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", dtype=self.amp_dtype, enabled=self.config.mixed_precision):
-            # Encode modalities for the contrastive term — only those whose
-            # batch dimension matches the source, so InfoNCE sees aligned rows.
+            # Encode modalities for the contrastive term — only those that share
+            # the source's original rows, so InfoNCE sees genuinely paired rows.
             latents = None
             if self.config.contrastive_weight > 0:
-                ref_b = batch[src_mod].shape[0]
-                aligned = [m for m in available if batch[m].shape[0] == ref_b]
-                if len(aligned) >= 2:
-                    latents = {}
-                    for mod in aligned:
-                        enc = self.model.encode(mod, batch[mod])
-                        # Mean-pool content tokens (skip modality indicator at pos 0)
-                        latents[mod] = enc[:, 1:].mean(dim=1)
+                latents = self._aligned_latents(data, rows, src_mod)
 
             result = self.model(
                 source_modality=src_mod,
-                source_data=batch[src_mod],
+                source_data=src_data,
                 target_modality=tgt_mod,
-                target_data=batch[tgt_mod],
+                target_data=tgt_data,
             )
 
             # Compute loss (include reasoning outputs if present)
             predictions = {tgt_mod: result["output"]}
-            targets = {tgt_mod: batch[tgt_mod]}
+            targets = {tgt_mod: tgt_data}
 
             loss_dict = self.criterion(
                 predictions,
@@ -324,6 +393,7 @@ class Trainer:
             if i >= max_batches:
                 break
             batch = {k: v.to(self.device) for k, v in batch.items()}
+            batch = {k: v for k, v in batch.items() if not k.endswith(ROW_SUFFIX)}
             available = list(batch.keys())
             if not available:
                 continue
