@@ -75,6 +75,41 @@ def gaussian_recon_label_fn(
     return label, confidence
 
 
+def router_credit_label_fn(
+    sample: torch.Tensor, producer: ComponentPlugin,
+) -> tuple[torch.Tensor, float]:
+    """A **router-credit** pseudo-label edge (work plan W5.5).
+
+    The producer reports, for one image, the per-hook counterfactual credit
+    (W5.2) — how much each of its hooks reduces that input's reconstruction
+    loss. A consumer can use this to bias *its own* router toward hooks a more
+    advanced producer found useful. Confidence is the softmax-peakiness of the
+    credit vector ∈ (0, 1]: high when one hook clearly dominates, low (near
+    ``1/n_hooks``) when no hook stands out — so the broker's confidence gate
+    drops uninformative credit.
+
+    Being a normal ``label_fn``, this edge inherits **all** the §5 safeguards
+    (staleness budget, confidence gating, snapshot-mediated reads, and the
+    divergence guard's sever/heal) with no special-casing in the broker.
+    """
+    from omnilatent.training.routed_trainer import counterfactual_hook_credit
+
+    if sample.dim() == 3:
+        x = sample.unsqueeze(0).to(producer.device)
+    elif sample.dim() == 4:
+        x = sample.to(producer.device)
+    else:
+        raise ValueError(
+            f"router_credit_label_fn expects a 3D or 4D image; got shape {tuple(sample.shape)}"
+        )
+    credit, _names = counterfactual_hook_credit(producer.model, "image", x)
+    if credit.shape[1] == 0:
+        return torch.zeros(0), 0.0  # no hooks → nothing to teach
+    per_hook = credit.mean(dim=0)  # (n_hooks,)
+    confidence = float(torch.softmax(per_hook, dim=0).max().item())
+    return per_hook.cpu(), confidence
+
+
 # ---------------------------------------------------------------------------
 # Consumer-side: a small mixin-style helper plugins call from train_step
 # ---------------------------------------------------------------------------
@@ -198,5 +233,6 @@ __all__ = [
     "PluginPseudoLabelConsumer",
     "apply_pending_labels",
     "gaussian_recon_label_fn",
+    "router_credit_label_fn",
     "image_consistency_loss",
 ]

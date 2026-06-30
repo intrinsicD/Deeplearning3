@@ -161,7 +161,7 @@ vibe.
 | **W5.2** | Credit v3: counterfactual attribution | W5.1 | per-sample marginal-loss credit from hook ablation; router learns to prefer the genuinely-helpful hook | `[x]` `counterfactual_hook_credit` + `RoutedTrainer.step_counterfactual`; verified credit = exact loss deltas and the router routes toward the counterfactually-better hook |
 | **W5.3** | OOD selection + abstention study | W2.4 | held-out-novel set; report whether abstention calibration holds off-distribution | `[x]` harness landed (`ood_abstention_study`); reports ID-vs-OOD `confidence_gap` (sign not assumed) |
 | **W5.4** | Compositional use (novel skill composition) | W3.3 | benchmark composing 2 hooks into an unseen behaviour; report gap vs single-skill | `[x]` `compositional_routing.py` — directionally positive (both hooks contribute on the unseen compose task, both>single) **only with a frozen backbone**; effect tiny (~0.2%), erased by a trainable backbone. See `compositional_routing.md` |
-| **W5.5** | Router credit under pseudo-label self-training | W5.1, `self_improvement.md` §5 | confirm `§5` divergence guards cover router credit; poisoned-edge test severs+heals | `[ ]` **open** — needs router credit wired into the pseudo-label broker; deferred |
+| **W5.5** | Router credit under pseudo-label self-training | W5.1, `self_improvement.md` §5 | confirm `§5` divergence guards cover router credit; poisoned-edge test severs+heals | `[x]` `router_credit_label_fn` edge; broker test shows credit flows → severs (poisoned) → auto-heals, and the confidence gate drops uninformative credit |
 
 ---
 
@@ -310,3 +310,13 @@ demonstrate it.
   composition is a demonstrated-but-marginal behaviour, not a dependable
   mechanism (same weak hook output-leverage as W6.2). New tests:
   compositional_routing (2). Research lane: only W5.5 remains.
+- *2026-06-30* — **W5.5 done — research lane complete.** Added
+  `router_credit_label_fn`: a producer reports per-hook counterfactual credit
+  (W5.2) for an image as a pseudo-label, confidence = softmax-peakiness of the
+  credit. Because it is a normal `label_fn`, it inherits every §5 guard with no
+  broker special-casing. Test (real broker + vault + OmniLatent producer):
+  router credit flows through the edge, the divergence guard severs the
+  (poisoned) edge so labels stop, it auto-heals after `heal_after_steps`, and
+  the confidence gate drops uninformative (near-uniform) credit. New tests:
+  router_credit_edge (4). **All work-plan items (Phases 0–6 + research lane
+  W5.1–W5.5) are now done.**
