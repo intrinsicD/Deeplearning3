@@ -385,13 +385,23 @@ class CurriculumTrainer:
                             z_anchor, z_context, dist_labels
                         )
 
-                # Distant predict: predict context latent from anchor
+                # Distant predict: predict the *context* latent from the anchor
+                # through a learnable predictor, against a stop-gradient target.
+                # Minimizing MSE(z_anchor, z_context) directly would instead pull
+                # different-time clips onto the same point (temporal collapse,
+                # Audit.md A5).
+                pred_context = self.temporal_criterion.distant_predictor(z_anchor)
+                target_context = z_context.detach()
                 temporal_losses["distant_predict"] = F.mse_loss(
-                    z_anchor, z_context
-                ) + 0.5 * (1.0 - F.cosine_similarity(z_anchor, z_context, dim=-1).mean())
+                    pred_context, target_context
+                ) + 0.5 * (
+                    1.0 - F.cosine_similarity(pred_context, target_context, dim=-1).mean()
+                )
 
             if not temporal_losses:
-                return {"total": 0.0}
+                # No temporal pair available — report skipped, not a fake
+                # zero-loss step (consistent with Audit.md A3).
+                return {"skipped": 1.0}
 
             loss_result = self.temporal_criterion(temporal_losses)
             total = loss_result["temporal_total"]

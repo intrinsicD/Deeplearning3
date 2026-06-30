@@ -98,7 +98,7 @@ class TestTemporalDistanceClassification:
 
 class TestTemporalOrderLoss:
     def test_forward_shape(self) -> None:
-        loss_fn = TemporalOrderLoss()
+        loss_fn = TemporalOrderLoss(hidden_dim=64)
         z_a = torch.randn(4, 64)
         z_b = torch.randn(4, 64)
         labels = torch.randint(0, 2, (4,))
@@ -108,7 +108,7 @@ class TestTemporalOrderLoss:
 
     def test_perfect_separation(self) -> None:
         """Loss should be lower when predictions are correct."""
-        loss_fn = TemporalOrderLoss()
+        loss_fn = TemporalOrderLoss(hidden_dim=64)
         # Create clearly separable embeddings
         z_a = torch.ones(4, 64)
         z_b = -torch.ones(4, 64)
