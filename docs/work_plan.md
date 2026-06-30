@@ -158,7 +158,7 @@ vibe.
 | ID | Item | Depends on | Acceptance (per experiment) | Status |
 |----|------|-----------|------------------------------|--------|
 | **W5.1** | Credit v2: outcome-based (probe-delta reward) | W3.3, W1.3 | router credit from a scalar outcome reward; harness reports above-chance routing | `[x]` harness landed (`fit_router_outcome_based`, REINFORCE+baseline); learns above chance from reward alone |
-| **W5.2** | Credit v3: counterfactual attribution on replay | W5.1 | marginal-probe-improvement credit; measurably better OOD selection than v1/v2 | `[ ]` **open** — needs orchestrator/replay integration; deferred (no guaranteed result) |
+| **W5.2** | Credit v3: counterfactual attribution | W5.1 | per-sample marginal-loss credit from hook ablation; router learns to prefer the genuinely-helpful hook | `[x]` `counterfactual_hook_credit` + `RoutedTrainer.step_counterfactual`; verified credit = exact loss deltas and the router routes toward the counterfactually-better hook |
 | **W5.3** | OOD selection + abstention study | W2.4 | held-out-novel set; report whether abstention calibration holds off-distribution | `[x]` harness landed (`ood_abstention_study`); reports ID-vs-OOD `confidence_gap` (sign not assumed) |
 | **W5.4** | Compositional use (novel skill composition) | W3.3 | benchmark requiring composing 2 known hooks into an unseen behaviour; report gap vs single-skill | `[ ]` **open** — a non-circular synthetic composition benchmark needs real per-hook semantics; deferred |
 | **W5.5** | Router credit under pseudo-label self-training | W5.1, `self_improvement.md` §5 | confirm `§5` divergence guards cover router credit; poisoned-edge test severs+heals | `[ ]` **open** — needs router credit wired into the pseudo-label broker; deferred |
@@ -291,3 +291,12 @@ demonstrate it.
   was the per-input count and overstated the batched reality; the ablation now
   reports hooks-injected-per-batch and `routing_ablation.md` carries the
   corrected, batch-aware numbers.
+- *2026-06-30* — **W5.2 (credit v3) done.** `counterfactual_hook_credit`
+  measures each hook's per-sample marginal effect on reconstruction loss by
+  ablation (n_hooks+1 forwards); `RoutedTrainer.step_counterfactual` trains the
+  router toward the counterfactually-best hook per input. Verified the credit
+  equals the exact measured loss deltas, a genuinely-helpful (overfit) hook
+  earns positive credit above an untrained one, and the router learns to route
+  toward it. This is task-grounded credit (vs v1's synthetic label / v2's scalar
+  outcome). New tests: counterfactual_credit (4). Research lane now W5.4/W5.5
+  open.

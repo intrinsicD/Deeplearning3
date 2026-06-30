@@ -25,12 +25,55 @@ from dataclasses import dataclass, field
 
 import torch
 
+import torch.nn.functional as F
+
 from omnilatent.agent.registry import ExpertRegistry
 from omnilatent.agent.router import LearnedLatentRouter
 from omnilatent.agent.routing_metrics import load_balancing_loss
 from omnilatent.training.losses import MultiModalLoss
 
 MODES = ("routed", "always_on", "no_hooks")
+
+
+@torch.no_grad()
+def _per_sample_recon_loss(model, modality: str, data: torch.Tensor) -> torch.Tensor:
+    """Per-sample self-reconstruction MSE ``(B,)`` under the current routing."""
+    out = model(modality, data, modality, data)["output"]
+    return ((out - data) ** 2).flatten(1).mean(dim=1)
+
+
+@torch.no_grad()
+def counterfactual_hook_credit(
+    model, modality: str, data: torch.Tensor
+) -> tuple[torch.Tensor, list[str]]:
+    """Per-sample marginal effect of each hook on reconstruction (work plan W5.2).
+
+    For every registered hook, measure how much activating *only* that hook
+    reduces the per-sample reconstruction loss versus the no-hook baseline.
+    Positive credit ⇒ the hook helps that input. This is a real, task-grounded
+    credit signal (credit v3): it measures what each hook actually does to the
+    loss, rather than a synthetic gold label (v1) or a scalar outcome (v2).
+
+    Returns ``(credit, hook_names)`` where ``credit`` is ``(B, n_hooks)`` in
+    ``hook_names`` order (the manager's hook order). Costs ``n_hooks + 1``
+    forward passes.
+    """
+    manager = model.hook_manager
+    names = list(manager.hooks.keys())
+    if not names:
+        return data.new_zeros(data.shape[0], 0), names
+    try:
+        manager.set_route_weights({n: 0.0 for n in names})
+        base = _per_sample_recon_loss(model, modality, data)
+        credit = data.new_zeros(data.shape[0], len(names))
+        for j, name in enumerate(names):
+            weights = {n: 0.0 for n in names}
+            weights[name] = 1.0
+            manager.set_route_weights(weights)
+            credit[:, j] = base - _per_sample_recon_loss(model, modality, data)
+    finally:
+        manager.set_route_weights(None)
+    return credit, names
 
 
 @dataclass
@@ -56,6 +99,7 @@ class RoutedTrainer:
     router: LearnedLatentRouter | None = None
     lr: float = 1e-3
     load_balance_weight: float = 0.01
+    counterfactual_weight: float = 1.0
     freeze_backbone: bool = True
     history: list[float] = field(default_factory=list)
 
@@ -143,6 +187,46 @@ class RoutedTrainer:
         self.history.append(value)
         return value
 
+    def step_counterfactual(self, batch: dict) -> float:
+        """One routed step trained with counterfactual credit (W5.2, credit v3).
+
+        The router is supervised toward the *counterfactually-best* hook for each
+        input (the hook whose ablation most reduces that input's loss), while the
+        selected hooks are trained on the reconstruction task as usual.
+        """
+        if self.mode != "routed":
+            raise ValueError("step_counterfactual requires mode='routed'")
+        data = batch[self.modality].to(self.device)
+        manager = self.model.hook_manager
+
+        # Task-grounded credit (no grad) → per-sample best hook as router target.
+        credit, names = counterfactual_hook_credit(self.model, self.modality, data)
+        best_local = credit.argmax(dim=1)
+        ids = self.router.registry.ids()
+        col = {eid: i for i, eid in enumerate(ids)}
+        target = torch.tensor(
+            [col["hook:" + names[int(b)]] for b in best_local],
+            dtype=torch.long, device=self.device,
+        )
+
+        logits = self._apply_routing(data)  # sets route weights, returns (B,E) logits
+        try:
+            result = self.model(self.modality, data, self.modality, data)
+            recon = self.criterion(
+                {self.modality: result["output"]}, {self.modality: data}
+            )["total"]
+            router_loss = F.cross_entropy(logits, target)
+            loss = recon + self.counterfactual_weight * router_loss
+            if self.optimizer is not None:
+                self.optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                self.optimizer.step()
+        finally:
+            manager.set_route_weights(None)
+        value = float(loss.detach().item())
+        self.history.append(value)
+        return value
+
     def train(self, dataloader, steps: int) -> list[float]:
         self.model.train()
         it = iter(dataloader)
@@ -186,4 +270,4 @@ class RoutedTrainer:
         return total / max(n, 1)
 
 
-__all__ = ["RoutedTrainer", "MODES"]
+__all__ = ["RoutedTrainer", "MODES", "counterfactual_hook_credit"]
