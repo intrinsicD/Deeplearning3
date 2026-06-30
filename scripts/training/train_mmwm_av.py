@@ -120,6 +120,9 @@ def main(argv=None):
         "include_image":    bool(adpcfg.get("include_image", True)),
         "include_audio":    bool(adpcfg.get("include_audio", True)),
     }
+    include_text = adapter_kwargs["include_text"]
+    include_image = adapter_kwargs["include_image"]
+    include_audio = adapter_kwargs["include_audio"]
     train_ds = MMWMAdapter(base_ds, **adapter_kwargs)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
@@ -167,7 +170,7 @@ def main(argv=None):
     if include_image:
         decoder_configs.append(("image_reconstruction", {
             "latent_dim": latent_dim * 4,
-            "out_channels": 3, "out_size": image_size,
+            "output_channels": 3, "output_size": image_size,
         }))
 
     model_cfg = ModelConfig(
@@ -178,8 +181,15 @@ def main(argv=None):
 
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model     = build_model(model_cfg, skip_validation=True)
-    loss_fn   = WorldModelLoss(model_cfg)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    # WorldModelLoss's first positional arg is `weights` (LossWeights), not a
+    # ModelConfig. Use learned uncertainty and build the loss before the
+    # optimizer so its log_vars are optimized (see W0.1).
+    loss_fn   = WorldModelLoss(learned_uncertainty=True).to(device)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(loss_fn.parameters()),
+        lr=lr,
+        weight_decay=1e-4,
+    )
     # Convert total_steps → epochs
     steps_per_epoch = max(1, len(train_loader))
     epochs    = max(1, (total_steps + steps_per_epoch - 1) // steps_per_epoch)

@@ -228,6 +228,41 @@ model.remove_hook("style_control")
 | Composable | Multiple hooks work simultaneously |
 | Zero-cost removal | Unregister instantly; no model weights changed |
 
+## Input-conditioned routing (selecting & using the right skill)
+
+Hooks give the model a *library* of skills; routing decides **which** skill to
+use for a given input and **applies** it for that input only. This is the
+selection/use machinery in `omnilatent/agent/` (see `docs/work_plan.md`
+Phases 2–3 and `docs/agi_architecture_design.md`).
+
+```python
+from omnilatent.agent import ExpertRegistry, LearnedLatentRouter, RoutedForward
+
+# 1. Register the model's hooks as routable "experts" (learnable keys).
+registry = ExpertRegistry(key_dim=model.config.hidden_dim)
+registry.sync_hooks(model.hook_manager)
+
+# 2. A learned router scores an input's latent against every expert key and
+#    keeps the top-k (sparse, Switch/MoE-style). Low confidence → abstain
+#    (route to KB_READ to gather evidence instead of forcing a skill).
+router = LearnedLatentRouter(registry, input_dim=model.config.hidden_dim,
+                             top_k=2, abstain_threshold=0.2)
+
+# 3. Route an input and run the forward with the selected hooks co-activated.
+#    The chosen hooks' gates are scaled by their routing weight; a weight of 0
+#    skips a hook entirely (exact recovery of the no-hook behaviour).
+controller = RoutedForward(model=model, router=router)
+result, trace = controller.route_and_forward("image", image, "text")
+# trace.metadata["active_hooks"], trace.hook_gates  → which skills fired
+```
+
+Selection quality is **measured**, not assumed: `routing_probe.py` provides a
+synthetic benchmark (each task solvable by exactly one expert) reporting
+routing accuracy, calibration (ECE), and counterfactual lift vs random-expert
+and backbone-only baselines. Capacity grown on demand via
+`expand_omnilatent_capacity(..., registry=registry)` is registered as a new
+expert automatically, so the router can select it immediately.
+
 ## Architecture
 
 ```

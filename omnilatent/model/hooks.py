@@ -233,6 +233,17 @@ class NeuralPortManager(nn.Module):
         self._hook_states: dict[str, torch.Tensor] = {}
         self._batch_size: int = 0
         self._last_gate_log: dict[str, float] = {}
+        # Content-conditioned routing weights (work plan W3.1): per-hook
+        # multiplier on the static gate, set by a router before the forward.
+        # ``None``/absent ⇒ weight 1.0 (unconditioned, original behaviour).
+        # A scalar 0 ⇒ the hook is skipped entirely this forward (its tokens
+        # are never injected), giving *exact* recovery of prior behaviour.
+        self._route_weights: dict[str, Any] = {}
+        # Per-layer per-sample hook-token validity (B, H_layer): False where a
+        # hook's per-sample route weight is 0, so those samples don't attend to
+        # the hook's (zero-valued) tokens. Built in pre_layer, consumed by the
+        # backbone via mask_inactive_hook_positions (work plan bug 2).
+        self._hook_validity: dict[int, torch.Tensor] = {}
 
     def register_hook(self, hook: LatentNeuralHook) -> None:
         self.hooks[hook.name] = hook
@@ -302,11 +313,47 @@ class NeuralPortManager(nn.Module):
             values[name] = {layer: float(value.detach().cpu().item()) for layer, value in hook.gate_values().items()}
         return values
 
+    def set_route_weights(self, weights: dict[str, Any] | None) -> None:
+        """Set per-hook content-conditioned routing weights (work plan W3.1).
+
+        ``weights`` maps hook name → multiplier (a Python float or a per-batch
+        ``(B,)`` tensor) applied to that hook's static gate. A hook absent from
+        the dict keeps weight 1.0. A scalar-0 weight skips the hook entirely.
+        Pass ``None`` to clear all routing (back to unconditioned behaviour).
+
+        Weights persist across :meth:`begin_forward` (the router sets them
+        before the model's internal forward), so clear them explicitly.
+        """
+        self._route_weights = dict(weights) if weights else {}
+
+    def _is_active(self, name: str) -> bool:
+        """Whether a hook injects tokens this forward (route weight not all-zero)."""
+        rw = self._route_weights.get(name)
+        if rw is None:
+            return True
+        if isinstance(rw, torch.Tensor):
+            return bool(torch.any(rw != 0))
+        return rw != 0
+
+    def _effective_gate(self, name: str, gate: torch.Tensor) -> torch.Tensor:
+        """Static sigmoid gate scaled by the hook's route weight (if any)."""
+        rw = self._route_weights.get(name)
+        if rw is None:
+            return gate
+        if not isinstance(rw, torch.Tensor):
+            rw = torch.as_tensor(rw, dtype=gate.dtype, device=gate.device)
+        return gate * rw
+
     def begin_forward(self, batch_size: int) -> None:
-        """Reset hook states for a new forward pass."""
+        """Reset hook states for a new forward pass.
+
+        Route weights are intentionally NOT reset here: a router sets them
+        before the model's internal ``begin_forward`` call.
+        """
         self._batch_size = batch_size
         self._hook_states = {}
         self._last_gate_log = {}
+        self._hook_validity = {}
         for name, hook in self.hooks.items():
             hook = cast(LatentNeuralHook, hook)
             self._hook_states[name] = hook.get_hook_tokens(batch_size)
@@ -318,15 +365,75 @@ class NeuralPortManager(nn.Module):
         their magnitude in attention.
         """
         parts = [x]
+        validity_parts: list[torch.Tensor] = []
+        needs_mask = False
         for name, hook in self.hooks.items():
             hook = cast(LatentNeuralHook, hook)
-            if layer_idx in hook.target_layers:
-                gate = hook.gate_value(layer_idx)
-                self._last_gate_log[f"{name}.{layer_idx}"] = float(gate.detach().cpu().item())
-                parts.append(self._hook_states[name] * gate)
+            if layer_idx not in hook.target_layers:
+                continue
+            # Skip a route-weight-0 hook entirely: not injecting its tokens
+            # (rather than injecting zero-valued tokens) gives exact recovery
+            # of the no-hook behaviour, since zero tokens still occupy attention
+            # positions (work plan W3.1).
+            if not self._is_active(name):
+                continue
+            gate = self._effective_gate(name, hook.gate_value(layer_idx))
+            self._last_gate_log[f"{name}.{layer_idx}"] = float(gate.detach().mean().cpu().item())
+            state = self._hook_states[name]
+            if gate.dim() == 0:
+                scaled = state * gate
+            else:
+                # per-batch gate (B,) → broadcast over (B, tokens, dim)
+                scaled = state * gate.view(-1, *([1] * (state.dim() - 1)))
+            parts.append(scaled)
+
+            # Per-sample validity for this hook's tokens: a sample whose route
+            # weight is 0 must NOT attend to these (zero-valued) tokens, else
+            # its output is not equal to the no-hook case (bug 2).
+            rw = self._route_weights.get(name)
+            if isinstance(rw, torch.Tensor) and rw.dim() > 0:
+                valid = (rw != 0)
+                needs_mask = needs_mask or bool((~valid).any())
+            else:
+                valid = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
+            validity_parts.append(valid.view(-1, 1).expand(-1, hook.num_tokens))
+
         if len(parts) == 1:
             return x
+        if needs_mask:
+            self._hook_validity[layer_idx] = torch.cat(validity_parts, dim=1)  # (B, H_layer)
         return torch.cat(parts, dim=1)
+
+    def mask_inactive_hook_positions(
+        self,
+        layer_idx: int,
+        attn_mask: torch.Tensor | None,
+        seq_len: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Key-mask hook tokens that are inactive for specific samples (bug 2).
+
+        For samples whose per-sample route weight for a hook is 0, mask that
+        hook's token positions as **keys** so the samples' content never attends
+        to the (zero-valued) tokens — making their output exactly the no-hook
+        result. Only the key dimension is masked (not the query): a fully-masked
+        query row would produce NaN, and the inactive hook's own output is
+        discarded anyway (its next-layer contribution is gated to 0).
+        """
+        hv = self._hook_validity.get(layer_idx)
+        if hv is None or bool(hv.all()):
+            return attn_mask
+        b, h = hv.shape
+        content_len = seq_len - h
+        content_valid = torch.ones(b, content_len, dtype=torch.bool, device=device)
+        valid = torch.cat([content_valid, hv.to(device)], dim=1)  # (B, seq_len)
+        if attn_mask is None:
+            base = torch.ones(b, 1, seq_len, seq_len, dtype=torch.bool, device=device)
+        else:
+            heads = attn_mask.shape[-3] if attn_mask.dim() >= 3 else 1
+            base = attn_mask.expand(b, heads, seq_len, seq_len).clone()
+        # Mask the KEY dimension only.
+        return base & valid[:, None, None, :]
 
     def post_layer(self, layer_idx: int, x: torch.Tensor) -> torch.Tensor:
         """Strip hook tokens from the sequence and update their state.
@@ -334,11 +441,13 @@ class NeuralPortManager(nn.Module):
         Hook influence on content happens purely through attention in the
         layer — no broadcasting bias is added here.
         """
-        # Count how many hook tokens were injected at this layer
+        # Count how many hook tokens were injected at this layer. Must match
+        # pre_layer exactly: only ACTIVE hooks (route weight != 0) were
+        # injected, so only those are stripped here (work plan W3.1).
         total_hook_tokens = 0
-        for hook_module in self.hooks.values():
+        for name, hook_module in self.hooks.items():
             hook = cast(LatentNeuralHook, hook_module)
-            if layer_idx in hook.target_layers:
+            if layer_idx in hook.target_layers and self._is_active(name):
                 total_hook_tokens += hook.num_tokens
         if total_hook_tokens == 0:
             return x
@@ -352,7 +461,7 @@ class NeuralPortManager(nn.Module):
         offset = 0
         for name, hook in self.hooks.items():
             hook = cast(LatentNeuralHook, hook)
-            if layer_idx in hook.target_layers:
+            if layer_idx in hook.target_layers and self._is_active(name):
                 n = hook.num_tokens
                 hook_out = hook_region[:, offset : offset + n]
                 offset += n

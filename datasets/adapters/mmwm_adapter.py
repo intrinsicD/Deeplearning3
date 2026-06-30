@@ -20,6 +20,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+from omnilatent.data.errors import MediaDecodeError
+
 from ..base import AudioVisualSample, BaseAVDataset
 
 
@@ -32,15 +34,26 @@ def _tokenize(text: str, seq_len: int, vocab_size: int = 256) -> torch.Tensor:
 
 def _audio_to_mel(waveform: torch.Tensor, n_mels: int = 80, n_fft: int = 400,
                   hop_length: int = 160, sr: int = 16_000) -> torch.Tensor:
-    """Return log-mel spectrogram [1, n_mels, T]."""
+    """Return log-mel spectrogram [1, n_mels, T].
+
+    Fails loud rather than returning a zero spectrogram, which would feed the
+    world model a corrupted audio target while keeping the loss finite
+    (Audit.md A10).
+    """
     try:
         import torchaudio.transforms as T
+    except ImportError as exc:
+        raise MediaDecodeError(
+            "Computing the mel spectrogram requires torchaudio "
+            "(`pip install torchaudio`)."
+        ) from exc
+    try:
         mel = T.MelSpectrogram(
             sample_rate=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
         )(waveform.mean(0, keepdim=True))
         return torch.log(mel.clamp(min=1e-5))
-    except Exception:
-        return torch.zeros(1, n_mels, 64)
+    except Exception as exc:
+        raise MediaDecodeError(f"Failed to compute mel spectrogram: {exc}") from exc
 
 
 def adapt_mmwm(

@@ -84,41 +84,70 @@ class SyntheticMultiModalDataset(Dataset):
         return sample
 
 
+#: Suffix marking a per-modality row-provenance tensor in a collated batch.
+#: ``batch[f"{mod}{ROW_SUFFIX}"]`` is a LongTensor of the original sample index
+#: each stacked row of ``batch[mod]`` came from. Consumers that iterate
+#: modalities must skip these keys (see ``Trainer._train_step``).
+ROW_SUFFIX = "__rows"
+
+
 def collate_multimodal(
     batch: list[dict[str, torch.Tensor]],
 ) -> dict[str, torch.Tensor]:
     """Collate a batch of multi-modal samples.
 
-    Pads text and audio to the maximum length in the batch.
-    Images and videos are stacked directly (fixed spatial size).
+    Uses **union** semantics: every modality present in *any* sample survives,
+    stacked over just the samples that carry it. The previous intersection
+    semantics silently dropped a modality whenever a single sample lacked it,
+    which on mixed real batches could empty the batch entirely and produce a
+    fake zero-loss step (Audit.md A3).
+
+    Consequence: per-modality batch sizes may differ. Because the stacks are
+    built independently, row *i* of one modality need not come from the same
+    original sample as row *i* of another. To let cross-modal training pair
+    only genuinely co-occurring rows, each modality also gets a
+    ``f"{mod}{ROW_SUFFIX}"`` LongTensor recording the original sample index of
+    every stacked row (``Trainer._train_step`` uses it to align pairs).
+
+    Pads text and audio to the per-modality maximum length; images and videos
+    are stacked directly (fixed spatial size).
     """
     result: dict[str, torch.Tensor] = {}
 
-    # Find which modalities are present in ALL samples of this batch
-    common_modalities = set(batch[0].keys())
-    for sample in batch[1:]:
-        common_modalities &= set(sample.keys())
+    # Union of modalities present across the batch.
+    present: set[str] = set()
+    for sample in batch:
+        present |= set(sample.keys())
 
-    if "text" in common_modalities:
-        max_len = max(s["text"].shape[0] for s in batch)
-        padded = torch.zeros(len(batch), max_len, dtype=torch.long)
-        for i, s in enumerate(batch):
-            padded[i, : s["text"].shape[0]] = s["text"]
+    def _rows(mod: str) -> torch.Tensor:
+        return torch.tensor([i for i, s in enumerate(batch) if mod in s], dtype=torch.long)
+
+    if "text" in present:
+        texts = [s["text"] for s in batch if "text" in s]
+        max_len = max(t.shape[0] for t in texts)
+        padded = torch.zeros(len(texts), max_len, dtype=torch.long)
+        for i, t in enumerate(texts):
+            padded[i, : t.shape[0]] = t
         result["text"] = padded
+        result["text" + ROW_SUFFIX] = _rows("text")
 
-    if "audio" in common_modalities:
-        max_frames = max(s["audio"].shape[1] for s in batch)
-        n_mels = batch[0]["audio"].shape[0]
-        padded = torch.zeros(len(batch), n_mels, max_frames)
-        for i, s in enumerate(batch):
-            padded[i, :, : s["audio"].shape[1]] = s["audio"]
+    if "audio" in present:
+        audios = [s["audio"] for s in batch if "audio" in s]
+        max_frames = max(a.shape[1] for a in audios)
+        n_mels = audios[0].shape[0]
+        padded = torch.zeros(len(audios), n_mels, max_frames)
+        for i, a in enumerate(audios):
+            padded[i, :, : a.shape[1]] = a
         result["audio"] = padded
+        result["audio" + ROW_SUFFIX] = _rows("audio")
 
-    if "image" in common_modalities:
-        result["image"] = torch.stack([s["image"] for s in batch])
+    if "image" in present:
+        result["image"] = torch.stack([s["image"] for s in batch if "image" in s])
+        result["image" + ROW_SUFFIX] = _rows("image")
 
-    if "video" in common_modalities:
-        result["video"] = torch.stack([s["video"] for s in batch])
+    if "video" in present:
+        result["video"] = torch.stack([s["video"] for s in batch if "video" in s])
+        result["video" + ROW_SUFFIX] = _rows("video")
 
     return result
 

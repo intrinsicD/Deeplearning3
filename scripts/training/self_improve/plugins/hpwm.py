@@ -35,6 +35,7 @@ def _tiny_config() -> HPWMConfig:
     random fallback in offline test environments.
     """
     return HPWMConfig(
+        dino_allow_random_fallback=True,  # offline smoke tests: no pretrained DINO
         resolution=64,
         fps=1,
         clip_length_s=2,

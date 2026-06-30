@@ -170,6 +170,16 @@ class TemporalOrderLoss(nn.Module):
     model about temporal ordering without any model changes.
     """
 
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        # An order classifier MUST be asymmetric in (anchor, context): a plain
+        # dot product ``(z_anchor * z_context).sum(-1)`` is commutative, so
+        # (A, B) and (B, A) produce identical logits and the loss cannot learn
+        # direction (Audit.md A5). The ``z_anchor - z_context`` term and the
+        # ordered concatenation make the input — and thus the logit —
+        # direction-sensitive.
+        self.classifier = nn.Linear(3 * hidden_dim, 1)
+
     def forward(
         self, z_anchor: torch.Tensor, z_context: torch.Tensor, labels: torch.Tensor
     ) -> torch.Tensor:
@@ -182,13 +192,9 @@ class TemporalOrderLoss(nn.Module):
 
         Returns scalar loss.
         """
-        # Concatenate and project to logit
         combined = torch.cat([z_anchor, z_context, z_anchor - z_context], dim=-1)
-        # Use a simple bilinear-like scoring: dot product of difference
-        logits = (z_anchor * z_context).sum(dim=-1)  # (B,)
-        return F.binary_cross_entropy_with_logits(
-            logits, labels.float()
-        )
+        logits = self.classifier(combined).squeeze(-1)  # (B,)
+        return F.binary_cross_entropy_with_logits(logits, labels.float())
 
 
 class TemporalDistanceLoss(nn.Module):
@@ -315,13 +321,24 @@ class TemporalContextLoss(nn.Module):
 
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
-        self.order_loss = TemporalOrderLoss()
+        self.order_loss = TemporalOrderLoss(hidden_dim=config.hidden_dim)
         self.distance_loss = TemporalDistanceLoss(
             num_buckets=config.temporal_distance_buckets,
             hidden_dim=config.hidden_dim,
         )
         self.next_clip_loss = NextClipPredictionLoss()
         self.scene_boundary_loss = SceneBoundaryLoss()
+
+        # Predictor for the distant-clip task. Predicting the context latent
+        # from the anchor through this head (against a stop-gradient target)
+        # models temporal *change*; directly minimizing MSE(z_anchor,
+        # z_context) instead collapses distinct clips to one point (Audit.md
+        # A5). This is the BYOL predictor recipe.
+        self.distant_predictor = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.GELU(),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+        )
 
         # Learnable weights for each temporal task
         self.log_vars = nn.ParameterDict({

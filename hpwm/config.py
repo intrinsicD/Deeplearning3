@@ -23,6 +23,11 @@ class HPWMConfig:
     n_patches: int = 81          # 9x9 for 126px (128 resized) / 14px patches
     patch_grid: int = 9          # sqrt(n_patches)
     dino_frozen: bool = True     # Phase -1: fully frozen
+    # If pretrained DINO cannot be loaded (no timm / no network), fall back to
+    # RANDOM weights. Off by default: a frozen random backbone trains happily
+    # but can never learn real visual features (Audit.md A8). Enable explicitly
+    # (e.g. CLI --allow-random-dino) only for offline tests / CI.
+    dino_allow_random_fallback: bool = False
 
     # ── MoD / FWM (Component 1) ──────────────────────────
     k_ratio_init: float = 1.0    # start fully uniform

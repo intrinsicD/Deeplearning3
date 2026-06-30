@@ -90,20 +90,27 @@ class AgentGraph:
         )
 
 
-def default_agent_graph() -> AgentGraph:
-    """Return the default explicit agent graph."""
-    return AgentGraph(
-        action_nodes={
-            "STOP": NodeType.ROUTE,
-            "THINK": NodeType.THINK,
-            "TOOL_CALL": NodeType.TOOL_CALL,
-            "MEMORY_READ": NodeType.MEMORY_READ,
-            "MEMORY_WRITE": NodeType.MEMORY_WRITE,
-            "DECODE": NodeType.DECODE,
-            "KB_READ": NodeType.KB_READ,
-            "KB_WRITE": NodeType.KB_WRITE,
-        }
-    )
+def default_agent_graph(tool_actions: Iterable[str] | None = None) -> AgentGraph:
+    """Return the default explicit agent graph.
+
+    ``tool_actions`` are extra action strings (e.g. a registry's tool dispatch
+    ids from :meth:`ExpertRegistry.tool_actions`) that should resolve to a
+    ``TOOL_CALL`` node, so a router selecting a tool expert routes to a runnable
+    tool rather than the generic ``"TOOL_CALL"`` action.
+    """
+    action_nodes = {
+        "STOP": NodeType.ROUTE,
+        "THINK": NodeType.THINK,
+        "TOOL_CALL": NodeType.TOOL_CALL,
+        "MEMORY_READ": NodeType.MEMORY_READ,
+        "MEMORY_WRITE": NodeType.MEMORY_WRITE,
+        "DECODE": NodeType.DECODE,
+        "KB_READ": NodeType.KB_READ,
+        "KB_WRITE": NodeType.KB_WRITE,
+    }
+    for action in tool_actions or ():
+        action_nodes[action] = NodeType.TOOL_CALL
+    return AgentGraph(action_nodes=action_nodes)
 
 
 __all__ = ["AgentGraph", "AgentNode", "NodeType", "default_agent_graph"]

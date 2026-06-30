@@ -122,6 +122,7 @@ def expand_omnilatent_capacity(
     gate_bias_init: float = -4.0,
     use_transform: bool = True,
     rebuild_optimizer: bool = True,
+    registry=None,
 ) -> "LatentNeuralHook":
     """Freeze the backbone and register a fresh hook on OmniLatent.
 
@@ -195,6 +196,12 @@ def expand_omnilatent_capacity(
             weight_decay=cfg.weight_decay,
             betas=(0.9, 0.95),
         )
+
+    # Make the new capacity routable: register it into the expert registry so
+    # the LearnedLatentRouter (work plan W2.2) can select it (W4.1). Without
+    # this, an expansion hook can never be chosen for an input.
+    if registry is not None:
+        registry.sync_hooks(model.hook_manager)
 
     logger.info(
         "registered expansion hook %r on omnilatent (num_tokens=%d, "

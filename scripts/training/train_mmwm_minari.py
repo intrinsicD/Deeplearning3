@@ -199,9 +199,16 @@ def main() -> None:
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_transition, drop_last=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg, model = build_mmwm(dataset.vector_dim, dataset.action_dim, args.latent_dim, args.hidden_dim, args.transition)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # Build the loss before the optimizer: with learned_uncertainty=True it
+    # owns 10 nn.Parameter log_vars that must be optimized, otherwise the
+    # learned task-weighting never updates.
+    loss_fn = WorldModelLoss(learned_uncertainty=True).to(device)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(loss_fn.parameters()),
+        lr=args.lr,
+        weight_decay=1e-4,
+    )
     scheduler = build_lr_scheduler(optimizer, total_steps=args.steps)
-    loss_fn = WorldModelLoss(learned_uncertainty=True)
     trainer = Trainer(
         model=model,
         optimizer=optimizer,

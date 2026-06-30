@@ -579,7 +579,17 @@ class OmniLatentModel(nn.Module):
                 prefix_len, tgt_len, "text", device,
             )
 
-            latent = self.backbone(tokens, attn_mask=attn_mask)
+            # Use the SAME hook-aware backbone path as forward(); otherwise
+            # trained Latent Neural Hooks are silently ignored at generation
+            # time (Audit.md A9).
+            if self.hook_manager.has_hooks():
+                self.hook_manager.begin_forward(B)
+            latent = self.backbone(
+                tokens,
+                attn_mask=attn_mask,
+                hook_manager=self.hook_manager if self.hook_manager.has_hooks() else None,
+                prefix_len=prefix_len,
+            )
             # Get logits for the last target position
             logits = self.decoders["text"](latent[:, -1:])  # (B, 1, V)
             next_token = logits.argmax(dim=-1)  # (B, 1)
@@ -608,29 +618,30 @@ class OmniLatentModel(nn.Module):
     ) -> dict[str, dict[str, torch.Tensor]]:
         """Process multiple input modalities and decode to multiple targets.
 
-        For each target, selects the matching source modality if available,
-        otherwise uses the first available source.  Runs a separate backbone
-        pass per target (required because different targets need different
-        attention masks and query configurations).
+        All provided inputs are **fused** into a single prefix (via
+        :meth:`forward_observation`) so every target attends to every input —
+        rather than the previous behaviour of picking one source and ignoring
+        the rest (Audit.md A9). Runs one backbone pass per target because
+        different targets need different attention masks and query
+        configurations.
         """
+        if not inputs:
+            raise ValueError("forward_multimodal requires at least one input modality")
         if target_modalities is None:
             target_modalities = list(inputs.keys())
 
+        packet = ObservationPacket(modalities=dict(inputs))
+
         results: dict[str, dict[str, torch.Tensor]] = {}
         for tgt_mod in target_modalities:
-            # Pick source: prefer same modality, else first available
-            if tgt_mod in inputs:
-                src_mod = tgt_mod
-            else:
-                src_mod = next(iter(inputs))
-
-            result = self.forward(
-                src_mod, inputs[src_mod], tgt_mod,
-                target_data=inputs.get(tgt_mod),
+            result = self.forward_observation(
+                packet,
+                TargetSpec(modality=tgt_mod, data=inputs.get(tgt_mod)),
             )
             results[tgt_mod] = {
                 "output": result["output"],
                 "latent": result["latent"],
+                "source_modalities": result["source_modalities"],
             }
 
         return results

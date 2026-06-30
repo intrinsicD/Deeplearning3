@@ -47,6 +47,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from omnilatent.config import OmniLatentConfig
+from omnilatent.data.errors import MediaDecodeError
 
 # Optional imports — degrade gracefully.
 # Catch Exception (not just ImportError) because these libraries can fail
@@ -550,9 +551,13 @@ class VideoWatchingDataset(Dataset):
         if transcript is not None:
             sample["text"] = self._tokenize(transcript)
 
-        # Fallback: if nothing was extracted, return a dummy audio tensor
+        # Fail loud: a clip that decodes to nothing must NOT be replaced with a
+        # zero tensor — that teaches the model a corrupted target while keeping
+        # the loss finite (Audit.md A10).
         if not sample:
-            sample["audio"] = torch.zeros(self.config.audio_n_mels, 16)
+            raise MediaDecodeError(
+                f"No modality could be extracted from clip {path} @ {start_sec:.2f}s"
+            )
 
         return sample
 
@@ -738,11 +743,12 @@ class TemporalPairDataset(Dataset):
             distance_sec, dtype=torch.float32
         )
 
-        # Fallback
+        # Fail loud: never fabricate zero anchor/context video (Audit.md A10).
         if not any(k.startswith("anchor_") for k in sample):
-            c = self.config
-            sample["anchor_video"] = torch.zeros(3, c.video_max_frames, c.video_size, c.video_size)
-            sample["context_video"] = torch.zeros(3, c.video_max_frames, c.video_size, c.video_size)
+            raise MediaDecodeError(
+                f"No anchor modality could be extracted from clip {anchor_path} "
+                f"@ {anchor_start:.2f}s"
+            )
 
         return sample
 
@@ -883,7 +889,9 @@ class ClipSequenceDataset(Dataset):
                 videos.append(v)
                 mask.append(True)
             else:
-                # Pad with zeros
+                # Masked zero-padding (clip_mask=False) — NOT a training target.
+                # Downstream consumers must honor clip_mask; unlike the unmasked
+                # fallbacks removed for Audit.md A10, these zeros are excluded.
                 videos.append(
                     torch.zeros(3, c.video_max_frames, c.video_size, c.video_size)
                 )

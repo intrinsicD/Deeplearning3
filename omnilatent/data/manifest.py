@@ -8,6 +8,29 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, cast
 
 
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    """Parse a JSON/YAML scalar into a bool.
+
+    ``bool("false")`` is ``True`` in Python, so a manifest with
+    ``"streaming": "false"`` would silently enable streaming (Audit.md A2).
+    Treat the usual falsey strings as ``False``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"false", "0", "no", "off", "n", ""}:
+            return False
+        if token in {"true", "1", "yes", "on", "y"}:
+            return True
+        raise ValueError(f"Cannot interpret {value!r} as a boolean")
+    return bool(value)
+
+
 @dataclass
 class SourceSpec:
     """Declarative description of one streaming data source."""
@@ -48,7 +71,7 @@ class SourceSpec:
             "path": None if payload.get("path") is None else str(payload.get("path")),
             "dataset": None if payload.get("dataset") is None else str(payload.get("dataset")),
             "split": None if payload.get("split") is None else str(payload.get("split")),
-            "streaming": bool(payload.get("streaming", True)),
+            "streaming": _coerce_bool(payload.get("streaming", True)),
             "max_samples": None if payload.get("max_samples") is None else int(payload["max_samples"]),
             "options": options,
         }

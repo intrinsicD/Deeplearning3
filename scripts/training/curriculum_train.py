@@ -189,12 +189,24 @@ class CurriculumTrainer:
         if self.recurrent_memory is not None:
             self.recurrent_memory.to(self.device)
 
-        # Collect all parameters for optimizer
+        # Loss — built before the optimizer so the learnable uncertainty
+        # weights (MultiModalLoss.log_vars, TemporalContextLoss.log_vars and
+        # its sub-module heads) are actually optimized.
+        self.criterion = MultiModalLoss(config).to(self.device)
+        self.temporal_criterion = TemporalContextLoss(config).to(self.device)
+        self.next_clip_criterion = NextClipPredictionLoss().to(self.device)
+
+        # Collect all parameters for optimizer (model + optional temporal
+        # context modules + every learnable loss term).
         all_params = list(self.model.parameters())
         if self.temporal_transformer is not None:
             all_params += list(self.temporal_transformer.parameters())
         if self.recurrent_memory is not None:
             all_params += list(self.recurrent_memory.parameters())
+        all_params += list(self.criterion.parameters())
+        all_params += list(self.temporal_criterion.parameters())
+        all_params += list(self.next_clip_criterion.parameters())
+        self._optim_params = all_params
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -203,11 +215,6 @@ class CurriculumTrainer:
             weight_decay=config.weight_decay,
             betas=(0.9, 0.95),
         )
-
-        # Loss
-        self.criterion = MultiModalLoss(config).to(self.device)
-        self.temporal_criterion = TemporalContextLoss(config).to(self.device)
-        self.next_clip_criterion = NextClipPredictionLoss().to(self.device)
 
         # Mixed precision
         self.scaler = torch.amp.GradScaler(
@@ -284,7 +291,7 @@ class CurriculumTrainer:
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
         gnorm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip
+            self._optim_params, self.config.grad_clip
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
@@ -295,7 +302,13 @@ class CurriculumTrainer:
 
     def _train_step_synthetic(self, batch: dict) -> dict[str, float]:
         """Training step for synthetic multi-modal data."""
-        batch = {k: v.to(self.device) for k, v in batch.items()}
+        from omnilatent.training.data import ROW_SUFFIX
+
+        batch = {
+            k: v.to(self.device)
+            for k, v in batch.items()
+            if not k.endswith(ROW_SUFFIX)
+        }
         available = list(batch.keys())
         if not available:
             return {"total": 0.0}
@@ -329,7 +342,7 @@ class CurriculumTrainer:
         self.scaler.scale(loss_dict["total"]).backward()
         self.scaler.unscale_(self.optimizer)
         gnorm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip
+            self._optim_params, self.config.grad_clip
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
@@ -378,13 +391,23 @@ class CurriculumTrainer:
                             z_anchor, z_context, dist_labels
                         )
 
-                # Distant predict: predict context latent from anchor
+                # Distant predict: predict the *context* latent from the anchor
+                # through a learnable predictor, against a stop-gradient target.
+                # Minimizing MSE(z_anchor, z_context) directly would instead pull
+                # different-time clips onto the same point (temporal collapse,
+                # Audit.md A5).
+                pred_context = self.temporal_criterion.distant_predictor(z_anchor)
+                target_context = z_context.detach()
                 temporal_losses["distant_predict"] = F.mse_loss(
-                    z_anchor, z_context
-                ) + 0.5 * (1.0 - F.cosine_similarity(z_anchor, z_context, dim=-1).mean())
+                    pred_context, target_context
+                ) + 0.5 * (
+                    1.0 - F.cosine_similarity(pred_context, target_context, dim=-1).mean()
+                )
 
             if not temporal_losses:
-                return {"total": 0.0}
+                # No temporal pair available — report skipped, not a fake
+                # zero-loss step (consistent with Audit.md A3).
+                return {"skipped": 1.0}
 
             loss_result = self.temporal_criterion(temporal_losses)
             total = loss_result["temporal_total"]

@@ -7,6 +7,7 @@ from typing import Iterable, Iterator
 
 import torch
 
+from omnilatent.data.errors import MediaDecodeError
 from omnilatent.data.manifest import SourceSpec
 from omnilatent.data.sample import MultiModalSample
 
@@ -52,10 +53,79 @@ def _sample_from_path(path: Path) -> MultiModalSample | None:
         arr = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
         return MultiModalSample(image=arr, metadata={"modality": "image"})
     if ext in _AUDIO_EXTS:
-        return MultiModalSample(metadata={"modality": "audio", "path": str(path)})
+        return MultiModalSample(audio=_decode_audio_mel(path), metadata={"modality": "audio"})
     if ext in _VIDEO_EXTS:
-        return MultiModalSample(metadata={"modality": "video", "path": str(path)})
+        return MultiModalSample(video=_decode_video_frames(path), metadata={"modality": "video"})
     return None
+
+
+# Default mel-spectrogram parameters (match OmniLatentConfig defaults so the
+# collate bridge does not have to resample bins).
+_AUDIO_SAMPLE_RATE = 16_000
+_AUDIO_N_FFT = 1024
+_AUDIO_HOP = 256
+_AUDIO_N_MELS = 128
+
+
+def _decode_audio_mel(path: Path) -> torch.Tensor:
+    """Decode an audio file into a (n_mels, T) mel spectrogram tensor.
+
+    Raises :class:`MediaDecodeError` rather than returning a metadata-only or
+    zero tensor (Audit.md A2/A10): a sample the model cannot learn from must
+    not masquerade as valid training data.
+    """
+    try:
+        import torchaudio
+        from torchaudio.transforms import MelSpectrogram, Resample
+    except ImportError as exc:  # pragma: no cover - depends on optional dep
+        raise MediaDecodeError(
+            f"Decoding audio file {path} requires torchaudio "
+            "(`pip install 'omnilatent[audio]'`)."
+        ) from exc
+    try:
+        waveform, sample_rate = torchaudio.load(str(path))
+    except Exception as exc:
+        raise MediaDecodeError(f"Failed to decode audio file {path}: {exc}") from exc
+    if waveform.numel() == 0:
+        raise MediaDecodeError(f"Audio file {path} decoded to an empty waveform")
+    waveform = waveform.mean(dim=0, keepdim=True)  # mono
+    if sample_rate != _AUDIO_SAMPLE_RATE:
+        waveform = Resample(sample_rate, _AUDIO_SAMPLE_RATE)(waveform)
+    mel = MelSpectrogram(
+        sample_rate=_AUDIO_SAMPLE_RATE,
+        n_fft=_AUDIO_N_FFT,
+        hop_length=_AUDIO_HOP,
+        n_mels=_AUDIO_N_MELS,
+    )(waveform)
+    mel = mel.squeeze(0)  # (n_mels, T)
+    # Round T down to a multiple of 4 (audio encoder stride).
+    frames = (mel.shape[1] // 4) * 4
+    if frames == 0:
+        raise MediaDecodeError(f"Audio file {path} too short to form one frame block")
+    return mel[:, :frames].contiguous()
+
+
+def _decode_video_frames(path: Path) -> torch.Tensor:
+    """Decode a video file into a (C, T, H, W) float tensor in [0, 1].
+
+    Raises :class:`MediaDecodeError` on missing decoder or decode failure.
+    """
+    try:
+        from torchvision.io import read_video
+    except ImportError as exc:  # pragma: no cover - depends on optional dep
+        raise MediaDecodeError(
+            f"Decoding video file {path} requires torchvision "
+            "(`pip install 'omnilatent[video]'`)."
+        ) from exc
+    try:
+        # read_video returns (T, H, W, C) uint8.
+        video, _audio, _info = read_video(str(path), pts_unit="sec")
+    except Exception as exc:
+        raise MediaDecodeError(f"Failed to decode video file {path}: {exc}") from exc
+    if video.numel() == 0:
+        raise MediaDecodeError(f"Video file {path} decoded to zero frames")
+    video = video.permute(3, 0, 1, 2).float() / 255.0  # (C, T, H, W)
+    return video.contiguous()
 
 
 def _read_pdf_text_fallback(path: Path) -> str:

@@ -129,6 +129,7 @@ class TestPredictionCausality:
             resolution=128,  # default — 128 resized to 126 → 9x9 patches
             n_frames=4,
             dino_frozen=True,
+            dino_allow_random_fallback=True,  # offline test: no pretrained DINO
             grad_checkpointing=False,
             n_slots=2,
             d_slot=32,
