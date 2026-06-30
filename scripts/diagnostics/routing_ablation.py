@@ -117,20 +117,29 @@ def run_ablation(
     return results
 
 
-def _format(results: dict[str, float]) -> str:
+def _format(results: dict[str, float], n_hooks: int, top_k: int) -> str:
     base = results["no_hooks"]
-    lines = ["", "Routing ablation — final self-reconstruction loss (lower is better)", "-" * 64]
+    # Active hooks per input — the compute the arm pays.
+    active = {"no_hooks": 0, "always_on": n_hooks, "routed": min(top_k, n_hooks)}
+    lines = ["", "Routing ablation — final self-reconstruction loss (lower is better)", "-" * 70]
+    lines.append(f"  {'arm':<12} {'loss':>9}   {'active hooks/input':>18}")
     for mode in ("no_hooks", "always_on", "routed"):
         v = results[mode]
-        delta = "" if mode == "no_hooks" else f"  ({(v - base) / base * 100:+.1f}% vs no_hooks)"
-        lines.append(f"  {mode:<12} {v:.5f}{delta}")
+        delta = "" if mode == "no_hooks" else f"  ({(v - base) / base * 100:+.1f}% vs none)"
+        lines.append(f"  {mode:<12} {v:>9.5f}   {active[mode]:>18}{delta}")
     r, a = results["routed"], results["always_on"]
-    verdict = (
+    quality = (
         "routed BEATS always_on" if r < a * 0.99
         else "routed LOSES to always_on" if r > a * 1.01
         else "routed ~ always_on (tie)"
     )
-    lines += ["-" * 64, f"  verdict: {verdict}  (routed {(r - a) / a * 100:+.1f}% vs always_on)", ""]
+    lines += ["-" * 70, f"  quality: {quality}  (routed {(r - a) / a * 100:+.1f}% vs always_on)"]
+    if r <= a * 1.01 and active["routed"] < active["always_on"]:
+        lines.append(
+            f"  EFFICIENCY WIN: routed matches always_on quality using "
+            f"{active['routed']}/{n_hooks} hooks per input."
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -151,7 +160,7 @@ def main() -> None:
         batch_size=args.batch_size, top_k=args.top_k, image_size=args.image_size, seed=args.seed,
         freeze_backbone=not args.no_freeze, gate_bias=args.gate_bias,
     )
-    print(_format(results))
+    print(_format(results, n_hooks=args.hooks, top_k=args.top_k))
 
 
 if __name__ == "__main__":

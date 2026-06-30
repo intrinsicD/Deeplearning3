@@ -267,3 +267,22 @@ demonstrate it.
   with the conditions that would change the verdict. A real bug was found+fixed
   en route (the trainer's `--no-freeze` never trained the backbone). New tests:
   routed_trainer (5), routing_ablation (2). Full suite 725 passed.
+- *2026-06-30* — **Three reviewer-found correctness bugs fixed.**
+  (bug1) cross-modal training paired *unrelated* rows when union-collated
+  batches had equal per-modality sizes from different samples → added row
+  provenance (`{mod}__rows`) and provenance-aligned pairing in the trainer.
+  (bug2) per-sample route weight 0 still inserted zero hook tokens that diluted
+  a sample's attention → per-sample key-masking of inactive hook positions in
+  the backbone, giving byte-exact no-hook output for zero-weight samples.
+  (bug3) a selected tool expert emitted a generic `TOOL_CALL` the runtime
+  couldn't dispatch → tools carry a dispatch id, `tool_actions()` +
+  `default_agent_graph(tool_actions=…)` wire it, and the selected tool runs.
+  New tests: row_provenance (5), per_sample_hook_mask (3), tool_routing (4).
+  Full suite 737 passed.
+- *2026-06-30* — **Routing's value located (capacity regime).** Scaling the
+  hook pool (12, 16) with `top_k=2`: always-on degrades as hooks grow
+  (interference, worse than no-hooks) while routed holds steady and matches/
+  beats it using **2 of N** hooks — a 6–8× cut in active-hook compute at
+  iso-quality. So routing's win in this architecture is efficiency/robustness,
+  not raw quality (hooks already self-route via attention). See
+  `routing_ablation.md`; the bug2 fix makes the routed arm's comparison exact.

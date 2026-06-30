@@ -59,6 +59,37 @@ Routing is expected to help only when one of these holds — none do in this toy
   are benign-or-helpful everywhere.
 - **Scale:** larger models/data where interference and capacity limits bite.
 
+## Follow-up: the capacity regime (where routing *does* pay off)
+
+The single-hook-count result above said routing doesn't beat always-on. The
+deeper reason is architectural: **LatentNeuralHooks act through attention, which
+is already input-conditioned**, so always-on hooks can self-adapt per input —
+explicit routing is redundant *for quality*. That points to where routing
+*should* help: **compute**. Scaling the hook pool while keeping `top_k` small:
+
+| n_hooks | no_hooks | always_on (all active) | routed top-2 (2 active) | routed vs always_on |
+|---|---|---|---|---|
+| 12 | 1.270 | 1.295 (+2.0%) | 1.286 | **−0.7%**, 2/12 hooks |
+| 16 | 1.270 | 1.298 (+2.2%) | 1.287 | **−0.8%**, 2/16 hooks |
+
+Two consistent effects:
+
+1. **always-on degrades as the pool grows** (1.295 → 1.298, both *worse* than
+   no-hooks): firing every hook on every input piles up interference.
+2. **routed stays flat** (~1.286) by firing only the top-2 — so it **matches or
+   slightly beats** always-on while activating **2 hooks instead of 12–16**
+   (a 6–8× reduction in active-hook compute).
+
+So routing's real win in this codebase is **efficiency and robustness, not
+quality**: equal-or-better output at a fraction of the active-hook cost, and it
+does not degrade as you add more skills. (The per-sample masking fix — bug 2 —
+matters here: it makes the routed arm's inactive hooks exactly absent, so this
+comparison is clean.)
+
+Caveat, stated plainly: the absolute gaps are small (~1–2%) at this toy scale.
+The **direction** is consistent across hook counts and matches MoE theory; the
+magnitude would need real scale to matter.
+
 ## Bottom line for the project
 
 Phases 2–3 delivered a *correct and trainable* selection/use mechanism, and W6
