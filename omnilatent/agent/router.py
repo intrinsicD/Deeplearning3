@@ -111,17 +111,31 @@ class LearnedLatentRouter(nn.Module):
         temperature: float = 1.0,
         action_map: Mapping[str, str] | None = None,
         fallback_action: str = "DECODE",
+        abstain_threshold: float = 0.0,
+        abstain_action: str = "KB_READ",
+        retrieval_fn: Any = None,
     ) -> None:
         super().__init__()
         if top_k < 1:
             raise ValueError("top_k must be >= 1")
         if temperature <= 0:
             raise ValueError("temperature must be > 0")
+        if not 0.0 <= abstain_threshold <= 1.0:
+            raise ValueError("abstain_threshold must be in [0, 1]")
         self.registry = registry
         self.top_k = top_k
         self.temperature = float(temperature)
         self.action_map = dict(action_map) if action_map is not None else dict(DEFAULT_ACTION_MAP)
         self.fallback_action = fallback_action
+        # Below this confidence the router does NOT force a skill — it routes to
+        # an evidence-gathering action instead (retrieval-as-routing / abstain,
+        # W2.3). 0.0 ⇒ never abstain (back-compatible default).
+        self.abstain_threshold = float(abstain_threshold)
+        self.abstain_action = abstain_action
+        # Optional latent→candidates retrieval. When provided, an abstaining
+        # decision carries its candidates in metadata; otherwise the runtime's
+        # KBReadTool performs retrieval on the emitted KB_READ action.
+        self.retrieval_fn = retrieval_fn
         self.query_proj = nn.Linear(input_dim, registry.key_dim)
 
     # -- differentiable routing -----------------------------------------
@@ -189,9 +203,18 @@ class LearnedLatentRouter(nn.Module):
         if not ids:
             return RouteDecision(self.fallback_action, confidence=0.0, metadata={"expert_weights": {}})
 
-        out = self.forward(self._pooled_query(packet))
+        pooled = self._pooled_query(packet)
+        out = self.forward(pooled)
         weights = out["weights"].squeeze(0)                # (E,) — exactly top_k active
         confidence = float(out["confidence"].squeeze(0).item())
+
+        # Abstain on low confidence: gather evidence rather than force a skill
+        # on input the router has no clearly-relevant expert for (W2.3).
+        if confidence < self.abstain_threshold:
+            meta: dict[str, Any] = {"expert_weights": {}, "abstained": True}
+            if self.retrieval_fn is not None:
+                meta["retrieval_candidates"] = self.retrieval_fn(pooled.detach())
+            return RouteDecision(self.abstain_action, confidence=confidence, metadata=meta)
 
         # Top expert decides the graph action; its kind maps to a node.
         top_idx = int(torch.argmax(weights).item())
@@ -202,7 +225,7 @@ class LearnedLatentRouter(nn.Module):
         return RouteDecision(
             action,
             confidence=confidence,
-            metadata={"expert_weights": active, "top_expert": top_id},
+            metadata={"expert_weights": active, "top_expert": top_id, "abstained": False},
         )
 
 

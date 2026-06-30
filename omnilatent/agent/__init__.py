@@ -8,6 +8,7 @@ from omnilatent.agent.router import (
     RouteDecision,
     StaticRouter,
 )
+from omnilatent.agent.routing_metrics import expected_calibration_error, routing_accuracy
 from omnilatent.agent.runtime import AgentRuntime, AgentRuntimeError, SideEffectViolation
 from omnilatent.agent.tools import BaseTool, LatentRouter, ToolExecutionEngine, ToolRegistrySystem
 
@@ -30,5 +31,7 @@ __all__ = [
     "ToolExecutionEngine",
     "ToolRegistrySystem",
     "default_agent_graph",
+    "expected_calibration_error",
+    "routing_accuracy",
 ]
 
