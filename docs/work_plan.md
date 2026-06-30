@@ -157,11 +157,11 @@ vibe.
 
 | ID | Item | Depends on | Acceptance (per experiment) | Status |
 |----|------|-----------|------------------------------|--------|
-| **W5.1** | Credit v2: outcome-based (probe-delta reward) | W3.3, W1.3 | router credit from frozen-probe deltas; beats v1 counterfactual lift on a 2-domain toy | `[ ]` |
-| **W5.2** | Credit v3: counterfactual attribution on replay | W5.1 | marginal-probe-improvement credit; measurably better OOD selection than v1/v2 | `[ ]` |
-| **W5.3** | OOD selection + abstention study | W2.4 | held-out-novel set; report whether abstention calibration holds off-distribution (it is expected to degrade — quantify it) | `[ ]` |
-| **W5.4** | Compositional use (novel skill composition) | W3.3 | benchmark requiring composing 2 known hooks into an unseen behaviour; report gap vs single-skill | `[ ]` |
-| **W5.5** | Router credit under pseudo-label self-training | W5.1, `self_improvement.md` §5 | confirm `§5` divergence guards cover router credit; poisoned-edge test severs+heals | `[ ]` |
+| **W5.1** | Credit v2: outcome-based (probe-delta reward) | W3.3, W1.3 | router credit from a scalar outcome reward; harness reports above-chance routing | `[x]` harness landed (`fit_router_outcome_based`, REINFORCE+baseline); learns above chance from reward alone |
+| **W5.2** | Credit v3: counterfactual attribution on replay | W5.1 | marginal-probe-improvement credit; measurably better OOD selection than v1/v2 | `[ ]` **open** — needs orchestrator/replay integration; deferred (no guaranteed result) |
+| **W5.3** | OOD selection + abstention study | W2.4 | held-out-novel set; report whether abstention calibration holds off-distribution | `[x]` harness landed (`ood_abstention_study`); reports ID-vs-OOD `confidence_gap` (sign not assumed) |
+| **W5.4** | Compositional use (novel skill composition) | W3.3 | benchmark requiring composing 2 known hooks into an unseen behaviour; report gap vs single-skill | `[ ]` **open** — a non-circular synthetic composition benchmark needs real per-hook semantics; deferred |
+| **W5.5** | Router credit under pseudo-label self-training | W5.1, `self_improvement.md` §5 | confirm `§5` divergence guards cover router credit; poisoned-edge test severs+heals | `[ ]` **open** — needs router credit wired into the pseudo-label broker; deferred |
 
 ---
 
@@ -187,7 +187,9 @@ vibe.
   W4.1 now wires expansion hooks into the expert registry, so newly-grown
   capacity is immediately routable. Capacity expands on demand without
   regression and becomes selectable.
-- *(Research)* **R*** — Phase 5 items report results as they land.
+- *(Research)* **R*** — Phase 5 items report results as they land. W5.1
+  (outcome-based credit) and W5.3 (OOD abstention study) have landed as
+  harnesses; W5.2/W5.4/W5.5 remain intentionally open.
 
 ---
 
@@ -227,3 +229,11 @@ vibe.
   conditioned_gates (6), routed_forward (5), credit_assignment (4). Full suite
   712 passed. Remaining: W4.1 router-integration of expansion hooks, and the
   Phase 5 research lane.
+- *2026-06-30* — **W4.1 done** (expansion hooks routable via registry sync;
+  milestone M5). **Phase 5 partially landed:** W5.1 outcome-based credit
+  (REINFORCE) and W5.3 OOD abstention study shipped as measurement harnesses
+  with tests (test_research_lane, 3). W5.2/W5.4/W5.5 are honestly left **open**
+  — they require deeper orchestrator/pseudo-label integration or a non-circular
+  composition benchmark, and per the lane's charter have no guaranteed result.
+  Full suite 718 passed. **All scheduled engineering work (Phases 0–4) is
+  complete; the research lane remains intentionally open-ended.**

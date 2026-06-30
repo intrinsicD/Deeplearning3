@@ -106,6 +106,37 @@ def fit_router(
         opt.step()
 
 
+def fit_router_outcome_based(
+    router: LearnedLatentRouter,
+    probe: RoutingProbe,
+    steps: int = 400,
+    lr: float = 0.05,
+) -> None:
+    """Credit assignment **v2** — outcome-based reward, no supervised label.
+
+    Research lane (work plan W5.1). The router never sees the gold expert as a
+    target. Instead it *samples* an expert from its routing distribution, and
+    the only learning signal is a scalar reward — 1.0 if the sampled expert was
+    the correct one for the input (the task "succeeds"), 0.0 otherwise — trained
+    with REINFORCE and a running-mean baseline. This is the bandit form of the
+    probe-delta reward the harness (`self_improvement.md` §4.6) would supply in
+    a real run.
+    """
+    opt = torch.optim.Adam(router.parameters(), lr=lr)
+    baseline = 0.0
+    for _ in range(steps):
+        opt.zero_grad()
+        logits = router.forward(probe.inputs)["logits"]
+        dist = torch.distributions.Categorical(logits=logits)
+        action = dist.sample()                                  # (N,) sampled expert
+        reward = (action == probe.gold_idx).float()            # scalar outcome only
+        advantage = reward - baseline
+        loss = -(dist.log_prob(action) * advantage.detach()).mean()
+        loss.backward()
+        opt.step()
+        baseline = 0.9 * baseline + 0.1 * float(reward.mean().item())
+
+
 def counterfactual_lift(router: LearnedLatentRouter, probe: RoutingProbe) -> dict[str, float]:
     """Task-metric lift from the router's choice vs uninformed baselines (W3.3).
 
@@ -144,10 +175,45 @@ def evaluate_router(router: LearnedLatentRouter, probe: RoutingProbe) -> dict[st
     return {"routing_accuracy": acc, "ece": ece, "chance": probe.chance}
 
 
+def ood_abstention_study(
+    router: LearnedLatentRouter,
+    probe: RoutingProbe,
+    ood_scale: float = 6.0,
+    seed: int = 7,
+) -> dict[str, float]:
+    """OOD selection + abstention study (research lane, work plan W5.3).
+
+    Measures whether the router's confidence — the abstention signal (W2.3) —
+    actually drops on out-of-distribution input. We build OOD samples far from
+    every trained prototype (Gaussian noise at ``ood_scale``×) and compare the
+    router's mean confidence on in-distribution vs OOD inputs.
+
+    Honest expectation, reported not assumed: a softmax router tends to stay
+    *overconfident* off-distribution, so the ID→OOD confidence drop is usually
+    small. The returned ``confidence_gap`` quantifies exactly how small — the
+    measurement that tells you whether the abstention threshold can be trusted
+    beyond the training distribution.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    ood = ood_scale * torch.randn(probe.inputs.shape[0], probe.input_dim, generator=gen)
+
+    router.eval()
+    with torch.no_grad():
+        conf_id = float(router.forward(probe.inputs)["confidence"].mean().item())
+        conf_ood = float(router.forward(ood)["confidence"].mean().item())
+    return {
+        "confidence_id": conf_id,
+        "confidence_ood": conf_ood,
+        "confidence_gap": conf_id - conf_ood,  # >0 ⇒ less confident on OOD (good)
+    }
+
+
 __all__ = [
     "RoutingProbe",
     "build_routing_probe",
     "fit_router",
+    "fit_router_outcome_based",
     "evaluate_router",
     "counterfactual_lift",
+    "ood_abstention_study",
 ]
