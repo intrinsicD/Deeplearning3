@@ -30,7 +30,8 @@ def _model(n_hooks: int = 2) -> OmniLatentModel:
 
 
 def _img(model: OmniLatentModel, b: int = 4) -> torch.Tensor:
-    return torch.randn(b, 3, model.config.image_size, model.config.image_size)
+    device = next(model.parameters()).device
+    return torch.randn(b, 3, model.config.image_size, model.config.image_size, device=device)
 
 
 def test_credit_equals_measured_loss_deltas() -> None:

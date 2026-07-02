@@ -155,22 +155,36 @@ def collate_multimodal(
 def build_dataloader(
     config: OmniLatentConfig,
     dataset: Dataset | None = None,
+    num_workers: int | None = None,
     **kwargs,
 ) -> DataLoader:
     """Build a DataLoader with proper collation."""
     if dataset is None:
         dataset = SyntheticMultiModalDataset(config)
 
-    # --- ADDED: Calculate optimal workers based on CPU ---
     import os
-    optimal_workers = min(8, os.cpu_count() or 1)
+
+    if num_workers is None:
+        env_workers = os.getenv("OMNILATENT_NUM_WORKERS")
+        if env_workers is not None:
+            try:
+                num_workers = int(env_workers)
+            except ValueError as exc:
+                raise ValueError(
+                    "OMNILATENT_NUM_WORKERS must be an integer, "
+                    f"got {env_workers!r}"
+                ) from exc
+        else:
+            num_workers = min(8, os.cpu_count() or 1)
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be >= 0, got {num_workers}")
 
     return DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=collate_multimodal,
-        num_workers=optimal_workers,
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         drop_last=True,
         **kwargs,

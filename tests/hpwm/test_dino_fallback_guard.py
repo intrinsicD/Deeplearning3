@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import inspect
 
 import pytest
@@ -10,25 +11,30 @@ import torch
 from hpwm.model import DINOBackbone
 
 
-def _pretrained_unavailable() -> bool:
-    try:
-        import timm  # noqa: F401
-        return False
-    except ImportError:
-        return True
+def _force_pretrained_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    orig_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "timm":
+            raise ImportError("forced timm failure")
+        return orig_import(name, *args, **kwargs)
+
+    def fake_hub_load(*args, **kwargs):
+        raise RuntimeError("forced torch.hub failure")
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(torch.hub, "load", fake_hub_load)
 
 
-@pytest.mark.skipif(
-    not _pretrained_unavailable(),
-    reason="pretrained DINO can load here; cannot exercise the fallback guard",
-)
-def test_random_fallback_raises_by_default() -> None:
+def test_random_fallback_raises_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_pretrained_unavailable(monkeypatch)
     dino = DINOBackbone(allow_random_fallback=False)
     with pytest.raises(RuntimeError, match="random"):
         dino._load_model(torch.device("cpu"))
 
 
-def test_random_fallback_allowed_when_opted_in() -> None:
+def test_random_fallback_allowed_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_pretrained_unavailable(monkeypatch)
     dino = DINOBackbone(allow_random_fallback=True)
     with pytest.warns(RuntimeWarning):
         dino._load_model(torch.device("cpu"))

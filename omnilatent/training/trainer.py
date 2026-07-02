@@ -213,47 +213,16 @@ class Trainer:
             latents[m] = self.model.encode(m, data[m][idx])[:, 1:].mean(dim=1)
         return latents
 
-    def _train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
-        """One training step.
-
-        Uses TaskSampler to pick a (source, target) pair from available
-        modalities in this batch.
-        """
-        # Move batch to device
-        batch = {k: v.to(self.device) for k, v in batch.items()}
-
-        # Separate modality tensors from per-modality row-provenance tensors.
-        rows = {
-            k[: -len(ROW_SUFFIX)]: v for k, v in batch.items() if k.endswith(ROW_SUFFIX)
-        }
-        data = {k: v for k, v in batch.items() if not k.endswith(ROW_SUFFIX)}
-
-        available = list(data.keys())
-        if len(available) == 0:
-            # No usable modality this step. Report it as *skipped* — never as a
-            # zero-loss step, which would silently bias the loss average and
-            # mask a broken data path (Audit.md A3).
-            return {"skipped": 1.0}
-
-        # Use task sampler for modality pair selection.
-        src_mod, tgt_mod = self.task_sampler.sample(available)
-
-        # Cross-modal training needs genuinely paired rows — same ORIGINAL
-        # sample for source and target. Independent union stacking means equal
-        # batch sizes do NOT imply row alignment (e.g. [text-only, image-only]
-        # gives text.shape[0]==image.shape[0]==1 from two unrelated samples).
-        # Use row provenance to pair only co-occurring rows; if none, demote to
-        # self-reconstruction rather than train on unrelated rows.
-        src_data = data[src_mod]
-        tgt_data = data[tgt_mod]
-        if src_mod != tgt_mod:
-            paired = self._align_rows(data, rows, src_mod, tgt_mod)
-            if paired is None:
-                tgt_mod = src_mod
-                tgt_data = src_data
-            else:
-                src_data, tgt_data = paired
-
+    def _optimize_route(
+        self,
+        data: dict[str, torch.Tensor],
+        rows: dict[str, torch.Tensor],
+        src_mod: str,
+        tgt_mod: str,
+        src_data: torch.Tensor,
+        tgt_data: torch.Tensor,
+    ) -> dict[str, float]:
+        """Run one optimizer step for an already selected/aligned route."""
         self.optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", dtype=self.amp_dtype, enabled=self.config.mixed_precision):
@@ -311,6 +280,78 @@ class Trainer:
         self.metrics.log_step(step_metrics)
 
         return loss_values
+
+    def train_fixed_route_step(
+        self,
+        batch: dict[str, torch.Tensor],
+        src_mod: str,
+        tgt_mod: str,
+    ) -> dict[str, float]:
+        """One training step for a requested source->target route.
+
+        Returns ``{"skipped": 1.0}`` when the batch cannot supply the route.
+        Cross-modal routes require true row provenance alignment.
+        """
+        batch = {k: v.to(self.device) for k, v in batch.items()}
+        rows = {
+            k[: -len(ROW_SUFFIX)]: v for k, v in batch.items() if k.endswith(ROW_SUFFIX)
+        }
+        data = {k: v for k, v in batch.items() if not k.endswith(ROW_SUFFIX)}
+        if src_mod not in data or tgt_mod not in data:
+            return {"skipped": 1.0}
+
+        src_data = data[src_mod]
+        tgt_data = data[tgt_mod]
+        if src_mod != tgt_mod:
+            paired = self._align_rows(data, rows, src_mod, tgt_mod)
+            if paired is None:
+                return {"skipped": 1.0}
+            src_data, tgt_data = paired
+
+        return self._optimize_route(data, rows, src_mod, tgt_mod, src_data, tgt_data)
+
+    def _train_step(self, batch: dict[str, torch.Tensor]) -> dict[str, float]:
+        """One training step.
+
+        Uses TaskSampler to pick a (source, target) pair from available
+        modalities in this batch.
+        """
+        # Move batch to device
+        batch = {k: v.to(self.device) for k, v in batch.items()}
+
+        # Separate modality tensors from per-modality row-provenance tensors.
+        rows = {
+            k[: -len(ROW_SUFFIX)]: v for k, v in batch.items() if k.endswith(ROW_SUFFIX)
+        }
+        data = {k: v for k, v in batch.items() if not k.endswith(ROW_SUFFIX)}
+
+        available = list(data.keys())
+        if len(available) == 0:
+            # No usable modality this step. Report it as *skipped* — never as a
+            # zero-loss step, which would silently bias the loss average and
+            # mask a broken data path (Audit.md A3).
+            return {"skipped": 1.0}
+
+        # Use task sampler for modality pair selection.
+        src_mod, tgt_mod = self.task_sampler.sample(available)
+
+        # Cross-modal training needs genuinely paired rows — same ORIGINAL
+        # sample for source and target. Independent union stacking means equal
+        # batch sizes do NOT imply row alignment (e.g. [text-only, image-only]
+        # gives text.shape[0]==image.shape[0]==1 from two unrelated samples).
+        # Use row provenance to pair only co-occurring rows; if none, demote to
+        # self-reconstruction rather than train on unrelated rows.
+        src_data = data[src_mod]
+        tgt_data = data[tgt_mod]
+        if src_mod != tgt_mod:
+            paired = self._align_rows(data, rows, src_mod, tgt_mod)
+            if paired is None:
+                tgt_mod = src_mod
+                tgt_data = src_data
+            else:
+                src_data, tgt_data = paired
+
+        return self._optimize_route(data, rows, src_mod, tgt_mod, src_data, tgt_data)
 
     def train(self, log_interval: int = 50, save_dir: str | None = None) -> None:
         """Main training loop."""

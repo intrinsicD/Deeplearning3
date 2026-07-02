@@ -70,6 +70,7 @@ class EWCSI:
             n for n, p in model.named_parameters() if p.requires_grad
         ]
         device = next(model.parameters()).device
+        self.device = device
         self.fisher: dict[str, torch.Tensor] = {
             n: torch.zeros_like(p, device=device)
             for n, p in model.named_parameters()
@@ -204,9 +205,9 @@ class EWCSI:
             "lam_si": self.lam_si,
             "weight_threshold": self.weight_threshold,
             "si_damping": self.si_damping,
-            "fisher": {k: v.clone() for k, v in self.fisher.items()},
-            "omega": {k: v.clone() for k, v in self.omega.items()},
-            "anchor": {k: v.clone() for k, v in self.anchor.items()},
+            "fisher": {k: v.detach().cpu().clone() for k, v in self.fisher.items()},
+            "omega": {k: v.detach().cpu().clone() for k, v in self.omega.items()},
+            "anchor": {k: v.detach().cpu().clone() for k, v in self.anchor.items()},
             "counters": {
                 "num_fisher_updates": self.num_fisher_updates,
                 "num_si_updates": self.num_si_updates,
@@ -220,9 +221,14 @@ class EWCSI:
         self.lam_si = float(state["lam_si"])
         self.weight_threshold = float(state["weight_threshold"])
         self.si_damping = float(state["si_damping"])
-        self.fisher = {k: v.clone() for k, v in state["fisher"].items()}
-        self.omega = {k: v.clone() for k, v in state["omega"].items()}
-        self.anchor = {k: v.clone() for k, v in state["anchor"].items()}
+        device = getattr(self, "device", None)
+        if device is None:
+            first = next(iter(state["fisher"].values()), None)
+            device = first.device if isinstance(first, torch.Tensor) else torch.device("cpu")
+            self.device = device
+        self.fisher = {k: v.to(device).clone() for k, v in state["fisher"].items()}
+        self.omega = {k: v.to(device).clone() for k, v in state["omega"].items()}
+        self.anchor = {k: v.to(device).clone() for k, v in state["anchor"].items()}
         c = state["counters"]
         self.num_fisher_updates = int(c["num_fisher_updates"])
         self.num_si_updates = int(c["num_si_updates"])

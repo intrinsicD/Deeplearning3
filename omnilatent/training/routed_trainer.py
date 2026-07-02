@@ -38,6 +38,8 @@ MODES = ("routed", "always_on", "no_hooks")
 @torch.no_grad()
 def _per_sample_recon_loss(model, modality: str, data: torch.Tensor) -> torch.Tensor:
     """Per-sample self-reconstruction MSE ``(B,)`` under the current routing."""
+    device = next(model.parameters()).device
+    data = data.to(device)
     out = model(modality, data, modality, data)["output"]
     return ((out - data) ** 2).flatten(1).mean(dim=1)
 
@@ -60,6 +62,8 @@ def counterfactual_hook_credit(
     """
     manager = model.hook_manager
     names = list(manager.hooks.keys())
+    device = next(model.parameters()).device
+    data = data.to(device)
     if not names:
         return data.new_zeros(data.shape[0], 0), names
     try:

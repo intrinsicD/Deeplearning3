@@ -170,6 +170,11 @@ class OmniLatentModel(nn.Module):
     # ------------------------------------------------------------------
     def register_hook(self, hook: LatentNeuralHook) -> None:
         """Register a Latent Neural Hook with the model."""
+        try:
+            device = next(self.parameters()).device
+            hook.to(device)
+        except StopIteration:  # pragma: no cover - model always has params
+            pass
         self.hook_manager.register_hook(hook)
 
     def remove_hook(self, name: str) -> LatentNeuralHook | None:
@@ -538,6 +543,7 @@ class OmniLatentModel(nn.Module):
         source_modality: Modality,
         source_data: torch.Tensor,
         max_len: int = 50,
+        eos_token: int | None = None,
     ) -> torch.Tensor:
         """Autoregressive text generation from any source modality.
 
@@ -562,6 +568,10 @@ class OmniLatentModel(nn.Module):
             (B, 1), self.config.text_bos_token,
             dtype=torch.long, device=device,
         )
+        if eos_token is None:
+            eos_token = getattr(self.config, "text_eos_token", None)
+        pad_token = getattr(self.config, "text_pad_token", 0)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
 
         for _ in range(max_len):
             # Embed current generated tokens
@@ -593,9 +603,28 @@ class OmniLatentModel(nn.Module):
             # Get logits for the last target position
             logits = self.decoders["text"](latent[:, -1:])  # (B, 1, V)
             next_token = logits.argmax(dim=-1)  # (B, 1)
+            if eos_token is not None:
+                next_token = torch.where(
+                    finished.unsqueeze(1),
+                    torch.full_like(next_token, pad_token),
+                    next_token,
+                )
             generated_ids = torch.cat([generated_ids, next_token], dim=1)
+            if eos_token is not None:
+                finished |= next_token.squeeze(1).eq(eos_token)
+                if bool(finished.all()):
+                    break
 
-        return generated_ids[:, 1:]  # strip BOS
+        output = generated_ids[:, 1:]  # strip BOS
+        if output.shape[1] < max_len:
+            pad = torch.full(
+                (B, max_len - output.shape[1]),
+                pad_token,
+                dtype=torch.long,
+                device=device,
+            )
+            output = torch.cat([output, pad], dim=1)
+        return output
 
     # ------------------------------------------------------------------
     # Convenience: self-reconstruction (encode-decode same modality)

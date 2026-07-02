@@ -27,6 +27,10 @@ from omnilatent.utils import ALL_MODALITIES
 class ReconstructionLoss(nn.Module):
     """Modality-specific reconstruction losses."""
 
+    def __init__(self, image_edge_weight: float = 0.0) -> None:
+        super().__init__()
+        self.image_edge_weight = image_edge_weight
+
     def text_loss(
         self, logits: torch.Tensor, targets: torch.Tensor
     ) -> torch.Tensor:
@@ -81,11 +85,50 @@ class ReconstructionLoss(nn.Module):
         h, w = pred.shape[-2], pred.shape[-1]
         fft_h = 1 << (h - 1).bit_length()
         fft_w = 1 << (w - 1).bit_length()
-        pred_freq = torch.fft.rfft2(pred, s=(fft_h, fft_w))
-        tgt_freq = torch.fft.rfft2(target, s=(fft_h, fft_w))
-        freq_loss = F.l1_loss(pred_freq.abs(), tgt_freq.abs())
+        # cuFFT's half-precision complex path is still experimental. Keep the
+        # frequency term in fp32 even when the surrounding training step uses
+        # AMP, while leaving the pixel-space L1 loss in its original dtype.
+        if pred.is_cuda:
+            with torch.amp.autocast("cuda", enabled=False):
+                pred_freq = torch.fft.rfft2(pred.float(), s=(fft_h, fft_w))
+                tgt_freq = torch.fft.rfft2(target.float(), s=(fft_h, fft_w))
+                freq_loss = F.l1_loss(pred_freq.abs(), tgt_freq.abs())
+        else:
+            pred_freq = torch.fft.rfft2(pred.float(), s=(fft_h, fft_w))
+            tgt_freq = torch.fft.rfft2(target.float(), s=(fft_h, fft_w))
+            freq_loss = F.l1_loss(pred_freq.abs(), tgt_freq.abs())
 
-        return l1 + 0.1 * freq_loss
+        loss = l1 + 0.1 * freq_loss
+        if self.image_edge_weight > 0:
+            loss = loss + self.image_edge_weight * self._image_edge_loss(pred, target)
+        return loss
+
+    def _image_edge_loss(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sobel-gradient L1 loss for image structure/detail."""
+        autocast_device = "cuda" if pred.is_cuda else "cpu"
+        with torch.amp.autocast(autocast_device, enabled=False):
+            pred_f = pred.float()
+            target_f = target.float()
+            channels = pred_f.shape[1]
+            kernel_x = torch.tensor(
+                [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+                device=pred_f.device,
+            ).view(1, 1, 3, 3)
+            kernel_y = torch.tensor(
+                [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+                device=pred_f.device,
+            ).view(1, 1, 3, 3)
+            kernel_x = kernel_x.expand(channels, 1, 3, 3)
+            kernel_y = kernel_y.expand(channels, 1, 3, 3)
+            pred_x = F.conv2d(pred_f, kernel_x, padding=1, groups=channels)
+            pred_y = F.conv2d(pred_f, kernel_y, padding=1, groups=channels)
+            target_x = F.conv2d(target_f, kernel_x, padding=1, groups=channels)
+            target_y = F.conv2d(target_f, kernel_y, padding=1, groups=channels)
+            return F.l1_loss(pred_x, target_x) + F.l1_loss(pred_y, target_y)
 
     def video_loss(
         self, pred: torch.Tensor, target: torch.Tensor
@@ -391,7 +434,7 @@ class MultiModalLoss(nn.Module):
 
     def __init__(self, config: OmniLatentConfig) -> None:
         super().__init__()
-        self.recon_loss = ReconstructionLoss()
+        self.recon_loss = ReconstructionLoss(config.image_edge_loss_weight)
         self.contrastive_loss = ContrastiveLoss(config.contrastive_temperature)
         self.contrastive_weight = config.contrastive_weight
 

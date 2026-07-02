@@ -35,6 +35,7 @@ class OmniLatentConfig:
     text_max_len: int = 512
     text_pad_token: int = 0
     text_bos_token: int = 1
+    text_eos_token: int = 2
 
     # --- Audio ---
     audio_n_mels: int = 128        # mel spectrogram bins
@@ -47,6 +48,13 @@ class OmniLatentConfig:
     image_size: int = 224
     image_patch_size: int = 16     # 224/16 = 14 → 196 tokens
     image_channels: int = 3
+    image_decoder: Literal["deconv", "patch", "gaussian"] = "deconv"
+    image_gaussians_per_token: int = 1
+    image_gaussian_chunk_size: int = 128
+    image_gaussian_min_scale: float = 0.015
+    image_gaussian_max_scale: float = 0.35
+    image_gaussian_offset_scale: float = 0.75
+    image_gaussian_anchor_jitter: float = 0.0
 
     # --- Video ---
     video_size: int = 112          # smaller than images for memory
@@ -98,6 +106,7 @@ class OmniLatentConfig:
         "image": 1.0,
         "video": 1.0,
     })
+    image_edge_loss_weight: float = 0.0
     contrastive_weight: float = 0.0     # disabled: causes modality collapse on unpaired/synthetic data
     contrastive_temperature: float = 0.07
 

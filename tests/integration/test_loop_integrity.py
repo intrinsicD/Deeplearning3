@@ -61,11 +61,19 @@ def test_all_loss_log_vars_optimized_and_get_gradients() -> None:
 
     # Receive gradients: self-reconstruct every modality, one combined backward.
     model.train()
+    device = tr.device
     data = {
-        "text": torch.randint(1, cfg.vocab_size, (2, 8)),
-        "image": torch.randn(2, 3, cfg.image_size, cfg.image_size),
-        "audio": torch.randn(2, cfg.audio_n_mels, 64),
-        "video": torch.randn(2, 3, cfg.video_max_frames, cfg.video_size, cfg.video_size),
+        "text": torch.randint(1, cfg.vocab_size, (2, 8), device=device),
+        "image": torch.randn(2, 3, cfg.image_size, cfg.image_size, device=device),
+        "audio": torch.randn(2, cfg.audio_n_mels, 64, device=device),
+        "video": torch.randn(
+            2,
+            3,
+            cfg.video_max_frames,
+            cfg.video_size,
+            cfg.video_size,
+            device=device,
+        ),
     }
     predictions, targets = {}, {}
     for mod, x in data.items():

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import time
 import traceback
 
@@ -44,7 +45,7 @@ def _fail(name: str, elapsed: float, exc: Exception) -> None:
     print(f"         {exc}")
 
 
-def _print_summary() -> int:
+def _print_summary(verbose: bool) -> int:
     """Print final summary table and return exit code (0=all pass, 1=any fail)."""
     _banner("SUMMARY")
     passed = sum(1 for r in RESULTS.values() if r["status"] == "PASS")
@@ -53,7 +54,7 @@ def _print_summary() -> int:
         status = r["status"]
         mark = "✓" if status == "PASS" else "✗"
         print(f"  {mark} {name:<40} {status}  {r['elapsed']:.1f}s")
-        if status == "FAIL" and args.verbose:
+        if status == "FAIL" and verbose:
             print(f"      Error: {r['error']}")
             print(r["tb"])
     print(f"\n  {passed} passed, {failed} failed")
@@ -64,7 +65,7 @@ def _print_summary() -> int:
 # 1. OmniLatent
 # ---------------------------------------------------------------------------
 
-def test_omnilatent(steps: int = 3) -> None:
+def test_omnilatent(steps: int = 3, num_workers: int = 0) -> None:
     name = "OmniLatent (synthetic, tiny config)"
     _banner(name)
     t0 = time.time()
@@ -92,7 +93,7 @@ def test_omnilatent(steps: int = 3) -> None:
         # NOTE: skip torch.compile — it is optional and very slow on first run.
 
         dataset = SyntheticMultiModalDataset(config, length=max(steps * config.batch_size, 16))
-        dataloader = build_dataloader(config, dataset)
+        dataloader = build_dataloader(config, dataset, num_workers=num_workers)
 
         trainer = Trainer(model, config, dataloader)
         trainer.train(log_interval=1)
@@ -103,7 +104,80 @@ def test_omnilatent(steps: int = 3) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. HPWM
+# 2. MMWM
+# ---------------------------------------------------------------------------
+
+def test_mmwm(steps: int = 2) -> None:
+    name = "MMWM (synthetic vector transitions)"
+    _banner(name)
+    t0 = time.time()
+    try:
+        from MMWM.losses import WorldModelLoss
+        from MMWM.trainer import Trainer, build_lr_scheduler
+        from scripts.training.train_mmwm_minari import build_mmwm
+
+        torch.manual_seed(0)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"  Device: {device}")
+
+        vector_dim = 12
+        action_dim = 4
+        latent_dim = 16
+        hidden_dim = 32
+        batch_size = 4
+        _, model = build_mmwm(
+            vector_dim,
+            action_dim,
+            latent_dim,
+            hidden_dim,
+            transition="mlp",
+        )
+        loss_fn = WorldModelLoss(learned_uncertainty=True).to(device)
+        optimizer = torch.optim.AdamW(
+            list(model.parameters()) + list(loss_fn.parameters()),
+            lr=1e-3,
+            weight_decay=1e-4,
+        )
+        scheduler = build_lr_scheduler(optimizer, total_steps=steps)
+
+        with tempfile.TemporaryDirectory(prefix="mmwm_startup_") as run_dir:
+            trainer = Trainer(
+                model=model,
+                optimizer=optimizer,
+                loss_fn=loss_fn,
+                device=device,
+                run_dir=run_dir,
+                mixed_precision=(device.type == "cuda"),
+                lr_scheduler=scheduler,
+                reset_memory_each_batch=True,
+            )
+
+            for step in range(1, steps + 1):
+                obs = torch.randn(batch_size, vector_dim)
+                action = torch.randn(batch_size, action_dim)
+                target = obs + 0.1 * torch.randn(batch_size, vector_dim)
+                batch = {
+                    "vector_t": obs,
+                    "vector_tp1": target,
+                    "vector_target": target,
+                    "action": action,
+                }
+                metrics, _ = trainer.train_step(batch)
+                print(
+                    f"  step {step}/{steps}  "
+                    f"total_loss={metrics['total_loss']:.4f}  "
+                    f"vector_recon={metrics['vector_recon_loss']:.4f}"
+                )
+
+            trainer.writer.close()
+
+        _ok(name, time.time() - t0, f"completed {steps} steps")
+    except Exception as exc:
+        _fail(name, time.time() - t0, exc)
+
+
+# ---------------------------------------------------------------------------
+# 3. HPWM
 # ---------------------------------------------------------------------------
 
 def test_hpwm(steps: int = 2) -> None:
@@ -202,7 +276,7 @@ def test_hpwm(steps: int = 2) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. LGQ (all 3 quantizer variants)
+# 4. LGQ (all 3 quantizer variants)
 # ---------------------------------------------------------------------------
 
 def test_lgq_variant(quantizer: str, steps: int = 3) -> None:
@@ -273,7 +347,7 @@ def test_lgq_variant(quantizer: str, steps: int = 3) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Gaussian Encoder
+# 5. Gaussian Encoder
 # ---------------------------------------------------------------------------
 
 def test_gaussian_encoder(epochs: int = 1) -> None:
@@ -327,6 +401,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--verbose", action="store_true", help="Print full tracebacks for failures")
     p.add_argument("--steps", type=int, default=3, help="Steps for step-based trainers")
     p.add_argument("--epochs", type=int, default=1, help="Epochs for epoch-based trainers")
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="OmniLatent synthetic DataLoader workers; 0 avoids multiprocessing.",
+    )
     return p.parse_args()
 
 
@@ -339,13 +419,14 @@ def main() -> None:
     if torch.cuda.is_available():
         print(f"  GPU: {torch.cuda.get_device_name()}")
 
-    test_omnilatent(steps=args.steps)
+    test_omnilatent(steps=args.steps, num_workers=args.num_workers)
+    test_mmwm(steps=args.steps)
     test_hpwm(steps=args.steps)
     for qtype in ("lgq", "fsq", "simvq"):
         test_lgq_variant(qtype, steps=args.steps)
     test_gaussian_encoder(epochs=args.epochs)
 
-    sys.exit(_print_summary())
+    sys.exit(_print_summary(args.verbose))
 
 
 if __name__ == "__main__":

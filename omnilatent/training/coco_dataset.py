@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from omnilatent.config import OmniLatentConfig
+from omnilatent.data.collate import eos_byte_tokenize
 from omnilatent.data.errors import MediaDecodeError
 
 # Catch Exception (not just ImportError) because these libraries can fail
@@ -48,14 +49,14 @@ except Exception:
 
 
 def _simple_tokenize(text: str, max_len: int, vocab_size: int) -> torch.Tensor:
-    """Byte-level fallback tokenizer (same as video_dataset.py).
+    """EOS-aware byte-level fallback tokenizer.
 
-    Token 0 = padding, token 1 = BOS.  Content tokens are 2..vocab_size-1.
+    Token 0 = padding, token 1 = BOS, token 2 = EOS. Content tokens are
+    3..vocab_size-1. BOS is added by the model during teacher forcing, so
+    dataset targets contain content bytes followed by EOS.
     Replace with SentencePiece / tiktoken for real training.
     """
-    encoded = text.encode("utf-8")[:max_len - 1]  # leave room for BOS
-    ids = [1] + [(b % (vocab_size - 2)) + 2 for b in encoded]  # BOS + content
-    return torch.tensor(ids, dtype=torch.long)
+    return eos_byte_tokenize(text, max_len, vocab_size)
 
 
 class CocoCaptionsDataset(Dataset):
@@ -138,7 +139,13 @@ class CocoCaptionsDataset(Dataset):
         c = self.config
         if self.tokenizer_fn is not None:
             return self.tokenizer_fn(text, c.text_max_len)
-        return _simple_tokenize(text, c.text_max_len, c.vocab_size)
+        return eos_byte_tokenize(
+            text,
+            c.text_max_len,
+            c.vocab_size,
+            bos_token=c.text_bos_token,
+            eos_token=c.text_eos_token,
+        )
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         img_path, caption = self.samples[idx]

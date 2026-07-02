@@ -60,6 +60,59 @@ def byte_tokenize(text: str, max_len: int, vocab_size: int) -> torch.Tensor:
     return torch.tensor(ids, dtype=torch.long)
 
 
+def eos_byte_tokenize(
+    text: str,
+    max_len: int,
+    vocab_size: int,
+    bos_token: int = 1,
+    eos_token: int = 2,
+) -> torch.Tensor:
+    """Byte-level tokenizer that reserves PAD/BOS/EOS and appends EOS.
+
+    The returned target sequence does not include BOS; the model adds BOS
+    internally when teacher-forcing text targets. Content bytes occupy token
+    IDs ``3..vocab_size-1`` with the default special-token layout.
+    """
+    if max_len <= 0:
+        return torch.zeros(0, dtype=torch.long)
+    if vocab_size <= 3:
+        raise ValueError(f"vocab_size must be > 3 for EOS byte tokenization, got {vocab_size}")
+    if bos_token in (0, eos_token) or eos_token == 0:
+        raise ValueError("PAD, BOS, and EOS tokens must be distinct")
+
+    encoded = text.encode("utf-8", errors="ignore")[: max_len - 1]
+    ids = [(b % (vocab_size - 3)) + 3 for b in encoded]
+    ids.append(eos_token)
+    return torch.tensor(ids, dtype=torch.long)
+
+
+def decode_eos_byte_tokens(
+    tokens: torch.Tensor,
+    *,
+    bos_token: int = 1,
+    eos_token: int = 2,
+) -> tuple[str, int]:
+    """Decode EOS-aware byte tokens for diagnostics.
+
+    Returns ``(text, out_of_byte_vocab_count)``. Decoding stops at EOS, skips
+    PAD/BOS, and treats tokens below 3 or above 258 as non-byte diagnostics.
+    """
+    values: list[int] = []
+    out_of_byte_vocab = 0
+    for raw in tokens.detach().cpu().flatten().tolist():
+        token = int(raw)
+        if token == eos_token:
+            break
+        if token in (0, bos_token):
+            continue
+        byte = token - 3
+        if 0 <= byte <= 255:
+            values.append(byte)
+        else:
+            out_of_byte_vocab += 1
+    return bytes(values).decode("utf-8", errors="replace"), out_of_byte_vocab
+
+
 def _standardize_image(image: torch.Tensor, config: OmniLatentConfig) -> torch.Tensor:
     """Coerce a (C, H, W) image tensor to (image_channels, image_size, image_size)."""
     if image.dim() != 3:
@@ -216,6 +269,8 @@ __all__ = [
     "Tokenizer",
     "SampleCollator",
     "byte_tokenize",
+    "eos_byte_tokenize",
+    "decode_eos_byte_tokens",
     "sample_to_inputs",
     "build_sample_collator",
     "collate_multimodal_samples",

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Mapping, TypeVar, cast
+from typing import Any, ClassVar, Dict, List, Literal, Mapping, TypeVar, cast
 
 
 T = TypeVar("T")
@@ -64,6 +64,7 @@ class ModalityConfig:
     text_max_len: int = 512
     text_pad_token: int = 0
     text_bos_token: int = 1
+    text_eos_token: int = 2
     audio_n_mels: int = 128
     audio_hop_length: int = 160
     audio_max_frames: int = 1000
@@ -72,6 +73,13 @@ class ModalityConfig:
     image_size: int = 224
     image_patch_size: int = 16
     image_channels: int = 3
+    image_decoder: Literal["deconv", "patch", "gaussian"] = "deconv"
+    image_gaussians_per_token: int = 1
+    image_gaussian_chunk_size: int = 128
+    image_gaussian_min_scale: float = 0.015
+    image_gaussian_max_scale: float = 0.35
+    image_gaussian_offset_scale: float = 0.75
+    image_gaussian_anchor_jitter: float = 0.0
     video_size: int = 112
     video_patch_size: int = 16
     video_temporal_patch: int = 4
@@ -413,6 +421,7 @@ class OmniAgentConfig:
             text_max_len=self.modalities.text_max_len,
             text_pad_token=self.modalities.text_pad_token,
             text_bos_token=self.modalities.text_bos_token,
+            text_eos_token=self.modalities.text_eos_token,
             audio_n_mels=self.modalities.audio_n_mels,
             audio_hop_length=self.modalities.audio_hop_length,
             audio_max_frames=self.modalities.audio_max_frames,
@@ -421,6 +430,13 @@ class OmniAgentConfig:
             image_size=self.modalities.image_size,
             image_patch_size=self.modalities.image_patch_size,
             image_channels=self.modalities.image_channels,
+            image_decoder=self.modalities.image_decoder,
+            image_gaussians_per_token=self.modalities.image_gaussians_per_token,
+            image_gaussian_chunk_size=self.modalities.image_gaussian_chunk_size,
+            image_gaussian_min_scale=self.modalities.image_gaussian_min_scale,
+            image_gaussian_max_scale=self.modalities.image_gaussian_max_scale,
+            image_gaussian_offset_scale=self.modalities.image_gaussian_offset_scale,
+            image_gaussian_anchor_jitter=self.modalities.image_gaussian_anchor_jitter,
             video_size=self.modalities.video_size,
             video_patch_size=self.modalities.video_patch_size,
             video_temporal_patch=self.modalities.video_temporal_patch,
@@ -554,5 +570,3 @@ __all__ = [
     "small_real",
     "tiny_debug",
 ]
-
-

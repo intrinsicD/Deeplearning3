@@ -79,6 +79,57 @@ class ImageDecoder(nn.Module):
         P = config.image_patch_size
         self.grid_size = config.image_size // P
         self.norm = RMSNorm(D)
+        self.decoder_arch = getattr(config, "image_decoder", "deconv")
+
+        if self.decoder_arch == "patch":
+            self.patch_size = P
+            self.patch_head = nn.Linear(D, config.image_channels * P * P)
+            return
+        if self.decoder_arch == "gaussian":
+            self.gaussians_per_token = config.image_gaussians_per_token
+            self.gaussian_chunk_size = config.image_gaussian_chunk_size
+            if self.gaussians_per_token <= 0:
+                raise ValueError(
+                    f"image_gaussians_per_token must be > 0, got {self.gaussians_per_token}"
+                )
+            if self.gaussian_chunk_size <= 0:
+                raise ValueError(
+                    f"image_gaussian_chunk_size must be > 0, got {self.gaussian_chunk_size}"
+                )
+            self.gaussian_head = nn.Linear(D, 9 * self.gaussians_per_token)
+            self.gaussian_min_scale = config.image_gaussian_min_scale
+            self.gaussian_max_scale = config.image_gaussian_max_scale
+            self.gaussian_offset_scale = config.image_gaussian_offset_scale
+            self.gaussian_anchor_jitter = config.image_gaussian_anchor_jitter
+            if not (0 < self.gaussian_min_scale <= self.gaussian_max_scale):
+                raise ValueError(
+                    "image_gaussian_min_scale must be > 0 and <= image_gaussian_max_scale"
+                )
+            if self.gaussian_offset_scale < 0:
+                raise ValueError("image_gaussian_offset_scale must be >= 0")
+            if self.gaussian_anchor_jitter < 0:
+                raise ValueError("image_gaussian_anchor_jitter must be >= 0")
+            ys, xs = torch.meshgrid(
+                torch.linspace(-1.0, 1.0, config.image_size),
+                torch.linspace(-1.0, 1.0, config.image_size),
+                indexing="ij",
+            )
+            self.register_buffer("render_x", xs.view(1, 1, config.image_size, config.image_size), persistent=False)
+            self.register_buffer("render_y", ys.view(1, 1, config.image_size, config.image_size), persistent=False)
+            gy, gx = torch.meshgrid(
+                torch.arange(self.grid_size, dtype=torch.float32),
+                torch.arange(self.grid_size, dtype=torch.float32),
+                indexing="ij",
+            )
+            anchors_x = ((gx + 0.5) / self.grid_size) * 2.0 - 1.0
+            anchors_y = ((gy + 0.5) / self.grid_size) * 2.0 - 1.0
+            token_anchors = torch.stack([anchors_x, anchors_y], dim=-1).view(1, -1, 2)
+            anchors = self._expand_subcell_anchors(token_anchors)
+            self.register_buffer("gaussian_anchors", anchors, persistent=False)
+            self.background = nn.Parameter(torch.zeros(1, config.image_channels, 1, 1))
+            return
+        if self.decoder_arch != "deconv":
+            raise ValueError(f"Unknown image_decoder {self.decoder_arch!r}")
 
         # Number of 2x upsampling stages = log2(patch_size)
         n_upsample = int(math.log2(P))
@@ -104,10 +155,93 @@ class ImageDecoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm(x)
+        if self.decoder_arch == "patch":
+            patches = torch.sigmoid(self.patch_head(x))
+            p = self.patch_size
+            return rearrange(
+                patches,
+                "b (gh gw) (c p1 p2) -> b c (gh p1) (gw p2)",
+                gh=self.grid_size,
+                gw=self.grid_size,
+                c=self.config.image_channels,
+                p1=p,
+                p2=p,
+            )
+        if self.decoder_arch == "gaussian":
+            return self._forward_gaussian(x)
+
         # Reshape 1D sequence to 2D spatial grid: (B, N, D) -> (B, D, G, G)
         x = rearrange(x, "b (gh gw) d -> b d gh gw", gh=self.grid_size, gw=self.grid_size)
         # Apply deconvolutions to reconstruct the image
         return self.upconv_stack(x)
+
+    def _forward_gaussian(self, x: torch.Tensor) -> torch.Tensor:
+        B = x.shape[0]
+        raw = self.gaussian_head(x).view(B, x.shape[1], self.gaussians_per_token, 9)
+        raw = raw.reshape(B, x.shape[1] * self.gaussians_per_token, 9)
+        subgrid_size = math.ceil(math.sqrt(self.gaussians_per_token))
+        offset_limit = self.gaussian_offset_scale / (self.grid_size * subgrid_size)
+        centers = self.gaussian_anchors.to(dtype=x.dtype) + torch.tanh(raw[..., :2]) * offset_limit
+        if self.training and self.gaussian_anchor_jitter > 0:
+            jitter = (torch.rand_like(centers) * 2.0 - 1.0) * offset_limit * self.gaussian_anchor_jitter
+            centers = centers + jitter
+        centers = centers.clamp(-1.0, 1.0)
+        scales = self.gaussian_min_scale + torch.sigmoid(raw[..., 2:4]) * (
+            self.gaussian_max_scale - self.gaussian_min_scale
+        )
+        angles = torch.tanh(raw[..., 4:5]) * math.pi
+        colors = torch.sigmoid(raw[..., 5:8])
+        opacity = torch.sigmoid(raw[..., 8:9])
+
+        grid_x = self.render_x.to(device=x.device, dtype=x.dtype)
+        grid_y = self.render_y.to(device=x.device, dtype=x.dtype)
+
+        H = self.config.image_size
+        W = self.config.image_size
+        color_sum = torch.zeros(B, self.config.image_channels, H, W, device=x.device, dtype=x.dtype)
+        weight_sum = torch.zeros(B, 1, H, W, device=x.device, dtype=x.dtype)
+        for start in range(0, centers.shape[1], self.gaussian_chunk_size):
+            end = min(start + self.gaussian_chunk_size, centers.shape[1])
+            center_chunk = centers[:, start:end]
+            scale_chunk = scales[:, start:end]
+            color_chunk = colors[:, start:end]
+            opacity_chunk = opacity[:, start:end]
+
+            cx = center_chunk[..., 0].unsqueeze(-1).unsqueeze(-1)
+            cy = center_chunk[..., 1].unsqueeze(-1).unsqueeze(-1)
+            sx = scale_chunk[..., 0].unsqueeze(-1).unsqueeze(-1)
+            sy = scale_chunk[..., 1].unsqueeze(-1).unsqueeze(-1)
+            angle_chunk = angles[:, start:end]
+            cos_t = torch.cos(angle_chunk).unsqueeze(-1)
+            sin_t = torch.sin(angle_chunk).unsqueeze(-1)
+            dx = grid_x - cx
+            dy = grid_y - cy
+            xr = cos_t * dx + sin_t * dy
+            yr = -sin_t * dx + cos_t * dy
+            exponent = -0.5 * ((xr / sx).square() + (yr / sy).square())
+            weights = torch.exp(exponent) * opacity_chunk.squeeze(-1).unsqueeze(-1).unsqueeze(-1)
+            weight_sum = weight_sum + weights.sum(dim=1, keepdim=True)
+            color_sum = color_sum + torch.einsum("bnhw,bnc->bchw", weights, color_chunk)
+
+        avg_color = color_sum / weight_sum.clamp_min(1e-6)
+        alpha = 1.0 - torch.exp(-weight_sum)
+        background = torch.sigmoid(self.background).to(device=x.device, dtype=x.dtype)
+        return avg_color * alpha + background * (1.0 - alpha)
+
+    def _expand_subcell_anchors(self, token_anchors: torch.Tensor) -> torch.Tensor:
+        """Place multiple Gaussian anchors on a regular sub-grid per image token."""
+        if self.gaussians_per_token == 1:
+            return token_anchors
+        subgrid_size = math.ceil(math.sqrt(self.gaussians_per_token))
+        idx = torch.arange(self.gaussians_per_token, dtype=torch.float32)
+        sub_y = torch.div(idx, subgrid_size, rounding_mode="floor")
+        sub_x = idx.remainder(subgrid_size)
+        cell_width = 2.0 / self.grid_size
+        local_x = ((sub_x + 0.5) / subgrid_size - 0.5) * cell_width
+        local_y = ((sub_y + 0.5) / subgrid_size - 0.5) * cell_width
+        local_offsets = torch.stack([local_x, local_y], dim=-1).view(1, 1, -1, 2)
+        anchors = token_anchors.unsqueeze(2) + local_offsets
+        return anchors.view(1, -1, 2).clamp(-1.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
