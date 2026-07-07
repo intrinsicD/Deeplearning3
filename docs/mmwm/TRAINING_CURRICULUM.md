@@ -20,7 +20,7 @@ A staged plan for training the Multimodal Latent World Model on real datasets to
 
 > **April 29, 2026 status correction:** Several items in the original blocker table below have since been implemented: checkpoint save/load, memory propagation through `train_step`, LR scheduling, LayerNorm-based projector normalization, sequence-level BPTT, gradient checkpointing for recurrent transitions, and contrastive alignment loss. A minimal deterministic trainer-compatible dataset now exists in `MMWM/data.py`, and audio is supported as an input modality.
 >
-> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The structured smoke path now uses `GridWorldTransitionDataset` plus `run_gridworld_smoke()` to cover DataLoader -> train -> checkpoint save/load -> rollout metrics with a decreasing vector reconstruction metric. `EpisodeDataset` now windows vector episodes into `train_sequence_step` batches for BPTT. Pretrained text/image wrappers are registered via `pretrained_multimodal` with injectable or optional Hugging Face backbones. `DMControlTransitionDataset` now collects random-policy vector/image transitions from DM Control-style environments. The still-active blockers are TextWorld/text-action adapters, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
+> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The structured smoke path now uses `GridWorldTransitionDataset` plus `run_gridworld_smoke()` to cover DataLoader -> train -> checkpoint save/load -> rollout metrics with a decreasing vector reconstruction metric. `EpisodeDataset` now windows vector episodes into `train_sequence_step` batches for BPTT. Pretrained text/image wrappers are registered via `pretrained_multimodal` with injectable or optional Hugging Face backbones. `DMControlTransitionDataset` now collects random-policy vector/image transitions from DM Control-style environments, and `TextWorldTransitionDataset` tokenizes text observations while encoding commands as fixed action vectors. The still-active blockers are empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
 
 | # | Gap | Location | Severity |
 |---|-----|----------|----------|
@@ -355,7 +355,7 @@ From the critical review, prioritized by impact and dependency:
 | 9 | Pre-trained backbone wrappers | ~200 lines | Real data quality | Done |
 | 10 | Contrastive alignment loss | ~50 lines | Stage 3 | Done |
 | 11 | DM Control adapter | ~100 lines | Stage 1B | Done |
-| 12 | TextWorld adapter | ~100 lines | Stage 1C | Open |
+| 12 | TextWorld adapter | ~100 lines | Stage 1C | Done |
 | Defer | RL infrastructure | ~1000+ lines | Stage 4 | Deferred |
 | Defer | Distributed training | ~500+ lines | Scaling | Deferred |
 
@@ -369,7 +369,7 @@ From the critical review, prioritized by impact and dependency:
 
 2. **The autoencoder-only Phase 1A was self-contradictory.** The plan said "freeze all decoders" but expected autoencoder reconstruction signal from a frozen (randomly initialized) decoder. Fix: train encoder + decoder jointly from the start.
 
-3. **Text action encoding is an unsolved problem in this codebase.** TextWorld actions are natural language strings, but the action encoder expects either discrete IDs or continuous vectors. Need to either tokenize actions and use text sub-encoder, or map to a discrete action vocabulary.
+3. **Text action encoding baseline is now present, but still simple.** `TextWorldTransitionDataset` maps natural-language commands to fixed bag-of-token action vectors so the existing action encoder can train. A richer semantic command encoder is still future work, but the adapter no longer blocks Stage 1C smoke training.
 
 4. **Success criteria from the original plan were miscalibrated:**
    - PSNR > 25 dB through 128-dim bottleneck with tiny CNN is unrealistic (VQGAN gets ~22-25 dB with orders of magnitude more capacity)

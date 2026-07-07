@@ -19,6 +19,7 @@ from MMWM.data import (
     DeterministicTransitionDataset,
     EpisodeDataset,
     GridWorldTransitionDataset,
+    TextWorldTransitionDataset,
     TransitionTupleDataset,
     collate_transition_batch,
     flatten_transition_value,
@@ -1206,5 +1207,55 @@ def test_dm_control_transition_dataset_collects_random_policy_batch() -> None:
     trainer = Trainer(model, optimizer, WorldModelLoss(), torch.device("cpu"), mixed_precision=False)
     train_batch = {k: v for k, v in batch.items() if k in {"vector_t", "vector_tp1", "vector_target", "action", "done"}}
     metrics, memory = trainer.train_step(train_batch)
+    assert "total_loss" in metrics
+    assert memory is not None
+
+
+class _FakeTextWorldEnv:
+    def __init__(self) -> None:
+        self.room = 0
+        self.steps = 0
+
+    def reset(self, seed: int | None = None):
+        self.room = 0
+        self.steps = 0
+        return "You are in room zero.", {"admissible_commands": ["go north", "look"]}
+
+    def step(self, action: str):
+        self.steps += 1
+        if "north" in action:
+            self.room += 1
+        done = self.steps >= 3
+        obs = f"You are in room {self.room}. Door is open."
+        commands = ["go north", "open door", "look"]
+        return obs, 0.0, done, {"admissible_commands": commands}
+
+
+def test_textworld_transition_dataset_encodes_text_actions_and_trains() -> None:
+    dataset = TextWorldTransitionDataset(
+        env=_FakeTextWorldEnv(),
+        length=5,
+        max_text_len=7,
+        vocab_size=64,
+        action_dim=32,
+        seed=7,
+    )
+
+    assert len(dataset) == 5
+    assert dataset.vocab_size == 64
+    assert dataset.action_dim == 32
+    assert dataset[0]["text_t"].shape == (7,)
+    assert dataset[0]["action"].shape == (32,)
+    assert torch.isclose(dataset[0]["action"].sum(), torch.tensor(1.0))
+
+    batch = collate_transition_batch([dataset[0], dataset[1]])
+    cfg = _small_model_cfg()
+    cfg.encoder_kwargs["text_vocab_size"] = 64
+    cfg.action_encoder_kwargs["action_dim"] = 32
+    model = build_model(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = Trainer(model, optimizer, WorldModelLoss(), torch.device("cpu"), mixed_precision=False)
+    metrics, memory = trainer.train_step(batch)
+
     assert "total_loss" in metrics
     assert memory is not None

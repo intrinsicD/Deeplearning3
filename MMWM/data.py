@@ -9,6 +9,7 @@ offline-RL batch formats.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -621,6 +622,146 @@ class DMControlTransitionDataset(Dataset):
             else:
                 obs_t = obs_tp1
                 image_t = image_tp1
+
+    def __len__(self) -> int:
+        return len(self.transitions)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        return self.transitions[idx]
+
+
+class SimpleTextTokenizer:
+    """Small mutable tokenizer for smoke-scale text environments."""
+
+    def __init__(self, vocab_size: int = 2048) -> None:
+        if vocab_size < 4:
+            raise ValueError("vocab_size must be >= 4")
+        self.vocab_size = int(vocab_size)
+        self.token_to_id: Dict[str, int] = {"<pad>": 0, "<unk>": 1, "<bos>": 2, "<eos>": 3}
+
+    def _tokens(self, text: str) -> list[str]:
+        return re.findall(r"[a-z0-9_]+", text.lower())
+
+    def token_id(self, token: str) -> int:
+        if token in self.token_to_id:
+            return self.token_to_id[token]
+        if len(self.token_to_id) >= self.vocab_size:
+            return self.token_to_id["<unk>"]
+        idx = len(self.token_to_id)
+        self.token_to_id[token] = idx
+        return idx
+
+    def encode(self, text: str, max_len: int) -> torch.Tensor:
+        ids = [self.token_id(tok) for tok in self._tokens(text)]
+        ids = ids[:max_len]
+        if len(ids) < max_len:
+            ids.extend([0] * (max_len - len(ids)))
+        return torch.tensor(ids, dtype=torch.long)
+
+    def action_vector(self, text: str, action_dim: int) -> torch.Tensor:
+        vec = torch.zeros(action_dim, dtype=torch.float32)
+        for tok in self._tokens(text):
+            idx = self.token_id(tok)
+            if 0 < idx < action_dim:
+                vec[idx] += 1.0
+        norm = vec.norm(p=1).clamp_min(1.0)
+        return vec / norm
+
+
+def _unpack_reset(result: Any) -> tuple[str, Dict[str, Any]]:
+    if isinstance(result, tuple) and len(result) == 2:
+        obs, info = result
+        return str(obs), dict(info or {})
+    return str(result), {}
+
+
+def _unpack_step(result: Any) -> tuple[str, bool, Dict[str, Any]]:
+    if isinstance(result, tuple) and len(result) == 5:
+        obs, _reward, terminated, truncated, info = result
+        return str(obs), bool(terminated or truncated), dict(info or {})
+    if isinstance(result, tuple) and len(result) == 4:
+        obs, _reward, done, info = result
+        return str(obs), bool(done), dict(info or {})
+    raise ValueError("TextWorld-style env.step must return 4- or 5-tuples.")
+
+
+class TextWorldTransitionDataset(Dataset):
+    """Collect TextWorld-style transitions with explicit text-action vectors."""
+
+    def __init__(
+        self,
+        env_id: str | None = None,
+        *,
+        env: Any | None = None,
+        length: int = 1024,
+        max_text_len: int = 32,
+        vocab_size: int = 2048,
+        action_dim: int = 256,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        if length <= 0:
+            raise ValueError("length must be > 0")
+        if env is None:
+            if env_id is None:
+                raise ValueError("env_id is required when env is not injected.")
+            try:
+                import gymnasium as gym  # type: ignore
+            except ModuleNotFoundError:  # pragma: no cover - optional dependency
+                try:
+                    import gym  # type: ignore
+                except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+                    raise RuntimeError("TextWorldTransitionDataset requires gymnasium/gym or an injected env.") from exc
+            env = gym.make(env_id)
+
+        self.env_id = env_id
+        self.length = int(length)
+        self.max_text_len = int(max_text_len)
+        self.tokenizer = SimpleTextTokenizer(vocab_size=vocab_size)
+        self.vocab_size = int(vocab_size)
+        self.action_dim = int(action_dim)
+        self.transitions: List[Dict[str, torch.Tensor]] = []
+        self._collect(env, seed)
+
+    def _commands(self, info: Mapping[str, Any], env: Any) -> list[str]:
+        commands = info.get("admissible_commands") or info.get("valid_actions")
+        if commands:
+            return [str(cmd) for cmd in commands]
+        action_space = getattr(env, "action_space", None)
+        sample = getattr(action_space, "sample", None)
+        if callable(sample):
+            return [str(sample())]
+        return ["look"]
+
+    def _collect(self, env: Any, seed: int) -> None:
+        rng = np.random.default_rng(seed)
+        reset_seed = getattr(env, "reset", None)
+        if reset_seed is None:
+            raise ValueError("TextWorldTransitionDataset env must expose reset().")
+        try:
+            obs_t, info = _unpack_reset(env.reset(seed=seed))
+        except TypeError:
+            obs_t, info = _unpack_reset(env.reset())
+
+        while len(self.transitions) < self.length:
+            commands = self._commands(info, env)
+            action_text = commands[int(rng.integers(0, len(commands)))]
+            obs_tp1, done, next_info = _unpack_step(env.step(action_text))
+            text_t = self.tokenizer.encode(obs_t, self.max_text_len)
+            text_tp1 = self.tokenizer.encode(obs_tp1, self.max_text_len)
+            item = {
+                "text_t": text_t,
+                "text_tp1": text_tp1,
+                "text_target": text_tp1.clone(),
+                "prefix_tokens": torch.cat([torch.zeros(1, dtype=torch.long), text_tp1[:-1]], dim=0),
+                "action": self.tokenizer.action_vector(action_text, self.action_dim),
+                "done": torch.tensor(done, dtype=torch.bool),
+            }
+            self.transitions.append(item)
+            if done:
+                obs_t, info = _unpack_reset(env.reset())
+            else:
+                obs_t, info = obs_tp1, next_info
 
     def __len__(self) -> int:
         return len(self.transitions)
