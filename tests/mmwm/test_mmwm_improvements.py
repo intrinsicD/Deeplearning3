@@ -15,6 +15,7 @@ from MMWM.curriculum import (
 )
 from MMWM.data import (
     DeterministicTransitionDataset,
+    EpisodeDataset,
     GridWorldTransitionDataset,
     TransitionTupleDataset,
     collate_transition_batch,
@@ -448,6 +449,46 @@ def test_sequence_level_training() -> None:
     metrics = trainer.train_sequence_step(batch_seq, window_length=2)
     assert "total_loss" in metrics
     assert metrics["sequence_length"] == T
+
+
+def test_episode_dataset_windows_sequences_for_bptt() -> None:
+    observations = torch.arange(6 * 16, dtype=torch.float32).reshape(6, 16)
+    actions = torch.arange(5 * 8, dtype=torch.float32).reshape(5, 8)
+    episode = {
+        "observations": observations,
+        "actions": actions,
+        "terminals": torch.tensor([False, False, True, False, False]),
+    }
+    dataset = EpisodeDataset([episode], window_length=3, stride=2)
+
+    assert len(dataset) == 2
+    item = dataset[0]
+    assert item["vector_seq"].shape == (4, 16)
+    assert item["action_seq"].shape == (3, 8)
+    assert item["vector_target_seq"].shape == (4, 16)
+    assert item["done_seq"].tolist() == [False, False, False, True]
+
+
+def test_episode_dataset_feeds_train_sequence_step() -> None:
+    torch.manual_seed(0)
+    episodes = [
+        {
+            "observations": torch.randn(6, 16),
+            "actions": torch.randn(5, 8),
+            "timeouts": torch.tensor([False, False, False, False, True]),
+        }
+        for _ in range(2)
+    ]
+    dataset = EpisodeDataset(episodes, window_length=3, stride=1)
+    batch = collate_transition_batch([dataset[0], dataset[1]])
+
+    model = build_model(_small_model_cfg())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = Trainer(model=model, optimizer=optimizer, loss_fn=WorldModelLoss(), device=torch.device("cpu"), mixed_precision=False)
+    metrics = trainer.train_sequence_step(batch, window_length=2)
+
+    assert "total_loss" in metrics
+    assert metrics["sequence_length"] == 3.0
 
 
 # ============================================================

@@ -20,7 +20,7 @@ A staged plan for training the Multimodal Latent World Model on real datasets to
 
 > **April 29, 2026 status correction:** Several items in the original blocker table below have since been implemented: checkpoint save/load, memory propagation through `train_step`, LR scheduling, LayerNorm-based projector normalization, sequence-level BPTT, gradient checkpointing for recurrent transitions, and contrastive alignment loss. A minimal deterministic trainer-compatible dataset now exists in `MMWM/data.py`, and audio is supported as an input modality.
 >
-> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The structured smoke path now uses `GridWorldTransitionDataset` plus `run_gridworld_smoke()` to cover DataLoader -> train -> checkpoint save/load -> rollout metrics with a decreasing vector reconstruction metric. The still-active blockers are visual/text real dataset adapters (DM Control/TextWorld), text-action encoding, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
+> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The structured smoke path now uses `GridWorldTransitionDataset` plus `run_gridworld_smoke()` to cover DataLoader -> train -> checkpoint save/load -> rollout metrics with a decreasing vector reconstruction metric. `EpisodeDataset` now windows vector episodes into `train_sequence_step` batches for BPTT. The still-active blockers are visual/text real dataset adapters (DM Control/TextWorld), text-action encoding, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
 
 | # | Gap | Location | Severity |
 |---|-----|----------|----------|
@@ -350,7 +350,7 @@ From the critical review, prioritized by impact and dependency:
 | 4 | LR scheduler | ~10 lines | Training quality | Done |
 | 5 | Replace BatchNorm -> LayerNorm | ~5 lines | RL, small batches | Done |
 | 6 | End-to-end smoke test | ~30 lines | Confidence | Done: structured gridworld dataset plus train/checkpoint/load/rollout smoke test |
-| 7 | EpisodeDataset + train_sequence_step | ~200 lines | Stage 2 | Partial: `train_sequence_step` exists; reusable `EpisodeDataset` remains open |
+| 7 | EpisodeDataset + train_sequence_step | ~200 lines | Stage 2 | Done |
 | 8 | Gradient checkpointing | ~20 lines | Stage 2B | Done |
 | 9 | Pre-trained backbone wrappers | ~200 lines | Real data quality | Open |
 | 10 | Contrastive alignment loss | ~50 lines | Stage 3 | Done |

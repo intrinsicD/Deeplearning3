@@ -413,6 +413,90 @@ class GridWorldTransitionDataset(Dataset):
         return obs_sequence, action_sequence
 
 
+class EpisodeDataset(Dataset):
+    """Window vector episodes into sequence batches for BPTT training.
+
+    Episodes are mappings with ``observations`` and ``actions`` arrays/lists.
+    Optional ``terminals``/``dones`` and ``timeouts`` become a ``done_seq`` mask
+    aligned so ``done_seq[:, t + 1]`` resets memory after transition ``t``.
+    """
+
+    def __init__(
+        self,
+        episodes: Sequence[Mapping[str, Any]],
+        window_length: int = 8,
+        stride: int = 1,
+        max_windows: int | None = None,
+        include_vector_targets: bool = True,
+    ) -> None:
+        super().__init__()
+        if window_length < 1:
+            raise ValueError("window_length must be >= 1")
+        if stride < 1:
+            raise ValueError("stride must be >= 1")
+        self.episodes = list(episodes)
+        self.window_length = int(window_length)
+        self.stride = int(stride)
+        self.include_vector_targets = include_vector_targets
+        self.index: List[Tuple[int, int]] = []
+
+        for ep_idx, episode in enumerate(self.episodes):
+            if "observations" not in episode or "actions" not in episode:
+                raise KeyError("Each episode must contain 'observations' and 'actions'.")
+            n_transitions = min(_length(episode["actions"]), max(_length(episode["observations"]) - 1, 0))
+            max_start = n_transitions - self.window_length
+            if max_start < 0:
+                continue
+            for start in range(0, max_start + 1, self.stride):
+                self.index.append((ep_idx, start))
+                if max_windows is not None and len(self.index) >= max_windows:
+                    break
+            if max_windows is not None and len(self.index) >= max_windows:
+                break
+
+        if not self.index:
+            raise RuntimeError("No sequence windows are available.")
+
+        first = self[0]
+        self.vector_dim = int(first["vector_seq"].shape[-1])
+        self.action_dim = int(first["action_seq"].shape[-1])
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def _episode_done_at(self, episode: Mapping[str, Any], transition_idx: int) -> bool:
+        done_source = episode.get("terminals")
+        if done_source is None:
+            done_source = episode.get("dones")
+        return _optional_bool_at(done_source, transition_idx) or _optional_bool_at(episode.get("timeouts"), transition_idx)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        ep_idx, start = self.index[idx]
+        episode = self.episodes[ep_idx]
+        stop = start + self.window_length
+
+        vectors = [
+            flatten_transition_value(_item(episode["observations"], t))
+            for t in range(start, stop + 1)
+        ]
+        actions = [
+            flatten_transition_value(_item(episode["actions"], t))
+            for t in range(start, stop)
+        ]
+        item: Dict[str, torch.Tensor] = {
+            "vector_seq": torch.stack(vectors, dim=0),
+            "action_seq": torch.stack(actions, dim=0),
+        }
+        if self.include_vector_targets:
+            item["vector_target_seq"] = item["vector_seq"].clone()
+        if any(key in episode for key in ("terminals", "dones", "timeouts")):
+            done_seq = torch.zeros(self.window_length + 1, dtype=torch.bool)
+            for local_t, transition_idx in enumerate(range(start, stop), start=1):
+                done_seq[local_t] = self._episode_done_at(episode, transition_idx)
+            item["done_seq"] = done_seq
+        return item
+
+
 class DeterministicTransitionDataset(Dataset):
     """Synthetic but learnable transition tuples.
 
