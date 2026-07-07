@@ -18,7 +18,9 @@ A staged plan for training the Multimodal Latent World Model on real datasets to
 
 ### Critical Gaps (Blockers)
 
-> **April 29, 2026 status correction:** Several items in the original blocker table below have since been implemented: checkpoint save/load, memory propagation through `train_step`, LR scheduling, LayerNorm-based projector normalization, sequence-level BPTT, gradient checkpointing for recurrent transitions, and contrastive alignment loss. A minimal deterministic trainer-compatible dataset now exists in `MMWM/data.py`, and audio is supported as an input modality. The still-active blockers are real dataset adapters, text-action encoding, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
+> **April 29, 2026 status correction:** Several items in the original blocker table below have since been implemented: checkpoint save/load, memory propagation through `train_step`, LR scheduling, LayerNorm-based projector normalization, sequence-level BPTT, gradient checkpointing for recurrent transitions, and contrastive alignment loss. A minimal deterministic trainer-compatible dataset now exists in `MMWM/data.py`, and audio is supported as an input modality.
+>
+> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The still-active blockers are visual/text real dataset adapters (DM Control/TextWorld), text-action encoding, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
 
 | # | Gap | Location | Severity |
 |---|-----|----------|----------|
@@ -340,22 +342,22 @@ The original 1,250 A100-hours estimate was significantly low. Revised:
 
 From the critical review, prioritized by impact and dependency:
 
-| Priority | Task | Effort | Blocks |
-|----------|------|--------|--------|
-| 1 | Checkpoint save/load | ~50 lines | Everything |
-| 2 | TransitionTupleDataset (D4RL adapter) | ~100 lines | All training |
-| 3 | Fix memory propagation in train_step | ~20 lines | Stage 2+ |
-| 4 | LR scheduler | ~10 lines | Training quality |
-| 5 | Replace BatchNorm → LayerNorm | ~5 lines | RL, small batches |
-| 6 | End-to-end smoke test | ~30 lines | Confidence |
-| 7 | EpisodeDataset + train_sequence_step | ~200 lines | Stage 2 |
-| 8 | Gradient checkpointing | ~20 lines | Stage 2B |
-| 9 | Pre-trained backbone wrappers | ~200 lines | Real data quality |
-| 10 | Contrastive alignment loss | ~50 lines | Stage 3 |
-| 11 | DM Control adapter | ~100 lines | Stage 1B |
-| 12 | TextWorld adapter | ~100 lines | Stage 1C |
-| Defer | RL infrastructure | ~1000+ lines | Stage 4 |
-| Defer | Distributed training | ~500+ lines | Scaling |
+| Priority | Task | Effort | Blocks | Status |
+|----------|------|--------|--------|--------|
+| 1 | Checkpoint save/load | ~50 lines | Everything | Done |
+| 2 | TransitionTupleDataset (D4RL adapter) | ~100 lines | All training | Done: reusable tuple wrapper, D4RL-style mapping support, optional D4RL loader, shared Minari wrapper |
+| 3 | Fix memory propagation in train_step | ~20 lines | Stage 2+ | Done |
+| 4 | LR scheduler | ~10 lines | Training quality | Done |
+| 5 | Replace BatchNorm -> LayerNorm | ~5 lines | RL, small batches | Done |
+| 6 | End-to-end smoke test | ~30 lines | Confidence | Partial: deterministic trainer-compatible dataset exists; full rollout smoke remains open |
+| 7 | EpisodeDataset + train_sequence_step | ~200 lines | Stage 2 | Partial: `train_sequence_step` exists; reusable `EpisodeDataset` remains open |
+| 8 | Gradient checkpointing | ~20 lines | Stage 2B | Done |
+| 9 | Pre-trained backbone wrappers | ~200 lines | Real data quality | Open |
+| 10 | Contrastive alignment loss | ~50 lines | Stage 3 | Done |
+| 11 | DM Control adapter | ~100 lines | Stage 1B | Open |
+| 12 | TextWorld adapter | ~100 lines | Stage 1C | Open |
+| Defer | RL infrastructure | ~1000+ lines | Stage 4 | Deferred |
+| Defer | Distributed training | ~500+ lines | Scaling | Deferred |
 
 **Items 1-6 should be completed as a single PR before starting any training stage.**
 

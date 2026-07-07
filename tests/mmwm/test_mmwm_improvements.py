@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 
+import numpy as np
 import torch
 
 from MMWM.config import ModelConfig, build_model
@@ -12,7 +13,12 @@ from MMWM.curriculum import (
     default_curriculum_phases,
     relative_curriculum_phases,
 )
-from MMWM.data import DeterministicTransitionDataset, collate_transition_batch
+from MMWM.data import (
+    DeterministicTransitionDataset,
+    TransitionTupleDataset,
+    collate_transition_batch,
+    flatten_transition_value,
+)
 from MMWM.evaluation import (
     EvaluationSuite,
     LatentPredictionMetrics,
@@ -925,3 +931,58 @@ def test_deterministic_transition_dataset_trainer_batch() -> None:
     assert "total_loss" in metrics
     assert memory is not None
 
+
+def test_transition_tuple_dataset_from_d4rl_mapping() -> None:
+    mapping = {
+        "observations": np.array(
+            [[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]],
+            dtype=np.float32,
+        ),
+        "actions": np.array([[0.5], [1.5], [2.5]], dtype=np.float32),
+        "next_observations": np.array(
+            [[1.0, 2.0], [2.0, 3.0], [3.0, 4.0]],
+            dtype=np.float32,
+        ),
+        "terminals": np.array([False, True, False]),
+    }
+    dataset = TransitionTupleDataset.from_mapping(mapping, max_transitions=2)
+
+    assert len(dataset) == 2
+    assert dataset.vector_dim == 2
+    assert dataset.action_dim == 1
+    assert torch.equal(dataset[0]["vector_target"], dataset[0]["vector_tp1"])
+    assert dataset[1]["done"].item() is True
+
+    batch = collate_transition_batch([dataset[0], dataset[1]])
+    assert batch["vector_t"].shape == (2, 2)
+    assert batch["action"].shape == (2, 1)
+    assert batch["done"].dtype == torch.bool
+
+
+def test_transition_tuple_dataset_trains_one_step() -> None:
+    mapping = {
+        "observations": torch.randn(6, 16),
+        "actions": torch.randn(5, 8),
+        "next_observations": torch.randn(5, 16),
+        "timeouts": torch.tensor([False, False, True, False, False]),
+    }
+    dataset = TransitionTupleDataset.from_mapping(mapping, max_transitions=4)
+    batch = collate_transition_batch([dataset[0], dataset[1]])
+
+    model = build_model(_small_model_cfg())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = Trainer(model, optimizer, WorldModelLoss(), torch.device("cpu"), mixed_precision=False)
+    metrics, memory = trainer.train_step(batch)
+
+    assert "total_loss" in metrics
+    assert memory is not None
+
+
+def test_flatten_transition_value_uses_stable_dict_key_order() -> None:
+    value = {
+        "z": np.array([3, 4], dtype=np.int64),
+        "a": torch.tensor([[1.0, 2.0]]),
+    }
+    flat = flatten_transition_value(value)
+    assert flat.dtype == torch.float32
+    assert torch.allclose(flat, torch.tensor([1.0, 2.0, 3.0, 4.0]))

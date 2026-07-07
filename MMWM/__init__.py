@@ -24,7 +24,14 @@ from .curriculum import (
     default_curriculum_phases,
     relative_curriculum_phases,
 )
-from .data import DeterministicTransitionDataset, collate_transition_batch
+from .data import (
+    D4RLTransitionDataset,
+    DeterministicTransitionDataset,
+    MinariTransitionDataset,
+    TransitionTupleDataset,
+    collate_transition_batch,
+    flatten_transition_value,
+)
 from .evaluation import EvalResult, EvaluationSuite
 from .losses import LossWeights, WorldModelLoss
 from .model import ModularLatentWorldModel
@@ -46,12 +53,16 @@ __all__ = [
     "ToolDescriptor",
     "ToolResult",
     "CurriculumPhase",
+    "D4RLTransitionDataset",
     "DeterministicTransitionDataset",
+    "MinariTransitionDataset",
     "TransitionOutput",
+    "TransitionTupleDataset",
     "WorldModelLoss",
     "build_lr_scheduler",
     "build_model",
     "collate_transition_batch",
+    "flatten_transition_value",
     "build_tool_ecosystem",
     "default_curriculum_phases",
     "relative_curriculum_phases",

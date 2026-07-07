@@ -16,13 +16,19 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
-from MMWM import ModelConfig, WorldModelLoss, build_lr_scheduler, build_model
+from MMWM import (
+    MinariTransitionDataset,
+    ModelConfig,
+    WorldModelLoss,
+    build_lr_scheduler,
+    build_model,
+    collate_transition_batch,
+)
 from MMWM.trainer import Trainer
 
 
@@ -37,92 +43,6 @@ def _require_minari():
             "  pip install -e '.[datasets]'"
         ) from exc
     return minari
-
-
-def flatten_array(value: Any) -> np.ndarray:
-    """Flatten vector/dict observations or actions into a float32 vector."""
-    if isinstance(value, dict):
-        parts = [flatten_array(value[key]) for key in sorted(value.keys())]
-        if not parts:
-            return np.zeros((0,), dtype=np.float32)
-        return np.concatenate(parts, axis=0).astype(np.float32)
-    arr = np.asarray(value)
-    if arr.dtype.kind in {"b"}:
-        arr = arr.astype(np.float32)
-    elif arr.dtype.kind in {"i", "u"}:
-        arr = arr.astype(np.float32)
-    else:
-        arr = arr.astype(np.float32)
-    return arr.reshape(-1)
-
-
-def iter_episodes(dataset: Any) -> Iterable[Any]:
-    """Support common Minari dataset iteration APIs across versions."""
-    if hasattr(dataset, "iterate_episodes"):
-        yield from dataset.iterate_episodes()
-        return
-    if hasattr(dataset, "iter_episodes"):
-        yield from dataset.iter_episodes()
-        return
-    for idx in range(len(dataset)):
-        yield dataset[idx]
-
-
-class MinariTransitionDataset(Dataset):
-    """Index Minari episodes as single-step MMWM transition tuples."""
-
-    def __init__(self, dataset_id: str, max_transitions: Optional[int] = None) -> None:
-        super().__init__()
-        minari = _require_minari()
-        self.dataset_id = dataset_id
-        self.dataset = minari.load_dataset(dataset_id)
-        self.episodes = list(iter_episodes(self.dataset))
-        self.index: List[Tuple[int, int]] = []
-
-        for ep_idx, episode in enumerate(self.episodes):
-            n_actions = len(episode.actions)
-            n_obs = len(episode.observations)
-            n = min(n_actions, n_obs - 1)
-            for t in range(n):
-                self.index.append((ep_idx, t))
-                if max_transitions is not None and len(self.index) >= max_transitions:
-                    break
-            if max_transitions is not None and len(self.index) >= max_transitions:
-                break
-
-        if not self.index:
-            raise RuntimeError(f"No transitions found in Minari dataset {dataset_id!r}")
-
-        ep_idx, t = self.index[0]
-        ep = self.episodes[ep_idx]
-        self.vector_dim = int(flatten_array(ep.observations[t]).shape[0])
-        self.action_dim = int(flatten_array(ep.actions[t]).shape[0])
-        if self.vector_dim <= 0:
-            raise RuntimeError("Flattened observation has zero dimensions.")
-        if self.action_dim <= 0:
-            raise RuntimeError("Flattened action has zero dimensions.")
-
-    def __len__(self) -> int:
-        return len(self.index)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        ep_idx, t = self.index[idx]
-        ep = self.episodes[ep_idx]
-        obs_t = flatten_array(ep.observations[t])
-        obs_tp1 = flatten_array(ep.observations[t + 1])
-        action = flatten_array(ep.actions[t])
-        return {
-            "vector_t": torch.from_numpy(obs_t),
-            "vector_tp1": torch.from_numpy(obs_tp1),
-            "vector_target": torch.from_numpy(obs_tp1),
-            "action": torch.from_numpy(action),
-        }
-
-
-def collate_transition(items: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-    if not items:
-        raise ValueError("collate_transition received an empty batch")
-    return {key: torch.stack([item[key] for item in items], dim=0) for key in items[0]}
 
 
 def write_status(path: Optional[str], payload: Dict[str, Any]) -> None:
@@ -196,7 +116,7 @@ def main() -> None:
     print(f"Loaded {args.dataset_id}", flush=True)
     print(f"Transitions: {len(dataset)} vector_dim={dataset.vector_dim} action_dim={dataset.action_dim}", flush=True)
 
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_transition, drop_last=True)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_transition_batch, drop_last=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg, model = build_mmwm(dataset.vector_dim, dataset.action_dim, args.latent_dim, args.hidden_dim, args.transition)
     # Build the loss before the optimizer: with learned_uncertainty=True it
@@ -282,4 +202,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

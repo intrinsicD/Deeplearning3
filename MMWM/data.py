@@ -1,16 +1,258 @@
-"""Minimal deterministic datasets for MMWM smoke training.
+"""Datasets and transition adapters for MMWM training.
 
-These utilities intentionally avoid external environment dependencies. They produce
-trainer-compatible batch dictionaries for quick integration tests and loss-decrease
-checks before connecting real RL/video/text datasets.
+The trainer consumes flat batch dictionaries such as ``vector_t``, ``action``,
+``vector_tp1`` and optional decoder targets.  The adapters in this module keep
+that contract in one place so scripts do not each invent slightly different
+offline-RL batch formats.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from collections.abc import Mapping, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+
+def flatten_transition_value(value: Any) -> torch.Tensor:
+    """Flatten vector/dict observations or actions into a float32 vector.
+
+    D4RL/Minari observations may be arrays, scalars, tensors, or dictionaries of
+    arrays.  Dict keys are sorted to make the layout stable across processes.
+    """
+    if isinstance(value, Mapping):
+        parts = [flatten_transition_value(value[key]) for key in sorted(value.keys())]
+        if not parts:
+            return torch.zeros(0, dtype=torch.float32)
+        return torch.cat(parts, dim=0).float()
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+    else:
+        tensor = torch.as_tensor(np.asarray(value))
+    if tensor.dtype == torch.bool or not torch.is_floating_point(tensor):
+        tensor = tensor.to(dtype=torch.float32)
+    else:
+        tensor = tensor.float()
+    return tensor.reshape(-1)
+
+
+def _length(value: Sequence[Any] | np.ndarray | torch.Tensor) -> int:
+    return int(len(value))
+
+
+def _item(value: Sequence[Any] | np.ndarray | torch.Tensor, idx: int) -> Any:
+    return value[idx]
+
+
+def _optional_bool_at(value: Any, idx: int) -> bool:
+    if value is None:
+        return False
+    item = _item(value, idx)
+    if isinstance(item, torch.Tensor):
+        return bool(item.detach().cpu().item())
+    arr = np.asarray(item)
+    return bool(arr.item() if arr.shape == () else arr.reshape(-1)[0])
+
+
+class TransitionTupleDataset(Dataset):
+    """Wrap ``(obs_t, action, obs_tp1)`` tuples in the MMWM trainer contract.
+
+    This is the vector-first path used by D4RL/Minari-style offline RL datasets.
+    Non-vector observations should get domain-specific adapters that emit
+    ``image_*``, ``text_*`` or ``audio_*`` keys.
+    """
+
+    def __init__(
+        self,
+        observations: Sequence[Any] | np.ndarray | torch.Tensor,
+        actions: Sequence[Any] | np.ndarray | torch.Tensor,
+        next_observations: Sequence[Any] | np.ndarray | torch.Tensor | None = None,
+        *,
+        terminals: Sequence[Any] | np.ndarray | torch.Tensor | None = None,
+        timeouts: Sequence[Any] | np.ndarray | torch.Tensor | None = None,
+        max_transitions: int | None = None,
+    ) -> None:
+        super().__init__()
+        obs_len = _length(observations)
+        action_len = _length(actions)
+        if next_observations is None:
+            n = min(action_len, max(obs_len - 1, 0))
+        else:
+            n = min(obs_len, action_len, _length(next_observations))
+        if max_transitions is not None:
+            n = min(n, int(max_transitions))
+        if n <= 0:
+            raise RuntimeError("No transition tuples are available.")
+
+        self.observations = observations
+        self.actions = actions
+        self.next_observations = next_observations
+        self.terminals = terminals
+        self.timeouts = timeouts
+        self.index = list(range(n))
+
+        first = self[0]
+        self.vector_dim = int(first["vector_t"].numel())
+        self.action_dim = int(first["action"].numel())
+        if self.vector_dim <= 0:
+            raise RuntimeError("Flattened observation has zero dimensions.")
+        if self.action_dim <= 0:
+            raise RuntimeError("Flattened action has zero dimensions.")
+
+    @staticmethod
+    def from_mapping(
+        mapping: Mapping[str, Any],
+        *,
+        max_transitions: int | None = None,
+    ) -> "TransitionTupleDataset":
+        """Build from a D4RL-style dataset mapping."""
+        if "observations" not in mapping or "actions" not in mapping:
+            raise KeyError("Transition mapping must contain 'observations' and 'actions'.")
+        done = mapping.get("terminals")
+        if done is None:
+            done = mapping.get("dones")
+        return TransitionTupleDataset(
+            mapping["observations"],
+            mapping["actions"],
+            mapping.get("next_observations"),
+            terminals=done,
+            timeouts=mapping.get("timeouts"),
+            max_transitions=max_transitions,
+        )
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        t = self.index[idx]
+        obs_t = flatten_transition_value(_item(self.observations, t))
+        if self.next_observations is None:
+            obs_tp1 = flatten_transition_value(_item(self.observations, t + 1))
+        else:
+            obs_tp1 = flatten_transition_value(_item(self.next_observations, t))
+        action = flatten_transition_value(_item(self.actions, t))
+
+        item: Dict[str, torch.Tensor] = {
+            "vector_t": obs_t,
+            "vector_tp1": obs_tp1,
+            "vector_target": obs_tp1.clone(),
+            "action": action,
+        }
+        done = _optional_bool_at(self.terminals, t) or _optional_bool_at(self.timeouts, t)
+        if self.terminals is not None or self.timeouts is not None:
+            item["done"] = torch.tensor(done, dtype=torch.bool)
+        return item
+
+
+class D4RLTransitionDataset(TransitionTupleDataset):
+    """Load a D4RL Gym dataset as vector transition tuples.
+
+    The dependency is optional; importing :mod:`MMWM.data` does not require D4RL.
+    """
+
+    def __init__(self, dataset_id: str, max_transitions: int | None = None) -> None:
+        try:
+            import gym  # type: ignore
+            import d4rl  # noqa: F401  # type: ignore
+        except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "D4RLTransitionDataset requires gym and d4rl. Install them before "
+                "loading D4RL datasets."
+            ) from exc
+
+        env = gym.make(dataset_id)
+        mapping = env.get_dataset()
+        self.dataset_id = dataset_id
+        done = mapping.get("terminals")
+        if done is None:
+            done = mapping.get("dones")
+        super().__init__(
+            mapping["observations"],
+            mapping["actions"],
+            mapping.get("next_observations"),
+            terminals=done,
+            timeouts=mapping.get("timeouts"),
+            max_transitions=max_transitions,
+        )
+
+
+def iter_minari_episodes(dataset: Any) -> Iterable[Any]:
+    """Support common Minari dataset iteration APIs across versions."""
+    if hasattr(dataset, "iterate_episodes"):
+        yield from dataset.iterate_episodes()
+        return
+    if hasattr(dataset, "iter_episodes"):
+        yield from dataset.iter_episodes()
+        return
+    for idx in range(len(dataset)):
+        yield dataset[idx]
+
+
+class MinariTransitionDataset(Dataset):
+    """Index Minari episodes as single-step MMWM transition tuples."""
+
+    def __init__(self, dataset_id: str, max_transitions: Optional[int] = None) -> None:
+        super().__init__()
+        try:
+            import minari  # type: ignore
+        except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+            raise RuntimeError(
+                "MinariTransitionDataset requires minari. Install it with "
+                "`pip install minari` before loading Minari datasets."
+            ) from exc
+
+        self.dataset_id = dataset_id
+        self.dataset = minari.load_dataset(dataset_id)
+        self.episodes = list(iter_minari_episodes(self.dataset))
+        self.index: List[Tuple[int, int]] = []
+
+        for ep_idx, episode in enumerate(self.episodes):
+            n_actions = len(episode.actions)
+            n_obs = len(episode.observations)
+            n = min(n_actions, n_obs - 1)
+            for t in range(n):
+                self.index.append((ep_idx, t))
+                if max_transitions is not None and len(self.index) >= max_transitions:
+                    break
+            if max_transitions is not None and len(self.index) >= max_transitions:
+                break
+
+        if not self.index:
+            raise RuntimeError(f"No transitions found in Minari dataset {dataset_id!r}")
+
+        first = self[0]
+        self.vector_dim = int(first["vector_t"].numel())
+        self.action_dim = int(first["action"].numel())
+        if self.vector_dim <= 0:
+            raise RuntimeError("Flattened observation has zero dimensions.")
+        if self.action_dim <= 0:
+            raise RuntimeError("Flattened action has zero dimensions.")
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        ep_idx, t = self.index[idx]
+        ep = self.episodes[ep_idx]
+        obs_t = flatten_transition_value(ep.observations[t])
+        obs_tp1 = flatten_transition_value(ep.observations[t + 1])
+        action = flatten_transition_value(ep.actions[t])
+        item = {
+            "vector_t": obs_t,
+            "vector_tp1": obs_tp1,
+            "vector_target": obs_tp1.clone(),
+            "action": action,
+        }
+        terminations = getattr(ep, "terminations", None)
+        truncations = getattr(ep, "truncations", None)
+        if terminations is not None or truncations is not None:
+            item["done"] = torch.tensor(
+                _optional_bool_at(terminations, t) or _optional_bool_at(truncations, t),
+                dtype=torch.bool,
+            )
+        return item
 
 
 class DeterministicTransitionDataset(Dataset):
@@ -137,4 +379,3 @@ def collate_transition_batch(items: List[Dict[str, torch.Tensor]]) -> Dict[str, 
         raise ValueError("collate_transition_batch received an empty item list")
     keys = items[0].keys()
     return {key: torch.stack([item[key] for item in items], dim=0) for key in keys}
-
