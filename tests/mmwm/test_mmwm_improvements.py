@@ -15,10 +15,12 @@ from MMWM.curriculum import (
 )
 from MMWM.data import (
     DeterministicTransitionDataset,
+    GridWorldTransitionDataset,
     TransitionTupleDataset,
     collate_transition_batch,
     flatten_transition_value,
 )
+from MMWM.demo import run_gridworld_smoke
 from MMWM.evaluation import (
     EvaluationSuite,
     LatentPredictionMetrics,
@@ -986,3 +988,30 @@ def test_flatten_transition_value_uses_stable_dict_key_order() -> None:
     flat = flatten_transition_value(value)
     assert flat.dtype == torch.float32
     assert torch.allclose(flat, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+
+
+def test_gridworld_transition_dataset_emits_structured_modalities() -> None:
+    dataset = GridWorldTransitionDataset(length=4, grid_size=5, episode_len=3)
+    item = dataset[0]
+
+    assert item["vector_t"].shape == (2,)
+    assert item["action"].shape == (4,)
+    assert item["text_t"].shape == (dataset.text_len,)
+    assert item["image_t"].shape == (3, dataset.grid_size, dataset.grid_size)
+    assert item["vector_target"].shape == item["vector_tp1"].shape
+
+    obs_sequence, action_sequence = dataset.rollout_sequence(horizon=2, modalities=("vector", "text", "image"))
+    assert len(obs_sequence) == 3
+    assert len(action_sequence) == 2
+    assert obs_sequence[0].modalities["vector"].shape == (1, 2)
+    assert obs_sequence[0].modalities["image"].shape == (1, 3, 5, 5)
+
+
+def test_gridworld_smoke_train_checkpoint_load_and_rollout() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        metrics = run_gridworld_smoke(steps=40, batch_size=8, run_dir=tmpdir, device=torch.device("cpu"))
+
+    assert metrics["vector_mse_after"] < metrics["vector_mse_before"]
+    assert metrics["loaded_global_step"] == 40.0
+    assert metrics["rollout_horizon"] == 4.0
+    assert metrics["rollout_mean_mse"] >= 0.0

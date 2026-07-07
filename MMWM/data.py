@@ -15,6 +15,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .containers import ObservationPacket
+
 
 def flatten_transition_value(value: Any) -> torch.Tensor:
     """Flatten vector/dict observations or actions into a float32 vector.
@@ -253,6 +255,162 @@ class MinariTransitionDataset(Dataset):
                 dtype=torch.bool,
             )
         return item
+
+
+class GridWorldTransitionDataset(Dataset):
+    """Deterministic gridworld transitions for end-to-end smoke tests.
+
+    The observation is available as:
+      - ``vector``: normalized ``(x, y)`` agent position,
+      - ``image``: a 3-channel rendered grid with agent and goal markers,
+      - ``text``: fixed-length token description of agent/goal position.
+
+    Actions are one-hot vectors for right, down, left, up.
+    """
+
+    ACTION_DELTAS = ((1, 0), (0, 1), (-1, 0), (0, -1))
+
+    def __init__(
+        self,
+        length: int = 128,
+        grid_size: int = 5,
+        episode_len: int = 8,
+        include_text: bool = True,
+        include_image: bool = True,
+    ) -> None:
+        super().__init__()
+        if grid_size < 2:
+            raise ValueError("grid_size must be >= 2")
+        if episode_len < 1:
+            raise ValueError("episode_len must be >= 1")
+        self.length = int(length)
+        self.grid_size = int(grid_size)
+        self.episode_len = int(episode_len)
+        self.include_text = include_text
+        self.include_image = include_image
+        self.vector_dim = 2
+        self.action_dim = 4
+        self.text_len = 6
+        self.vocab_size = max(16, self.grid_size + 8)
+        self.goal = (self.grid_size - 1, self.grid_size - 1)
+
+    def __len__(self) -> int:
+        return self.length
+
+    def _episode_step(self, idx: int) -> tuple[int, int]:
+        return int(idx) // self.episode_len, int(idx) % self.episode_len
+
+    def _initial_state(self, episode: int) -> tuple[int, int]:
+        x = episode % self.grid_size
+        y = (episode * 2) % self.grid_size
+        return x, y
+
+    def _action_id(self, episode: int, step: int) -> int:
+        return (episode + step) % len(self.ACTION_DELTAS)
+
+    def _transition(self, state: tuple[int, int], action_id: int) -> tuple[int, int]:
+        dx, dy = self.ACTION_DELTAS[action_id]
+        x = min(max(state[0] + dx, 0), self.grid_size - 1)
+        y = min(max(state[1] + dy, 0), self.grid_size - 1)
+        return x, y
+
+    def _state_at(self, episode: int, step: int) -> tuple[int, int]:
+        state = self._initial_state(episode)
+        for s in range(step):
+            state = self._transition(state, self._action_id(episode, s))
+        return state
+
+    def _vector(self, state: tuple[int, int]) -> torch.Tensor:
+        scale = float(self.grid_size - 1)
+        return torch.tensor([state[0] / scale, state[1] / scale], dtype=torch.float32)
+
+    def _action(self, action_id: int) -> torch.Tensor:
+        action = torch.zeros(self.action_dim, dtype=torch.float32)
+        action[action_id] = 1.0
+        return action
+
+    def _tokens(self, state: tuple[int, int]) -> torch.Tensor:
+        gx, gy = self.goal
+        return torch.tensor(
+            [1, state[0] + 2, state[1] + 2, gx + 2, gy + 2, 0],
+            dtype=torch.long,
+        )
+
+    def _image(self, state: tuple[int, int]) -> torch.Tensor:
+        image = torch.zeros(3, self.grid_size, self.grid_size, dtype=torch.float32)
+        x, y = state
+        gx, gy = self.goal
+        image[0, y, x] = 1.0
+        image[1, gy, gx] = 1.0
+        image[2, :, :] = 0.05
+        return image
+
+    def _observation_modalities(
+        self,
+        state: tuple[int, int],
+        modalities: tuple[str, ...] = ("vector", "text", "image"),
+    ) -> Dict[str, torch.Tensor]:
+        out: Dict[str, torch.Tensor] = {}
+        if "vector" in modalities:
+            out["vector"] = self._vector(state).unsqueeze(0)
+        if "text" in modalities:
+            out["text"] = self._tokens(state).unsqueeze(0)
+        if "image" in modalities:
+            out["image"] = self._image(state).unsqueeze(0)
+        return out
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        episode, step = self._episode_step(idx)
+        state = self._state_at(episode, step)
+        action_id = self._action_id(episode, step)
+        next_state = self._transition(state, action_id)
+
+        item: Dict[str, torch.Tensor] = {
+            "vector_t": self._vector(state),
+            "vector_tp1": self._vector(next_state),
+            "vector_target": self._vector(next_state),
+            "action": self._action(action_id),
+            "done": torch.tensor(step + 1 >= self.episode_len, dtype=torch.bool),
+        }
+
+        if self.include_text:
+            text_t = self._tokens(state)
+            text_tp1 = self._tokens(next_state)
+            item.update({
+                "text_t": text_t,
+                "text_tp1": text_tp1,
+                "text_target": text_tp1,
+                "prefix_tokens": torch.cat([torch.zeros(1, dtype=torch.long), text_tp1[:-1]], dim=0),
+            })
+
+        if self.include_image:
+            image_t = self._image(state)
+            image_tp1 = self._image(next_state)
+            item.update({
+                "image_t": image_t,
+                "image_tp1": image_tp1,
+                "image_target": image_tp1,
+            })
+
+        return item
+
+    def rollout_sequence(
+        self,
+        start_index: int = 0,
+        horizon: int = 4,
+        modalities: tuple[str, ...] = ("vector",),
+    ) -> tuple[List[ObservationPacket], List[torch.Tensor]]:
+        episode, step = self._episode_step(start_index)
+        horizon = min(int(horizon), self.episode_len - step)
+        state = self._state_at(episode, step)
+        obs_sequence = [ObservationPacket(modalities=self._observation_modalities(state, modalities))]
+        action_sequence: List[torch.Tensor] = []
+        for offset in range(horizon):
+            action_id = self._action_id(episode, step + offset)
+            action_sequence.append(self._action(action_id).unsqueeze(0))
+            state = self._transition(state, action_id)
+            obs_sequence.append(ObservationPacket(modalities=self._observation_modalities(state, modalities)))
+        return obs_sequence, action_sequence
 
 
 class DeterministicTransitionDataset(Dataset):
