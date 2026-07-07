@@ -26,6 +26,7 @@ from .curriculum import (
 )
 from .data import (
     D4RLTransitionDataset,
+    DMControlTransitionDataset,
     DeterministicTransitionDataset,
     EpisodeDataset,
     GridWorldTransitionDataset,
@@ -56,6 +57,7 @@ __all__ = [
     "ToolResult",
     "CurriculumPhase",
     "D4RLTransitionDataset",
+    "DMControlTransitionDataset",
     "DeterministicTransitionDataset",
     "EpisodeDataset",
     "GridWorldTransitionDataset",

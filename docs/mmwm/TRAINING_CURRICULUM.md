@@ -20,7 +20,7 @@ A staged plan for training the Multimodal Latent World Model on real datasets to
 
 > **April 29, 2026 status correction:** Several items in the original blocker table below have since been implemented: checkpoint save/load, memory propagation through `train_step`, LR scheduling, LayerNorm-based projector normalization, sequence-level BPTT, gradient checkpointing for recurrent transitions, and contrastive alignment loss. A minimal deterministic trainer-compatible dataset now exists in `MMWM/data.py`, and audio is supported as an input modality.
 >
-> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The structured smoke path now uses `GridWorldTransitionDataset` plus `run_gridworld_smoke()` to cover DataLoader -> train -> checkpoint save/load -> rollout metrics with a decreasing vector reconstruction metric. `EpisodeDataset` now windows vector episodes into `train_sequence_step` batches for BPTT. Pretrained text/image wrappers are registered via `pretrained_multimodal` with injectable or optional Hugging Face backbones. The still-active blockers are visual/text real dataset adapters (DM Control/TextWorld), text-action encoding, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
+> **July 7, 2026 update:** the vector/offline-RL adapter path is now reusable: `TransitionTupleDataset` handles D4RL-style mappings, `D4RLTransitionDataset` is an optional loader, and the Minari script uses the same shared batch contract. The structured smoke path now uses `GridWorldTransitionDataset` plus `run_gridworld_smoke()` to cover DataLoader -> train -> checkpoint save/load -> rollout metrics with a decreasing vector reconstruction metric. `EpisodeDataset` now windows vector episodes into `train_sequence_step` batches for BPTT. Pretrained text/image wrappers are registered via `pretrained_multimodal` with injectable or optional Hugging Face backbones. `DMControlTransitionDataset` now collects random-policy vector/image transitions from DM Control-style environments. The still-active blockers are TextWorld/text-action adapters, empirical validation on learnable environments, `LatentRouter` training, and full RL infrastructure.
 
 | # | Gap | Location | Severity |
 |---|-----|----------|----------|
@@ -354,7 +354,7 @@ From the critical review, prioritized by impact and dependency:
 | 8 | Gradient checkpointing | ~20 lines | Stage 2B | Done |
 | 9 | Pre-trained backbone wrappers | ~200 lines | Real data quality | Done |
 | 10 | Contrastive alignment loss | ~50 lines | Stage 3 | Done |
-| 11 | DM Control adapter | ~100 lines | Stage 1B | Open |
+| 11 | DM Control adapter | ~100 lines | Stage 1B | Done |
 | 12 | TextWorld adapter | ~100 lines | Stage 1C | Open |
 | Defer | RL infrastructure | ~1000+ lines | Stage 4 | Deferred |
 | Defer | Distributed training | ~500+ lines | Scaling | Deferred |

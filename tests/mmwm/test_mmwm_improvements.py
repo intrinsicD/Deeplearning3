@@ -15,6 +15,7 @@ from MMWM.curriculum import (
     relative_curriculum_phases,
 )
 from MMWM.data import (
+    DMControlTransitionDataset,
     DeterministicTransitionDataset,
     EpisodeDataset,
     GridWorldTransitionDataset,
@@ -1130,3 +1131,80 @@ def test_pretrained_multimodal_encoder_builds_in_model() -> None:
 
     assert out.predicted_next_latent.z_sem.shape == (2, 16)
     assert isinstance(model.encoder, PretrainedMultimodalEncoder)
+
+
+class _FakeActionSpec:
+    shape = (2,)
+    minimum = np.array([-1.0, -1.0], dtype=np.float32)
+    maximum = np.array([1.0, 1.0], dtype=np.float32)
+
+
+class _FakeTimeStep:
+    def __init__(self, observation: dict[str, np.ndarray], done: bool = False) -> None:
+        self.observation = observation
+        self._done = done
+
+    def last(self) -> bool:
+        return self._done
+
+
+class _FakePhysics:
+    def __init__(self, env: "_FakeDMControlEnv") -> None:
+        self.env = env
+
+    def render(self, height: int, width: int, camera_id: int = 0) -> np.ndarray:
+        frame = np.zeros((height, width, 3), dtype=np.uint8)
+        x = int(abs(self.env.state[0]) * (width - 1)) % width
+        y = int(abs(self.env.state[1]) * (height - 1)) % height
+        frame[y, x, 0] = 255
+        frame[-1, -1, 1] = 255
+        return frame
+
+
+class _FakeDMControlEnv:
+    def __init__(self) -> None:
+        self.state = np.array([0.0, 0.0], dtype=np.float32)
+        self.steps = 0
+        self.physics = _FakePhysics(self)
+
+    def action_spec(self) -> _FakeActionSpec:
+        return _FakeActionSpec()
+
+    def reset(self) -> _FakeTimeStep:
+        self.state = np.array([0.25, 0.25], dtype=np.float32)
+        self.steps = 0
+        return _FakeTimeStep({"position": self.state.copy(), "velocity": np.zeros(2, dtype=np.float32)})
+
+    def step(self, action: np.ndarray) -> _FakeTimeStep:
+        self.steps += 1
+        self.state = np.clip(self.state + 0.1 * action.astype(np.float32), 0.0, 1.0)
+        return _FakeTimeStep(
+            {"position": self.state.copy(), "velocity": action.astype(np.float32)},
+            done=self.steps >= 3,
+        )
+
+
+def test_dm_control_transition_dataset_collects_random_policy_batch() -> None:
+    dataset = DMControlTransitionDataset(env=_FakeDMControlEnv(), length=5, image_size=8, seed=123)
+
+    assert len(dataset) == 5
+    assert dataset.vector_dim == 4
+    assert dataset.action_dim == 2
+    assert dataset.has_images is True
+
+    batch = collate_transition_batch([dataset[0], dataset[1]])
+    assert batch["vector_t"].shape == (2, 4)
+    assert batch["action"].shape == (2, 2)
+    assert batch["image_t"].shape == (2, 3, 8, 8)
+    assert batch["done"].dtype == torch.bool
+
+    cfg = _small_model_cfg()
+    cfg.encoder_kwargs["vector_input_dim"] = 4
+    cfg.action_encoder_kwargs["action_dim"] = 2
+    model = build_model(cfg)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    trainer = Trainer(model, optimizer, WorldModelLoss(), torch.device("cpu"), mixed_precision=False)
+    train_batch = {k: v for k, v in batch.items() if k in {"vector_t", "vector_tp1", "vector_target", "action", "done"}}
+    metrics, memory = trainer.train_step(train_batch)
+    assert "total_loss" in metrics
+    assert memory is not None

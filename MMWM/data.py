@@ -497,6 +497,138 @@ class EpisodeDataset(Dataset):
         return item
 
 
+def _dm_observation_vector(observation: Any) -> torch.Tensor:
+    if isinstance(observation, Mapping):
+        return flatten_transition_value(observation)
+    return flatten_transition_value(observation)
+
+
+def _dm_timestep_done(time_step: Any) -> bool:
+    last = getattr(time_step, "last", None)
+    if callable(last):
+        return bool(last())
+    if isinstance(last, bool):
+        return last
+    step_type = getattr(time_step, "step_type", None)
+    if step_type is not None and hasattr(step_type, "last"):
+        return bool(step_type.last())
+    return False
+
+
+def _dm_render_image(env: Any, image_size: int, camera_id: int) -> torch.Tensor | None:
+    physics = getattr(env, "physics", None)
+    render = getattr(physics, "render", None)
+    if render is None:
+        return None
+    frame = render(height=image_size, width=image_size, camera_id=camera_id)
+    tensor = torch.as_tensor(np.asarray(frame))
+    if tensor.ndim != 3:
+        raise ValueError(f"DM Control render returned shape {tuple(tensor.shape)}, expected HWC image.")
+    if tensor.shape[-1] not in (1, 3, 4):
+        raise ValueError(f"DM Control render returned {tensor.shape[-1]} channels, expected 1, 3, or 4.")
+    tensor = tensor[..., :3].permute(2, 0, 1).float() / 255.0
+    return tensor
+
+
+class DMControlTransitionDataset(Dataset):
+    """Collect DM Control random-policy transitions for MMWM.
+
+    The real adapter loads ``dm_control.suite`` lazily. Tests can inject a fake
+    environment with the same small API: ``reset()``, ``step(action)``,
+    ``action_spec()``, and optionally ``physics.render(...)``.
+    """
+
+    def __init__(
+        self,
+        domain_name: str | None = None,
+        task_name: str | None = None,
+        *,
+        env: Any | None = None,
+        length: int = 1024,
+        image_size: int = 64,
+        camera_id: int = 0,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        if length <= 0:
+            raise ValueError("length must be > 0")
+        if env is None:
+            if domain_name is None or task_name is None:
+                raise ValueError("domain_name and task_name are required when env is not injected.")
+            try:
+                from dm_control import suite  # type: ignore
+            except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+                raise RuntimeError("DMControlTransitionDataset requires dm_control.") from exc
+            env = suite.load(domain_name=domain_name, task_name=task_name, task_kwargs={"random": seed})
+
+        self.domain_name = domain_name
+        self.task_name = task_name
+        self.length = int(length)
+        self.image_size = int(image_size)
+        self.camera_id = int(camera_id)
+        self.transitions: List[Dict[str, torch.Tensor]] = []
+        self._collect(env, seed)
+
+        first = self.transitions[0]
+        self.vector_dim = int(first["vector_t"].numel())
+        self.action_dim = int(first["action"].numel())
+        self.has_images = "image_t" in first
+
+    def _sample_action(self, env: Any, rng: np.random.Generator) -> np.ndarray:
+        spec = env.action_spec()
+        shape = tuple(spec.shape)
+        minimum = np.asarray(spec.minimum, dtype=np.float32)
+        maximum = np.asarray(spec.maximum, dtype=np.float32)
+        if minimum.shape == ():
+            minimum = np.full(shape, float(minimum), dtype=np.float32)
+        if maximum.shape == ():
+            maximum = np.full(shape, float(maximum), dtype=np.float32)
+        return rng.uniform(minimum, maximum).astype(np.float32)
+
+    def _collect(self, env: Any, seed: int) -> None:
+        rng = np.random.default_rng(seed)
+        time_step = env.reset()
+        obs_t = _dm_observation_vector(time_step.observation)
+        image_t = _dm_render_image(env, self.image_size, self.camera_id)
+
+        while len(self.transitions) < self.length:
+            action_np = self._sample_action(env, rng)
+            action = torch.from_numpy(action_np.reshape(-1).astype(np.float32))
+            next_time_step = env.step(action_np)
+            obs_tp1 = _dm_observation_vector(next_time_step.observation)
+            image_tp1 = _dm_render_image(env, self.image_size, self.camera_id)
+            done = _dm_timestep_done(next_time_step)
+
+            item: Dict[str, torch.Tensor] = {
+                "vector_t": obs_t.float(),
+                "vector_tp1": obs_tp1.float(),
+                "vector_target": obs_tp1.float().clone(),
+                "action": action.float(),
+                "done": torch.tensor(done, dtype=torch.bool),
+            }
+            if image_t is not None and image_tp1 is not None:
+                item.update({
+                    "image_t": image_t,
+                    "image_tp1": image_tp1,
+                    "image_target": image_tp1.clone(),
+                })
+            self.transitions.append(item)
+
+            if done:
+                time_step = env.reset()
+                obs_t = _dm_observation_vector(time_step.observation)
+                image_t = _dm_render_image(env, self.image_size, self.camera_id)
+            else:
+                obs_t = obs_tp1
+                image_t = image_tp1
+
+    def __len__(self) -> int:
+        return len(self.transitions)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        return self.transitions[idx]
+
+
 class DeterministicTransitionDataset(Dataset):
     """Synthetic but learnable transition tuples.
 
