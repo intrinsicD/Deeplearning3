@@ -1,0 +1,160 @@
+{
+  "protocol": {
+    "images": [
+      "external/structsplat/tests/test_images/COCO_train2014_000000000009.jpg",
+      "external/structsplat/tests/test_images/COCO_train2014_000000000025.jpg",
+      "external/structsplat/tests/test_images/COCO_train2014_000000000030.jpg",
+      "external/structsplat/tests/test_images/COCO_train2014_000000000034.jpg"
+    ],
+    "max_side": 160,
+    "num_gaussians": 640,
+    "iters": 500,
+    "structsplat_iters": 500,
+    "gaussianimage_iters": 5000,
+    "device": "cuda",
+    "gaussianimage_lr": 0.001,
+    "structsplat_render_chunk": 4096
+  },
+  "rows": [
+    {
+      "image": "external/structsplat/tests/test_images/COCO_train2014_000000000009.jpg",
+      "resized_size": [
+        160,
+        120
+      ],
+      "target_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000009_target.png",
+      "structsplat_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000009_structsplat_640g_500i.png",
+      "gaussianimage_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000009_gaussianimage_rs_640g_5000i.png",
+      "structsplat": {
+        "l1": 0.0282221008092165,
+        "mse": 0.0024830789770931005,
+        "psnr": 26.05009467005943,
+        "ms_ssim": NaN,
+        "fit_seconds": 6.286908864974976,
+        "gaussians": 640.0,
+        "psnr_internal": 26.031797409057617,
+        "ssim_internal": 0.8803317546844482,
+        "max_cuda_gb": 0.110546944
+      },
+      "gaussianimage": {
+        "l1": 0.031096164137125015,
+        "mse": 0.0022482292260974646,
+        "psnr": 26.481594108280667,
+        "ms_ssim": NaN,
+        "fit_seconds": 3.751624822616577,
+        "gaussians": 640.0,
+        "train_last_psnr": 26.48116955262836,
+        "max_cuda_gb": 0.010588672
+      }
+    },
+    {
+      "image": "external/structsplat/tests/test_images/COCO_train2014_000000000025.jpg",
+      "resized_size": [
+        160,
+        106
+      ],
+      "target_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000025_target.png",
+      "structsplat_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000025_structsplat_640g_500i.png",
+      "gaussianimage_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000025_gaussianimage_rs_640g_5000i.png",
+      "structsplat": {
+        "l1": 0.03852428123354912,
+        "mse": 0.00315631995908916,
+        "psnr": 25.008189783955874,
+        "ms_ssim": NaN,
+        "fit_seconds": 5.007039785385132,
+        "gaussians": 640.0,
+        "psnr_internal": 25.00179100036621,
+        "ssim_internal": 0.825752854347229,
+        "max_cuda_gb": 0.083017216
+      },
+      "gaussianimage": {
+        "l1": 0.03785945475101471,
+        "mse": 0.0027325432747602463,
+        "psnr": 25.63432951485941,
+        "ms_ssim": NaN,
+        "fit_seconds": 3.413482189178467,
+        "gaussians": 640.0,
+        "train_last_psnr": 25.633949492767844,
+        "max_cuda_gb": 0.01036544
+      }
+    },
+    {
+      "image": "external/structsplat/tests/test_images/COCO_train2014_000000000030.jpg",
+      "resized_size": [
+        160,
+        107
+      ],
+      "target_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000030_target.png",
+      "structsplat_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000030_structsplat_640g_500i.png",
+      "gaussianimage_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000030_gaussianimage_rs_640g_5000i.png",
+      "structsplat": {
+        "l1": 0.01256962213665247,
+        "mse": 0.0005555406678467989,
+        "psnr": 32.55284143428818,
+        "ms_ssim": NaN,
+        "fit_seconds": 4.989454984664917,
+        "gaussians": 640.0,
+        "psnr_internal": 32.5415153503418,
+        "ssim_internal": 0.9589451551437378,
+        "max_cuda_gb": 0.09159424
+      },
+      "gaussianimage": {
+        "l1": 0.014928160235285759,
+        "mse": 0.0006608826806768775,
+        "psnr": 31.798756292538243,
+        "ms_ssim": NaN,
+        "fit_seconds": 3.3222246170043945,
+        "gaussians": 640.0,
+        "train_last_psnr": 31.798683616699076,
+        "max_cuda_gb": 0.010382336
+      }
+    },
+    {
+      "image": "external/structsplat/tests/test_images/COCO_train2014_000000000034.jpg",
+      "resized_size": [
+        160,
+        106
+      ],
+      "target_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000034_target.png",
+      "structsplat_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000034_structsplat_640g_500i.png",
+      "gaussianimage_path": "runs/native_gaussian_methods_20260707/structsplat_vs_gaussianimage_rs_160_640g_ss500_gi5000/COCO_train2014_000000000034_gaussianimage_rs_640g_5000i.png",
+      "structsplat": {
+        "l1": 0.04635829105973244,
+        "mse": 0.004378100857138634,
+        "psnr": 23.587142379270087,
+        "ms_ssim": NaN,
+        "fit_seconds": 4.798207521438599,
+        "gaussians": 640.0,
+        "psnr_internal": 23.564538955688477,
+        "ssim_internal": 0.7662829160690308,
+        "max_cuda_gb": 0.086262784
+      },
+      "gaussianimage": {
+        "l1": 0.043505486100912094,
+        "mse": 0.00337823829613626,
+        "psnr": 24.71309719167939,
+        "ms_ssim": NaN,
+        "fit_seconds": 3.4396615028381348,
+        "gaussians": 640.0,
+        "train_last_psnr": 24.713239969151054,
+        "max_cuda_gb": 0.010367488
+      }
+    }
+  ],
+  "structsplat_average": {
+    "l1": 0.03141857380978763,
+    "mse": 0.0026432601152919233,
+    "psnr": 26.799567066893395,
+    "ms_ssim": NaN,
+    "fit_seconds": 5.270402789115906,
+    "max_cuda_gb": 0.09285529599999999
+  },
+  "gaussianimage_average": {
+    "l1": 0.031847316306084394,
+    "mse": 0.002254973369417712,
+    "psnr": 27.156944276839425,
+    "ms_ssim": NaN,
+    "fit_seconds": 3.4817482829093933,
+    "max_cuda_gb": 0.010425984000000001
+  }
+}

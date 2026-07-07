@@ -1,0 +1,117 @@
+{
+  "checkpoint": "external/AIR/checkpoints/checkpoints/ps_7.pt",
+  "rows": [
+    {
+      "image": "runs/native_gaussian_methods_20260707/air_inputs_160/COCO_train2014_000000000009.png",
+      "target_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000009_target.png",
+      "air_raw_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000009_air_raw.png",
+      "air_quant_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000009_air_quant.png",
+      "air_raw": {
+        "l1": 0.06503305584192276,
+        "mse": 0.00992866326123476,
+        "psnr": 20.03109218508438,
+        "ms_ssim": NaN
+      },
+      "air_quant": {
+        "l1": 0.07783152163028717,
+        "mse": 0.01286020316183567,
+        "psnr": 18.90752170496771,
+        "ms_ssim": NaN
+      },
+      "gaussian_num": 1654.0,
+      "router_usage": 0.998792290687561,
+      "quant_bpp": 5.362500190734863,
+      "inference_time_ms_mean": 29.18842239305377,
+      "inference_time_ms_min": 27.545196004211903,
+      "max_cuda_gb": 1.610648576
+    },
+    {
+      "image": "runs/native_gaussian_methods_20260707/air_inputs_160/COCO_train2014_000000000025.png",
+      "target_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000025_target.png",
+      "air_raw_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000025_air_raw.png",
+      "air_quant_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000025_air_quant.png",
+      "air_raw": {
+        "l1": 0.05940411612391472,
+        "mse": 0.006930301897227764,
+        "psnr": 21.59247846276458,
+        "ms_ssim": NaN
+      },
+      "air_quant": {
+        "l1": 0.05978328362107277,
+        "mse": 0.007000969257205725,
+        "psnr": 21.548418294263612,
+        "ms_ssim": NaN
+      },
+      "gaussian_num": 1471.0,
+      "router_usage": 0.9993206262588501,
+      "quant_bpp": 5.4674530029296875,
+      "inference_time_ms_mean": 30.127054639160633,
+      "inference_time_ms_min": 28.314996045082808,
+      "max_cuda_gb": 1.60795904
+    },
+    {
+      "image": "runs/native_gaussian_methods_20260707/air_inputs_160/COCO_train2014_000000000030.png",
+      "target_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000030_target.png",
+      "air_raw_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000030_air_raw.png",
+      "air_quant_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000030_air_quant.png",
+      "air_raw": {
+        "l1": 0.029342299327254295,
+        "mse": 0.0025712696369737387,
+        "psnr": 25.898523785459233,
+        "ms_ssim": NaN
+      },
+      "air_quant": {
+        "l1": 0.030243903398513794,
+        "mse": 0.0026409458369016647,
+        "psnr": 25.782405056374312,
+        "ms_ssim": NaN
+      },
+      "gaussian_num": 1427.0,
+      "router_usage": 0.9694293737411499,
+      "quant_bpp": 5.172430038452148,
+      "inference_time_ms_mean": 33.90142526477575,
+      "inference_time_ms_min": 28.817226644605398,
+      "max_cuda_gb": 1.607740416
+    },
+    {
+      "image": "runs/native_gaussian_methods_20260707/air_inputs_160/COCO_train2014_000000000034.png",
+      "target_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000034_target.png",
+      "air_raw_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000034_air_raw.png",
+      "air_quant_path": "runs/native_gaussian_methods_20260707/air_ps7_160/COCO_train2014_000000000034_air_quant.png",
+      "air_raw": {
+        "l1": 0.09006740152835846,
+        "mse": 0.018221277743577957,
+        "psnr": 17.39421171955319,
+        "ms_ssim": NaN
+      },
+      "air_quant": {
+        "l1": 0.09369590878486633,
+        "mse": 0.01866672746837139,
+        "psnr": 17.289318131169345,
+        "ms_ssim": NaN
+      },
+      "gaussian_num": 1472.0,
+      "router_usage": 1.0,
+      "quant_bpp": 5.453773498535156,
+      "inference_time_ms_mean": 29.69198441132903,
+      "inference_time_ms_min": 28.555845841765404,
+      "max_cuda_gb": 1.60773376
+    }
+  ],
+  "air_raw_average": {
+    "l1": 0.06096171820536256,
+    "mse": 0.009412878134753555,
+    "psnr": 21.229076538215345,
+    "ms_ssim": NaN
+  },
+  "air_quant_average": {
+    "l1": 0.06538865435868502,
+    "mse": 0.010292211431078613,
+    "psnr": 20.881915796693747,
+    "ms_ssim": NaN
+  },
+  "average_gaussian_num": 1506.0,
+  "average_inference_time_ms_mean": 30.727221677079797,
+  "average_quant_bpp": 5.364039182662964,
+  "average_max_cuda_gb": 1.6085204480000002
+}

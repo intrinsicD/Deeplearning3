@@ -1,0 +1,193 @@
+budget,method,method_label,target_psnr,runs,hits,hit_rate,mean_iter,mean_seconds
+all,gaussianimage_fixed_full,GaussianImage fixed,22.0,8,7,0.875,86,0.23081820351736887
+all,gaussianimage_fixed_full,GaussianImage fixed,24.0,8,6,0.75,114.66666666666667,0.285828431447347
+all,gaussianimage_fixed_full,GaussianImage fixed,26.0,8,3,0.375,191,0.4998795986175537
+all,gaussianimage_fixed_full,GaussianImage fixed,28.0,8,2,0.25,92.5,0.15382027626037598
+all,gaussianimage_fixed_full,GaussianImage fixed,30.0,8,2,0.25,214,0.336910605430603
+all,gaussianimage_fixed_full,GaussianImage fixed,32.0,8,0,0.0,,
+all,gaussianimage_plus_residual,GaussianImage++ residual,22.0,8,8,1.0,153.125,0.2625519037246704
+all,gaussianimage_plus_residual,GaussianImage++ residual,24.0,8,8,1.0,284.625,0.44659483432769775
+all,gaussianimage_plus_residual,GaussianImage++ residual,26.0,8,4,0.5,279.5,0.4431968927383423
+all,gaussianimage_plus_residual,GaussianImage++ residual,28.0,8,2,0.25,194.5,0.29589736461639404
+all,gaussianimage_plus_residual,GaussianImage++ residual,30.0,8,2,0.25,287,0.4437088966369629
+all,gaussianimage_plus_residual,GaussianImage++ residual,32.0,8,2,0.25,411,0.627885103225708
+all,image_gs_residual,Image-GS residual,22.0,8,8,1.0,143.75,0.2275846302509308
+all,image_gs_residual,Image-GS residual,24.0,8,8,1.0,272.375,0.4238474667072296
+all,image_gs_residual,Image-GS residual,26.0,8,4,0.5,241.75,0.37715351581573486
+all,image_gs_residual,Image-GS residual,28.0,8,2,0.25,148,0.22797679901123047
+all,image_gs_residual,Image-GS residual,30.0,8,2,0.25,272,0.41405463218688965
+all,image_gs_residual,Image-GS residual,32.0,8,2,0.25,392,0.6212016344070435
+all,structsplat_onedge_residual,SS on-edge + residual,22.0,8,8,1.0,106.625,0.17942598462104797
+all,structsplat_onedge_residual,SS on-edge + residual,24.0,8,8,1.0,252,0.3892277777194977
+all,structsplat_onedge_residual,SS on-edge + residual,26.0,8,4,0.5,211.25,0.3215498924255371
+all,structsplat_onedge_residual,SS on-edge + residual,28.0,8,2,0.25,120.5,0.18627548217773438
+all,structsplat_onedge_residual,SS on-edge + residual,30.0,8,2,0.25,237,0.37181735038757324
+all,structsplat_onedge_residual,SS on-edge + residual,32.0,8,2,0.25,388.5,0.5938841104507446
+all,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,22.0,8,8,1.0,113,0.19474828243255615
+all,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,24.0,8,8,1.0,263.125,0.43568819761276245
+all,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,26.0,8,4,0.5,220,0.3660566210746765
+all,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,28.0,8,2,0.25,136,0.23173773288726807
+all,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,30.0,8,2,0.25,263.5,0.4308236837387085
+all,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,32.0,8,2,0.25,427,0.6893335580825806
+all,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,22.0,8,8,1.0,105.125,0.18396642804145813
+all,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,24.0,8,8,1.0,247.5,0.393327534198761
+all,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,26.0,8,4,0.5,202.75,0.32868123054504395
+all,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,28.0,8,2,0.25,117.5,0.19390201568603516
+all,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,30.0,8,2,0.25,217.5,0.345786452293396
+all,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,32.0,8,2,0.25,376,0.5911468267440796
+all,structsplat_onedge_tensor,SS on-edge + tensor,22.0,8,8,1.0,98.25,0.17296475172042847
+all,structsplat_onedge_tensor,SS on-edge + tensor,24.0,8,8,1.0,253.875,0.3979199528694153
+all,structsplat_onedge_tensor,SS on-edge + tensor,26.0,8,4,0.5,219.5,0.3374779224395752
+all,structsplat_onedge_tensor,SS on-edge + tensor,28.0,8,2,0.25,112.5,0.1858224868774414
+all,structsplat_onedge_tensor,SS on-edge + tensor,30.0,8,2,0.25,232.5,0.3509066104888916
+all,structsplat_onedge_tensor,SS on-edge + tensor,32.0,8,2,0.25,439.5,0.6679302453994751
+all,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,22.0,8,8,1.0,91.875,0.1565263867378235
+all,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,24.0,8,8,1.0,228.25,0.3642989993095398
+all,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,26.0,8,4,0.5,192.5,0.3107273578643799
+all,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,28.0,8,2,0.25,107.5,0.1851041316986084
+all,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,30.0,8,2,0.25,196,0.29631471633911133
+all,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,32.0,8,2,0.25,319.5,0.4803342819213867
+all,structsplat_flanking_tensor,SS flanking + tensor,22.0,8,8,1.0,99.25,0.1733030080795288
+all,structsplat_flanking_tensor,SS flanking + tensor,24.0,8,8,1.0,254.125,0.3932379186153412
+all,structsplat_flanking_tensor,SS flanking + tensor,26.0,8,4,0.5,211,0.3340027928352356
+all,structsplat_flanking_tensor,SS flanking + tensor,28.0,8,2,0.25,122,0.18919610977172852
+all,structsplat_flanking_tensor,SS flanking + tensor,30.0,8,2,0.25,248.5,0.3905303478240967
+all,structsplat_flanking_tensor,SS flanking + tensor,32.0,8,2,0.25,439.5,0.6695147752761841
+all,structsplat_quadtree_wse_residual,SS qt-WSE + residual,22.0,8,8,1.0,110.625,0.1872950792312622
+all,structsplat_quadtree_wse_residual,SS qt-WSE + residual,24.0,8,8,1.0,253.25,0.3890502154827118
+all,structsplat_quadtree_wse_residual,SS qt-WSE + residual,26.0,8,4,0.5,218.25,0.3362334370613098
+all,structsplat_quadtree_wse_residual,SS qt-WSE + residual,28.0,8,2,0.25,123.5,0.2089860439300537
+all,structsplat_quadtree_wse_residual,SS qt-WSE + residual,30.0,8,2,0.25,239.5,0.3733004331588745
+all,structsplat_quadtree_wse_residual,SS qt-WSE + residual,32.0,8,2,0.25,395.5,0.5903931856155396
+all,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,22.0,8,8,1.0,118.875,0.20773321390151978
+all,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,24.0,8,8,1.0,260.375,0.4272138476371765
+all,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,26.0,8,4,0.5,214.75,0.3455083966255188
+all,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,28.0,8,2,0.25,133.5,0.2308577299118042
+all,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,30.0,8,2,0.25,279,0.47220802307128906
+all,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,32.0,8,2,0.25,441.5,0.7178337574005127
+all,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,22.0,8,8,1.0,103.125,0.17294266819953918
+all,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,24.0,8,6,0.75,173,0.27598341306050617
+all,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,26.0,8,4,0.5,203,0.32058268785476685
+all,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,28.0,8,2,0.25,116.5,0.19247543811798096
+all,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,30.0,8,2,0.25,218.5,0.36211705207824707
+all,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,32.0,8,2,0.25,377.5,0.5849807262420654
+all,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,22.0,8,8,1.0,102.75,0.17804250121116638
+all,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,24.0,8,8,1.0,255.125,0.394300639629364
+all,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,26.0,8,4,0.5,208.25,0.3157961964607239
+all,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,28.0,8,2,0.25,119.5,0.18680787086486816
+all,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,30.0,8,2,0.25,242,0.3722950220108032
+all,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,32.0,8,2,0.25,425.5,0.6562299728393555
+all,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,22.0,8,8,1.0,94.75,0.1671706736087799
+all,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,24.0,8,7,0.875,208.28571428571428,0.34020822388785227
+all,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,26.0,8,4,0.5,202,0.3236857056617737
+all,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,28.0,8,2,0.25,109.5,0.1978132724761963
+all,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,30.0,8,2,0.25,204.5,0.35056769847869873
+all,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,32.0,8,2,0.25,361.5,0.580901026725769
+all,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,22.0,8,8,1.0,97.75,0.1691553294658661
+all,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,24.0,8,8,1.0,249.125,0.38681718707084656
+all,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,26.0,8,4,0.5,214.5,0.34110909700393677
+all,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,28.0,8,2,0.25,125,0.2066965103149414
+all,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,30.0,8,2,0.25,253,0.39128410816192627
+all,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,32.0,8,2,0.25,426.5,0.6505582332611084
+all,floyd_steinberg_tensor,Floyd + tensor,22.0,8,8,1.0,129.5,0.20489808917045593
+all,floyd_steinberg_tensor,Floyd + tensor,24.0,8,6,0.75,200.33333333333334,0.3100906213124593
+all,floyd_steinberg_tensor,Floyd + tensor,26.0,8,4,0.5,255.5,0.3907078504562378
+all,floyd_steinberg_tensor,Floyd + tensor,28.0,8,2,0.25,161,0.26803386211395264
+all,floyd_steinberg_tensor,Floyd + tensor,30.0,8,2,0.25,289,0.460141658782959
+all,floyd_steinberg_tensor,Floyd + tensor,32.0,8,2,0.25,470.5,0.7259109020233154
+640,gaussianimage_fixed_full,GaussianImage fixed,22.0,8,7,0.875,86,0.23081820351736887
+640,gaussianimage_fixed_full,GaussianImage fixed,24.0,8,6,0.75,114.66666666666667,0.285828431447347
+640,gaussianimage_fixed_full,GaussianImage fixed,26.0,8,3,0.375,191,0.4998795986175537
+640,gaussianimage_fixed_full,GaussianImage fixed,28.0,8,2,0.25,92.5,0.15382027626037598
+640,gaussianimage_fixed_full,GaussianImage fixed,30.0,8,2,0.25,214,0.336910605430603
+640,gaussianimage_fixed_full,GaussianImage fixed,32.0,8,0,0.0,,
+640,gaussianimage_plus_residual,GaussianImage++ residual,22.0,8,8,1.0,153.125,0.2625519037246704
+640,gaussianimage_plus_residual,GaussianImage++ residual,24.0,8,8,1.0,284.625,0.44659483432769775
+640,gaussianimage_plus_residual,GaussianImage++ residual,26.0,8,4,0.5,279.5,0.4431968927383423
+640,gaussianimage_plus_residual,GaussianImage++ residual,28.0,8,2,0.25,194.5,0.29589736461639404
+640,gaussianimage_plus_residual,GaussianImage++ residual,30.0,8,2,0.25,287,0.4437088966369629
+640,gaussianimage_plus_residual,GaussianImage++ residual,32.0,8,2,0.25,411,0.627885103225708
+640,image_gs_residual,Image-GS residual,22.0,8,8,1.0,143.75,0.2275846302509308
+640,image_gs_residual,Image-GS residual,24.0,8,8,1.0,272.375,0.4238474667072296
+640,image_gs_residual,Image-GS residual,26.0,8,4,0.5,241.75,0.37715351581573486
+640,image_gs_residual,Image-GS residual,28.0,8,2,0.25,148,0.22797679901123047
+640,image_gs_residual,Image-GS residual,30.0,8,2,0.25,272,0.41405463218688965
+640,image_gs_residual,Image-GS residual,32.0,8,2,0.25,392,0.6212016344070435
+640,structsplat_onedge_residual,SS on-edge + residual,22.0,8,8,1.0,106.625,0.17942598462104797
+640,structsplat_onedge_residual,SS on-edge + residual,24.0,8,8,1.0,252,0.3892277777194977
+640,structsplat_onedge_residual,SS on-edge + residual,26.0,8,4,0.5,211.25,0.3215498924255371
+640,structsplat_onedge_residual,SS on-edge + residual,28.0,8,2,0.25,120.5,0.18627548217773438
+640,structsplat_onedge_residual,SS on-edge + residual,30.0,8,2,0.25,237,0.37181735038757324
+640,structsplat_onedge_residual,SS on-edge + residual,32.0,8,2,0.25,388.5,0.5938841104507446
+640,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,22.0,8,8,1.0,113,0.19474828243255615
+640,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,24.0,8,8,1.0,263.125,0.43568819761276245
+640,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,26.0,8,4,0.5,220,0.3660566210746765
+640,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,28.0,8,2,0.25,136,0.23173773288726807
+640,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,30.0,8,2,0.25,263.5,0.4308236837387085
+640,structsplat_onedge_residual_relocate,SS on-edge + residual relocate,32.0,8,2,0.25,427,0.6893335580825806
+640,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,22.0,8,8,1.0,105.125,0.18396642804145813
+640,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,24.0,8,8,1.0,247.5,0.393327534198761
+640,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,26.0,8,4,0.5,202.75,0.32868123054504395
+640,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,28.0,8,2,0.25,117.5,0.19390201568603516
+640,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,30.0,8,2,0.25,217.5,0.345786452293396
+640,structsplat_onedge_residual_featurecap,SS on-edge + residual feature cap,32.0,8,2,0.25,376,0.5911468267440796
+640,structsplat_onedge_tensor,SS on-edge + tensor,22.0,8,8,1.0,98.25,0.17296475172042847
+640,structsplat_onedge_tensor,SS on-edge + tensor,24.0,8,8,1.0,253.875,0.3979199528694153
+640,structsplat_onedge_tensor,SS on-edge + tensor,26.0,8,4,0.5,219.5,0.3374779224395752
+640,structsplat_onedge_tensor,SS on-edge + tensor,28.0,8,2,0.25,112.5,0.1858224868774414
+640,structsplat_onedge_tensor,SS on-edge + tensor,30.0,8,2,0.25,232.5,0.3509066104888916
+640,structsplat_onedge_tensor,SS on-edge + tensor,32.0,8,2,0.25,439.5,0.6679302453994751
+640,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,22.0,8,8,1.0,91.875,0.1565263867378235
+640,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,24.0,8,8,1.0,228.25,0.3642989993095398
+640,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,26.0,8,4,0.5,192.5,0.3107273578643799
+640,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,28.0,8,2,0.25,107.5,0.1851041316986084
+640,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,30.0,8,2,0.25,196,0.29631471633911133
+640,structsplat_onedge_tensor_featurecap,SS on-edge + tensor feature cap,32.0,8,2,0.25,319.5,0.4803342819213867
+640,structsplat_flanking_tensor,SS flanking + tensor,22.0,8,8,1.0,99.25,0.1733030080795288
+640,structsplat_flanking_tensor,SS flanking + tensor,24.0,8,8,1.0,254.125,0.3932379186153412
+640,structsplat_flanking_tensor,SS flanking + tensor,26.0,8,4,0.5,211,0.3340027928352356
+640,structsplat_flanking_tensor,SS flanking + tensor,28.0,8,2,0.25,122,0.18919610977172852
+640,structsplat_flanking_tensor,SS flanking + tensor,30.0,8,2,0.25,248.5,0.3905303478240967
+640,structsplat_flanking_tensor,SS flanking + tensor,32.0,8,2,0.25,439.5,0.6695147752761841
+640,structsplat_quadtree_wse_residual,SS qt-WSE + residual,22.0,8,8,1.0,110.625,0.1872950792312622
+640,structsplat_quadtree_wse_residual,SS qt-WSE + residual,24.0,8,8,1.0,253.25,0.3890502154827118
+640,structsplat_quadtree_wse_residual,SS qt-WSE + residual,26.0,8,4,0.5,218.25,0.3362334370613098
+640,structsplat_quadtree_wse_residual,SS qt-WSE + residual,28.0,8,2,0.25,123.5,0.2089860439300537
+640,structsplat_quadtree_wse_residual,SS qt-WSE + residual,30.0,8,2,0.25,239.5,0.3733004331588745
+640,structsplat_quadtree_wse_residual,SS qt-WSE + residual,32.0,8,2,0.25,395.5,0.5903931856155396
+640,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,22.0,8,8,1.0,118.875,0.20773321390151978
+640,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,24.0,8,8,1.0,260.375,0.4272138476371765
+640,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,26.0,8,4,0.5,214.75,0.3455083966255188
+640,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,28.0,8,2,0.25,133.5,0.2308577299118042
+640,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,30.0,8,2,0.25,279,0.47220802307128906
+640,structsplat_quadtree_wse_residual_relocate,SS qt-WSE + residual relocate,32.0,8,2,0.25,441.5,0.7178337574005127
+640,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,22.0,8,8,1.0,103.125,0.17294266819953918
+640,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,24.0,8,6,0.75,173,0.27598341306050617
+640,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,26.0,8,4,0.5,203,0.32058268785476685
+640,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,28.0,8,2,0.25,116.5,0.19247543811798096
+640,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,30.0,8,2,0.25,218.5,0.36211705207824707
+640,structsplat_quadtree_wse_residual_featurecap,SS qt-WSE + residual feature cap,32.0,8,2,0.25,377.5,0.5849807262420654
+640,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,22.0,8,8,1.0,102.75,0.17804250121116638
+640,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,24.0,8,8,1.0,255.125,0.394300639629364
+640,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,26.0,8,4,0.5,208.25,0.3157961964607239
+640,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,28.0,8,2,0.25,119.5,0.18680787086486816
+640,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,30.0,8,2,0.25,242,0.3722950220108032
+640,structsplat_quadtree_wse_tensor,SS qt-WSE + tensor,32.0,8,2,0.25,425.5,0.6562299728393555
+640,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,22.0,8,8,1.0,94.75,0.1671706736087799
+640,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,24.0,8,7,0.875,208.28571428571428,0.34020822388785227
+640,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,26.0,8,4,0.5,202,0.3236857056617737
+640,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,28.0,8,2,0.25,109.5,0.1978132724761963
+640,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,30.0,8,2,0.25,204.5,0.35056769847869873
+640,structsplat_quadtree_wse_tensor_featurecap,SS qt-WSE + tensor feature cap,32.0,8,2,0.25,361.5,0.580901026725769
+640,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,22.0,8,8,1.0,97.75,0.1691553294658661
+640,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,24.0,8,8,1.0,249.125,0.38681718707084656
+640,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,26.0,8,4,0.5,214.5,0.34110909700393677
+640,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,28.0,8,2,0.25,125,0.2066965103149414
+640,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,30.0,8,2,0.25,253,0.39128410816192627
+640,structsplat_quadtree_hybrid_tensor,SS qt-hybrid + tensor,32.0,8,2,0.25,426.5,0.6505582332611084
+640,floyd_steinberg_tensor,Floyd + tensor,22.0,8,8,1.0,129.5,0.20489808917045593
+640,floyd_steinberg_tensor,Floyd + tensor,24.0,8,6,0.75,200.33333333333334,0.3100906213124593
+640,floyd_steinberg_tensor,Floyd + tensor,26.0,8,4,0.5,255.5,0.3907078504562378
+640,floyd_steinberg_tensor,Floyd + tensor,28.0,8,2,0.25,161,0.26803386211395264
+640,floyd_steinberg_tensor,Floyd + tensor,30.0,8,2,0.25,289,0.460141658782959
+640,floyd_steinberg_tensor,Floyd + tensor,32.0,8,2,0.25,470.5,0.7259109020233154

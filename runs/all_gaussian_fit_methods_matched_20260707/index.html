@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Fair Density-Control Comparison</title>
+<style>
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;color:#111}
+h1{font-size:26px;margin:0 0 8px} h2{font-size:20px;margin:28px 0 10px}
+p{max-width:980px;line-height:1.45}.note{background:#f5f5f5;border-left:4px solid #666;padding:10px 12px;max-width:1040px}
+img{max-width:100%;height:auto;border:1px solid #ddd} figure{margin:18px 0 28px} figcaption{font-weight:650;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px;align-items:start}
+table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 7px;text-align:left}
+</style></head><body>
+<h1>Fair Density-Control Comparison</h1>
+<p class="note">Matched-policy benchmark: growth rows share the same initial count, final cap, growth waves, fitter, renderer, loss, target tracking, and iteration budget. External repos are represented by local analogues here; this is not a native external-pipeline benchmark.</p>
+<p class="note">Visual grids show each reconstruction row followed by an amplified absolute difference row: |target - reconstruction| x6, clipped for display.</p>
+<h2>Files</h2>
+<p><a href="summary.md">summary.md</a> · <a href="metrics.csv">metrics.csv</a> · <a href="metrics.json">metrics.json</a> · <a href="convergence_curves.csv">convergence_curves.csv</a> · <a href="target_hit_rates.csv">target_hit_rates.csv</a> · <a href="config.json">config.json</a></p>
+<h2>Methods</h2><table><tr><th>Method</th><th>Track</th></tr>
+<tr><td>GaussianImage fixed</td><td>fixed-full</td></tr>
+<tr><td>GaussianImage++ residual</td><td>repo-growth</td></tr>
+<tr><td>Image-GS residual</td><td>repo-growth</td></tr>
+<tr><td>SS on-edge + residual</td><td>same-growth</td></tr>
+<tr><td>SS on-edge + residual relocate</td><td>same-growth+relocate</td></tr>
+<tr><td>SS on-edge + residual feature cap</td><td>same-growth+feature-cap</td></tr>
+<tr><td>SS on-edge + tensor</td><td>tensor-growth</td></tr>
+<tr><td>SS on-edge + tensor feature cap</td><td>tensor-growth+feature-cap</td></tr>
+<tr><td>SS flanking + tensor</td><td>tensor-growth</td></tr>
+<tr><td>SS qt-WSE + residual</td><td>same-growth</td></tr>
+<tr><td>SS qt-WSE + residual relocate</td><td>same-growth+relocate</td></tr>
+<tr><td>SS qt-WSE + residual feature cap</td><td>same-growth+feature-cap</td></tr>
+<tr><td>SS qt-WSE + tensor</td><td>tensor-growth</td></tr>
+<tr><td>SS qt-WSE + tensor feature cap</td><td>tensor-growth+feature-cap</td></tr>
+<tr><td>SS qt-hybrid + tensor</td><td>tensor-growth</td></tr>
+<tr><td>Floyd + tensor</td><td>tensor-growth-control</td></tr>
+</table>
+<h2>Metric Diagrams</h2>
+<div class="grid">
+<figure><figcaption>Mean PSNR by budget</figcaption><a href="plots/mean_psnr_by_budget.png"><img src="plots/mean_psnr_by_budget.png" alt="Mean PSNR by budget"></a></figure>
+<figure><figcaption>Mean MS-SSIM by budget</figcaption><a href="plots/mean_ms_ssim_by_budget.png"><img src="plots/mean_ms_ssim_by_budget.png" alt="Mean MS-SSIM by budget"></a></figure>
+<figure><figcaption>Mean AUC PSNR by budget</figcaption><a href="plots/mean_auc_psnr_by_budget.png"><img src="plots/mean_auc_psnr_by_budget.png" alt="Mean AUC PSNR by budget"></a></figure>
+<figure><figcaption>Mean PSNR convergence</figcaption><a href="plots/mean_psnr_curve_by_budget.png"><img src="plots/mean_psnr_curve_by_budget.png" alt="Mean PSNR convergence"></a></figure>
+<figure><figcaption>Target-hit rates</figcaption><a href="plots/target_hit_rate_heatmap.png"><img src="plots/target_hit_rate_heatmap.png" alt="Target-hit rates"></a></figure>
+<figure><figcaption>Mean fit seconds by budget</figcaption><a href="plots/mean_fit_seconds_by_budget.png"><img src="plots/mean_fit_seconds_by_budget.png" alt="Mean fit seconds by budget"></a></figure>
+<figure><figcaption>Paired delta vs GaussianImage++</figcaption><a href="plots/paired_delta_vs_gaussianimage_plus.png"><img src="plots/paired_delta_vs_gaussianimage_plus.png" alt="Paired delta vs GaussianImage++"></a></figure>
+</div><h2>Visual Grids By Image</h2>
+<figure><figcaption>COCO_train2014_000000000009_seed0_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000009_seed0_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000009_seed0_budgets_methods.png" alt="COCO_train2014_000000000009_seed0_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000009_seed1_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000009_seed1_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000009_seed1_budgets_methods.png" alt="COCO_train2014_000000000009_seed1_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000025_seed0_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000025_seed0_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000025_seed0_budgets_methods.png" alt="COCO_train2014_000000000025_seed0_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000025_seed1_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000025_seed1_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000025_seed1_budgets_methods.png" alt="COCO_train2014_000000000025_seed1_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000030_seed0_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000030_seed0_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000030_seed0_budgets_methods.png" alt="COCO_train2014_000000000030_seed0_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000030_seed1_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000030_seed1_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000030_seed1_budgets_methods.png" alt="COCO_train2014_000000000030_seed1_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000034_seed0_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000034_seed0_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000034_seed0_budgets_methods.png" alt="COCO_train2014_000000000034_seed0_budgets_methods"></a></figure>
+<figure><figcaption>COCO_train2014_000000000034_seed1_budgets_methods</figcaption><a href="grids/by_image/COCO_train2014_000000000034_seed1_budgets_methods.png"><img src="grids/by_image/COCO_train2014_000000000034_seed1_budgets_methods.png" alt="COCO_train2014_000000000034_seed1_budgets_methods"></a></figure>
+<h2>Visual Grids By Budget</h2>
+<figure><figcaption>budget_640_seed0_images_methods</figcaption><a href="grids/by_budget/budget_640_seed0_images_methods.png"><img src="grids/by_budget/budget_640_seed0_images_methods.png" alt="budget_640_seed0_images_methods"></a></figure>
+<figure><figcaption>budget_640_seed1_images_methods</figcaption><a href="grids/by_budget/budget_640_seed1_images_methods.png"><img src="grids/by_budget/budget_640_seed1_images_methods.png" alt="budget_640_seed1_images_methods"></a></figure>
+</body></html>

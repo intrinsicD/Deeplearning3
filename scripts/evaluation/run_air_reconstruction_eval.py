@@ -39,11 +39,15 @@ def _metrics(render: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
     target = target.float()
     mse = F.mse_loss(render, target).item()
     psnr = 10.0 * math.log10(1.0 / max(mse, 1e-12))
+    try:
+        ms_ssim_value = ms_ssim(render, target, data_range=1, size_average=True).item()
+    except AssertionError:
+        ms_ssim_value = float("nan")
     return {
         "l1": F.l1_loss(render, target).item(),
         "mse": mse,
         "psnr": psnr,
-        "ms_ssim": ms_ssim(render, target, data_range=1, size_average=True).item(),
+        "ms_ssim": ms_ssim_value,
     }
 
 
@@ -178,7 +182,7 @@ def main() -> None:
         valid = [r[key] for r in rows if r.get(key)]
         if valid:
             summary[f"{key}_average"] = {
-                metric: float(np.mean([r[metric] for r in valid]))
+                metric: float(np.nanmean([r[metric] for r in valid]))
                 for metric in ("l1", "mse", "psnr", "ms_ssim")
             }
     summary["average_gaussian_num"] = float(np.mean([r["gaussian_num"] for r in rows]))

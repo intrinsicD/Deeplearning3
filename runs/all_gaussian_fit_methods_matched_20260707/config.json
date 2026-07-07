@@ -1,0 +1,68 @@
+{
+  "resolved": {
+    "images": [
+      "tests/test_images/COCO_train2014_000000000009.jpg",
+      "tests/test_images/COCO_train2014_000000000025.jpg",
+      "tests/test_images/COCO_train2014_000000000030.jpg",
+      "tests/test_images/COCO_train2014_000000000034.jpg"
+    ],
+    "budgets": [
+      640
+    ],
+    "methods": [
+      "gaussianimage_fixed_full",
+      "gaussianimage_plus_residual",
+      "image_gs_residual",
+      "structsplat_onedge_residual",
+      "structsplat_onedge_residual_relocate",
+      "structsplat_onedge_residual_featurecap",
+      "structsplat_onedge_tensor",
+      "structsplat_onedge_tensor_featurecap",
+      "structsplat_flanking_tensor",
+      "structsplat_quadtree_wse_residual",
+      "structsplat_quadtree_wse_residual_relocate",
+      "structsplat_quadtree_wse_residual_featurecap",
+      "structsplat_quadtree_wse_tensor",
+      "structsplat_quadtree_wse_tensor_featurecap",
+      "structsplat_quadtree_hybrid_tensor",
+      "floyd_steinberg_tensor"
+    ],
+    "seeds": [
+      0,
+      1
+    ],
+    "start_fraction": 0.5,
+    "growth_waves": 5,
+    "max_side": 160,
+    "iters": 500,
+    "target_psnr": 30.0,
+    "target_psnrs": [
+      22.0,
+      24.0,
+      26.0,
+      28.0,
+      30.0,
+      32.0
+    ],
+    "renderer": "cuda",
+    "support_fade": false,
+    "render_chunk": 4096,
+    "pixel_loss": "l1",
+    "ssim_weight": 0.3,
+    "lpips": false,
+    "relocate_fraction": 0.25,
+    "relocate_downsample": 4,
+    "feature_cap": 12.0,
+    "feature_cap_reference_side": 160.0,
+    "resume": false,
+    "max_new_cells": null
+  },
+  "device": "cuda",
+  "versions": {
+    "torch": "2.7.0+cu126",
+    "torch_cuda": "12.6",
+    "cuda_available": true,
+    "numpy": "2.2.4",
+    "structsplat": "0.1.0"
+  }
+}
