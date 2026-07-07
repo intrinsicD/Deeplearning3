@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import abc
-from typing import Dict, Optional
+from contextlib import nullcontext
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -97,6 +98,148 @@ class AudioSubEncoder(ModalitySubEncoder):
                 "Set encoder_kwargs['audio_channels'] to match your audio tensor."
             )
         return self.proj(self.conv(x).flatten(1))
+
+
+def _load_transformers_backbone(model_name: str) -> nn.Module:
+    try:
+        from transformers import AutoModel  # type: ignore
+    except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "Pretrained encoders require transformers when no backbone module "
+            "is injected. Install transformers or pass a backbone instance."
+        ) from exc
+    return AutoModel.from_pretrained(model_name)
+
+
+def _first_tensor(output: Any) -> torch.Tensor:
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, Dict):
+        for key in ("pooler_output", "last_hidden_state", "logits"):
+            value = output.get(key)
+            if isinstance(value, torch.Tensor):
+                return value
+    for attr in ("pooler_output", "last_hidden_state", "logits"):
+        value = getattr(output, attr, None)
+        if isinstance(value, torch.Tensor):
+            return value
+    if isinstance(output, (tuple, list)):
+        for value in output:
+            if isinstance(value, torch.Tensor):
+                return value
+    raise TypeError(f"Could not extract a tensor from backbone output {type(output)!r}")
+
+
+class PretrainedVisionEncoder(ModalitySubEncoder):
+    """Wrap a frozen or trainable vision backbone as a modality sub-encoder."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        model_name: str | None = None,
+        backbone: nn.Module | None = None,
+        output_dim: int | None = None,
+        freeze: bool = True,
+        normalize: bool = True,
+    ) -> None:
+        super().__init__()
+        if backbone is None:
+            if model_name is None:
+                raise ValueError("PretrainedVisionEncoder requires model_name or backbone.")
+            backbone = _load_transformers_backbone(model_name)
+        self.backbone = backbone
+        self.freeze = freeze
+        self.normalize = normalize
+        if freeze:
+            self.backbone.eval()
+            for param in self.backbone.parameters():
+                param.requires_grad_(False)
+        if output_dim is None:
+            cfg = getattr(self.backbone, "config", None)
+            output_dim = getattr(cfg, "hidden_size", None)
+        self.proj = (
+            nn.Sequential(nn.LazyLinear(hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim))
+            if output_dim is None
+            else MLP([int(output_dim), hidden_dim, hidden_dim])
+        )
+        self.register_buffer("image_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("image_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
+
+    def _forward_backbone(self, x: torch.Tensor) -> Any:
+        ctx = torch.no_grad() if self.freeze else nullcontext()
+        with ctx:
+            try:
+                return self.backbone(pixel_values=x)
+            except TypeError:
+                return self.backbone(x)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"PretrainedVisionEncoder expects [B, C, H, W], got {tuple(x.shape)}")
+        if self.normalize and x.shape[1] == 3:
+            x = (x - self.image_mean.to(device=x.device, dtype=x.dtype)) / self.image_std.to(device=x.device, dtype=x.dtype)
+        feat = _first_tensor(self._forward_backbone(x))
+        if feat.ndim == 4:
+            feat = feat.mean(dim=(-2, -1))
+        elif feat.ndim == 3:
+            feat = feat[:, 0]
+        elif feat.ndim > 2:
+            feat = feat.flatten(1)
+        return self.proj(feat)
+
+
+class PretrainedTextEncoder(ModalitySubEncoder):
+    """Wrap a token-level language backbone as a modality sub-encoder."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        model_name: str | None = None,
+        backbone: nn.Module | None = None,
+        output_dim: int | None = None,
+        freeze: bool = True,
+    ) -> None:
+        super().__init__()
+        if backbone is None:
+            if model_name is None:
+                raise ValueError("PretrainedTextEncoder requires model_name or backbone.")
+            backbone = _load_transformers_backbone(model_name)
+        self.backbone = backbone
+        self.freeze = freeze
+        if freeze:
+            self.backbone.eval()
+            for param in self.backbone.parameters():
+                param.requires_grad_(False)
+        if output_dim is None:
+            cfg = getattr(self.backbone, "config", None)
+            output_dim = getattr(cfg, "hidden_size", None)
+        self.proj = (
+            nn.Sequential(nn.LazyLinear(hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim))
+            if output_dim is None
+            else MLP([int(output_dim), hidden_dim, hidden_dim])
+        )
+
+    def _forward_backbone(self, x: torch.Tensor, mask: Optional[torch.Tensor]) -> Any:
+        ctx = torch.no_grad() if self.freeze else nullcontext()
+        with ctx:
+            try:
+                return self.backbone(input_ids=x, attention_mask=mask)
+            except TypeError:
+                return self.backbone(x, attention_mask=mask)
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError(f"PretrainedTextEncoder expects token ids [B, T], got {tuple(x.shape)}")
+        feat = _first_tensor(self._forward_backbone(x, mask))
+        if feat.ndim == 3:
+            if mask is not None:
+                mask_f = mask.to(device=feat.device, dtype=feat.dtype).unsqueeze(-1)
+                feat = (feat * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp_min(1.0)
+            else:
+                feat = feat[:, 0]
+        elif feat.ndim > 2:
+            feat = feat.flatten(1)
+        return self.proj(feat)
 
 
 class SlotAttentionBlock(nn.Module):
@@ -227,6 +370,55 @@ class SimpleMultimodalEncoder(IEncoder):
         fused = self.fuse_proj(self.fuse_norm(fused))
         per_modality["fused"] = fused
         return per_modality
+
+
+@ENCODERS.register("pretrained_multimodal")
+class PretrainedMultimodalEncoder(SimpleMultimodalEncoder):
+    """Simple multimodal fusion with optional pretrained text/image backbones."""
+
+    def __init__(
+        self,
+        text_vocab_size: int = 32000,
+        text_embed_dim: int = 256,
+        vector_input_dim: int = 128,
+        image_channels: int = 3,
+        audio_channels: int = 1,
+        hidden_dim: int = 256,
+        image_model_name: str | None = None,
+        text_model_name: str | None = None,
+        image_backbone: nn.Module | None = None,
+        text_backbone: nn.Module | None = None,
+        image_output_dim: int | None = None,
+        text_output_dim: int | None = None,
+        freeze_image: bool = True,
+        freeze_text: bool = True,
+        normalize_images: bool = True,
+    ) -> None:
+        super().__init__(
+            text_vocab_size=text_vocab_size,
+            text_embed_dim=text_embed_dim,
+            vector_input_dim=vector_input_dim,
+            image_channels=image_channels,
+            audio_channels=audio_channels,
+            hidden_dim=hidden_dim,
+        )
+        if image_model_name is not None or image_backbone is not None:
+            self.sub_encoders["image"] = PretrainedVisionEncoder(
+                hidden_dim=hidden_dim,
+                model_name=image_model_name,
+                backbone=image_backbone,
+                output_dim=image_output_dim,
+                freeze=freeze_image,
+                normalize=normalize_images,
+            )
+        if text_model_name is not None or text_backbone is not None:
+            self.sub_encoders["text"] = PretrainedTextEncoder(
+                hidden_dim=hidden_dim,
+                model_name=text_model_name,
+                backbone=text_backbone,
+                output_dim=text_output_dim,
+                freeze=freeze_text,
+            )
 
 
 class TextTransformerSubEncoder(ModalitySubEncoder):

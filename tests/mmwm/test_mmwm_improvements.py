@@ -5,6 +5,7 @@ import tempfile
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from MMWM.config import ModelConfig, build_model
 from MMWM.containers import LatentState, MemoryState, ModelOutput, ObservationPacket
@@ -27,6 +28,7 @@ from MMWM.evaluation import (
     LatentPredictionMetrics,
     ReconstructionMetrics,
 )
+from MMWM.encoders import PretrainedMultimodalEncoder, PretrainedTextEncoder, PretrainedVisionEncoder
 from MMWM.losses import ContrastiveAlignmentLoss, WorldModelLoss
 from MMWM.trainer import Trainer, build_lr_scheduler
 
@@ -1056,3 +1058,75 @@ def test_gridworld_smoke_train_checkpoint_load_and_rollout() -> None:
     assert metrics["loaded_global_step"] == 40.0
     assert metrics["rollout_horizon"] == 4.0
     assert metrics["rollout_mean_mse"] >= 0.0
+
+
+class _FakeBackboneOutput:
+    def __init__(self, last_hidden_state: torch.Tensor) -> None:
+        self.last_hidden_state = last_hidden_state
+
+
+class _FakeVisionBackbone(nn.Module):
+    def __init__(self, output_dim: int = 6) -> None:
+        super().__init__()
+        self.proj = nn.Linear(3, output_dim)
+
+    def forward(self, pixel_values: torch.Tensor) -> _FakeBackboneOutput:
+        pooled = pixel_values.mean(dim=(-2, -1))
+        tokens = self.proj(pooled).unsqueeze(1).repeat(1, 2, 1)
+        return _FakeBackboneOutput(tokens)
+
+
+class _FakeTextBackbone(nn.Module):
+    def __init__(self, vocab_size: int = 32, output_dim: int = 6) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, output_dim)
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> _FakeBackboneOutput:
+        return _FakeBackboneOutput(self.embedding(input_ids))
+
+
+def test_pretrained_vision_encoder_wraps_frozen_backbone() -> None:
+    backbone = _FakeVisionBackbone(output_dim=6)
+    encoder = PretrainedVisionEncoder(hidden_dim=8, backbone=backbone, output_dim=6, freeze=True, normalize=False)
+    out = encoder(torch.randn(2, 3, 8, 8))
+
+    assert out.shape == (2, 8)
+    assert all(not p.requires_grad for p in backbone.parameters())
+
+
+def test_pretrained_text_encoder_pools_with_attention_mask() -> None:
+    backbone = _FakeTextBackbone(output_dim=6)
+    encoder = PretrainedTextEncoder(hidden_dim=8, backbone=backbone, output_dim=6, freeze=True)
+    tokens = torch.tensor([[1, 2, 3], [4, 5, 0]])
+    mask = torch.tensor([[1, 1, 1], [1, 1, 0]])
+    out = encoder(tokens, mask=mask)
+
+    assert out.shape == (2, 8)
+    assert all(not p.requires_grad for p in backbone.parameters())
+
+
+def test_pretrained_multimodal_encoder_builds_in_model() -> None:
+    cfg = _small_model_cfg()
+    cfg.encoder_name = "pretrained_multimodal"
+    cfg.encoder_kwargs = {
+        "text_vocab_size": 32,
+        "text_embed_dim": 16,
+        "vector_input_dim": 16,
+        "image_channels": 3,
+        "hidden_dim": 32,
+        "text_backbone": _FakeTextBackbone(output_dim=6),
+        "image_backbone": _FakeVisionBackbone(output_dim=6),
+        "text_output_dim": 6,
+        "image_output_dim": 6,
+        "normalize_images": False,
+    }
+    model = build_model(cfg)
+    packet = ObservationPacket(modalities={
+        "text": torch.randint(0, 32, (2, 5)),
+        "vector": torch.randn(2, 16),
+        "image": torch.randn(2, 3, 8, 8),
+    })
+    out = model(packet, torch.randn(2, 8), obs_tp1=packet)
+
+    assert out.predicted_next_latent.z_sem.shape == (2, 16)
+    assert isinstance(model.encoder, PretrainedMultimodalEncoder)
